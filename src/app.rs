@@ -755,10 +755,7 @@ impl App {
         let widgets_menu = widgets::KEYS
             .iter()
             .enumerate()
-            .filter_map(|(n, key)| {
-                let kind = widgets::create(key, &self.sh.cfg, &self.sh.cache)?;
-                Some(MenuItem::Check(kind.title().into(), self.find(key).is_some(), M_WIDGET + n as u32))
-            })
+            .map(|(n, key)| MenuItem::Check(widgets::title(key).into(), self.find(key).is_some(), M_WIDGET + n as u32))
             .collect();
         let mut entries = vec![
             MenuItem::Sub("Widgets".into(), widgets_menu),

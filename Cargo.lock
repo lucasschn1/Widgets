@@ -473,6 +473,7 @@ dependencies = [
  "serde_json",
  "ureq",
  "windows",
+ "windows-future",
  "windows-numerics",
 ]
 

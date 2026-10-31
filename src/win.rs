@@ -338,3 +338,36 @@ pub fn clock_at(epoch: f64) -> String {
     let secs = (t.hour as i64 * 3600 + t.minute as i64 * 60 + t.second as i64 + delta.round() as i64).rem_euclid(86400);
     format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
 }
+
+/// Primeira janela visível cujo título contém `part` (sem diferenciar maiúsculas).
+pub fn find_window(part: &str) -> Option<HWND> {
+    unsafe extern "system" fn check(hwnd: HWND, data: LPARAM) -> BOOL {
+        let (part, found) = unsafe { &mut *(data.0 as *mut (String, Option<HWND>)) };
+        unsafe {
+            if IsWindowVisible(hwnd).as_bool() {
+                let mut buf = [0u16; 512];
+                let n = GetWindowTextW(hwnd, &mut buf);
+                let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]).to_lowercase();
+                if title.contains(part.as_str()) {
+                    *found = Some(hwnd);
+                    return false.into();
+                }
+            }
+        }
+        true.into()
+    }
+    let mut data = (part.to_lowercase(), None);
+    unsafe {
+        let _ = EnumWindows(Some(check), LPARAM(&mut data as *mut _ as isize));
+    }
+    data.1
+}
+
+pub fn bring_to_front(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+}

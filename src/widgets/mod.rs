@@ -4,6 +4,8 @@
 //! Para criar um widget novo: um módulo aqui com um tipo que implemente `Kind`, e uma linha em
 //! `create` e em `KEYS`.
 
+pub mod github;
+pub mod media;
 pub mod pomodoro;
 pub mod system;
 
@@ -17,10 +19,23 @@ use crate::gfx::Canvas;
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
 pub const KEYS: &[&str] = &["sistema", "midia", "github", "pomodoro"];
 
+/// Nome do widget `key` (sem criar o widget).
+pub fn title(key: &str) -> &'static str {
+    match key {
+        "sistema" => "Clima e Sistema",
+        "midia" => "Tocando agora",
+        "github" => "GitHub",
+        "pomodoro" => "Pomodoro",
+        _ => "Widget",
+    }
+}
+
 /// Cria o widget `key` (None para os que ainda não existem nesta versão).
 pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
     match key {
         "sistema" => Some(Box::new(system::System::new(cfg, cache))),
+        "midia" => Some(Box::new(media::Media::new(cfg))),
+        "github" => Some(Box::new(github::GitHub::new(cfg, cache))),
         "pomodoro" => Some(Box::new(pomodoro::Pomodoro::new(cfg))),
         _ => None,
     }
@@ -166,6 +181,13 @@ pub trait Kind {
     fn layout(&self, mode: Mode) -> Layout;
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);
+    /// Camada redesenhada a cada quadro por cima do cartão pronto (animações leves); (ox, oy) é
+    /// onde fica o canto do cartão na tela de desenho.
+    fn overlay(&self, _c: &mut Canvas, _mode: Mode, _ox: f32, _oy: f32) {}
+    /// Quadros por segundo da camada animada (0: sem animação).
+    fn overlay_fps(&self) -> u32 {
+        0
+    }
     /// Ação (número) da área clicável em (x, y).
     fn hit(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<u32> {
         None

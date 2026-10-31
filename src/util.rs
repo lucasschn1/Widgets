@@ -42,7 +42,7 @@ pub fn time_ago(epoch: f64) -> String {
 }
 
 /// Diferença (segundos) entre UTC e o horário local.
-fn tz_offset() -> f64 {
+pub fn tz_offset() -> f64 {
     let t = win::local_time();
     let local_secs = t.hour as f64 * 3600.0 + t.minute as f64 * 60.0 + t.second as f64;
     let utc_secs = win::now().rem_euclid(86400.0);
@@ -104,11 +104,21 @@ pub fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
 }
 
 pub fn fetch_json_with(url: &str, headers: &[(&str, &str)]) -> Result<serde_json::Value, String> {
+    let (status, text) = fetch_text(url, headers)?;
+    if status >= 400 {
+        return Err(format!("HTTP {status}"));
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// Baixa uma página: (código HTTP, texto). Erros de rede viram Err.
+pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), String> {
     // TLS do próprio Windows (Schannel): executável menor e usa os certificados do sistema
     let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
         .tls_config(tls)
+        .http_status_as_error(false)
         .build()
         .new_agent();
     let mut req = agent.get(url).header("User-Agent", "desktop-widget");
@@ -116,8 +126,9 @@ pub fn fetch_json_with(url: &str, headers: &[(&str, &str)]) -> Result<serde_json
         req = req.header(*k, *v);
     }
     let mut resp = req.call().map_err(|e| e.to_string())?;
-    let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
-    serde_json::from_str(&text).map_err(|e| e.to_string())
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().with_config().limit(20 * 1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
+    Ok((status, text))
 }
 
 /// Codifica um texto para usar numa URL.

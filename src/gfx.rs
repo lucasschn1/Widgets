@@ -577,6 +577,33 @@ impl Canvas {
         with(|g| g.measure(text, face, px).1) / self.s
     }
 
+    /// Quebra o texto em até `max_lines` linhas de largura `max_w`; a última leva o resto
+    /// (e é cortada com "…" ao escrever).
+    pub fn wrap(&self, text: &str, face: Face, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let mut lines = Vec::new();
+        let mut current = String::new();
+        let mut i = 0;
+        while i < words.len() {
+            let trial = if current.is_empty() { words[i].to_string() } else { format!("{current} {}", words[i]) };
+            if current.is_empty() || self.text_width(&trial, face, size) <= max_w {
+                current = trial;
+                i += 1;
+                continue;
+            }
+            lines.push(std::mem::take(&mut current));
+            if lines.len() == max_lines - 1 {
+                current = words[i..].join(" ");
+                i = words.len();
+                break;
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
     /// Escreve um texto; (x, y) é o ponto de `anchor`. Corta com "…" se passar de `max_w`.
     /// Devolve a largura escrita (lógica).
     pub fn text(&mut self, x: f32, y: f32, text: &str, face: Face, size: f32, c: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
@@ -683,4 +710,34 @@ pub fn save_png(img: &Image, path: &std::path::Path) -> windows::core::Result<()
         frame.Commit()?;
         enc.Commit()
     })
+}
+
+/// Decodifica uma imagem que está na memória (ex.: a capa do disco vinda do Windows).
+pub fn decode_image(bytes: &[u8]) -> Option<Image> {
+    with(|g| unsafe {
+        let stream = g.wic.CreateStream().ok()?;
+        stream.InitializeFromMemory(bytes).ok()?;
+        let dec = g.wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+        let frame = dec.GetFrame(0).ok()?;
+        let conv = g.wic.CreateFormatConverter().ok()?;
+        conv.Initialize(&frame, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
+        let (mut w, mut h) = (0, 0);
+        conv.GetSize(&mut w, &mut h).ok()?;
+        let mut img = Image::new(w, h);
+        conv.CopyPixels(std::ptr::null(), w * 4, &mut img.px).ok()?;
+        Some(img)
+    })
+}
+
+/// Recorta o meio da imagem num quadrado e redimensiona para `px` (como o ImageOps.fit).
+pub fn fit_square(img: &Image, px: u32) -> Image {
+    let side = img.w.min(img.h).max(1);
+    let (x0, y0) = ((img.w - side) / 2, (img.h - side) / 2);
+    let mut square = Image::new(side, side);
+    for y in 0..side {
+        let s = (((y + y0) * img.w + x0) * 4) as usize;
+        let d = (y * side * 4) as usize;
+        square.px[d..d + side as usize * 4].copy_from_slice(&img.px[s..s + side as usize * 4]);
+    }
+    resize(&square, px, px)
 }

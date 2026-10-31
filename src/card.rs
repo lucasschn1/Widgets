@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HWND;
 
-use crate::backdrop::finish_glass;
 use crate::gfx::{Canvas, Image};
 use crate::shared::Shared;
 use crate::theme::*;
@@ -76,6 +75,8 @@ pub struct Card {
     pub stale: bool,
     pub close_hot: bool,
     pub status: Status,
+    /// quadros por segundo da camada animada do widget (0: parada)
+    pub fps: u32,
     loading_since: Instant,
     last_frame: Instant,
 }
@@ -106,6 +107,7 @@ impl Card {
             stale: false,
             close_hot: false,
             status: Status::default(),
+            fps: 0,
             loading_since: Instant::now(),
             last_frame: Instant::now(),
         }
@@ -203,12 +205,15 @@ impl Card {
     /// Redesenha o cartão com os dados atuais e mostra na tela.
     pub fn refresh(&mut self, sh: &Shared) {
         self.status = self.kind.status();
+        // na bateria, com a economia ligada, as animações contínuas param
+        self.fps = if sh.saving { 0 } else { self.kind.overlay_fps() };
         if sh.suspended() && self.content.is_some() {
             self.stale = true; // redesenha quando voltar a aparecer
             return;
         }
         self.stale = false;
         self.content = Some(self.render(self.mode, sh));
+        self.composed = None; // o vidro guardado tinha o conteúdo antigo dentro
         if self.anim.is_none() {
             self.present(sh, false);
         }
@@ -239,6 +244,9 @@ impl Card {
         let (w, h) = (glass.w + 2 * m as u32, glass.h + 2 * m as u32);
         let mut c = Canvas::new(w, h, self.s);
         c.image(glass, MARGIN, MARGIN);
+        if self.anim.is_none() {
+            self.kind.overlay(&mut c, self.mode, MARGIN, MARGIN);
+        }
         self.decorate(&mut c, sh);
         let img = c.finish();
         win::blit(self.hwnd, &img, move_win.then_some(self.pos), self.opacity(sh));
@@ -468,8 +476,18 @@ impl Card {
 
     /// Quando a próxima etapa de animação precisa acontecer.
     pub fn next_frame(&self) -> Option<Instant> {
-        let busy = self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.status.loading;
-        busy.then(|| self.last_frame + Duration::from_millis(if self.status.loading && !self.anim.is_some() && self.slide.is_none() && self.hover == self.hover_target { 33 } else { FRAME_MS }))
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target {
+            return Some(self.last_frame + Duration::from_millis(FRAME_MS));
+        }
+        let mut wait = None;
+        if self.status.loading {
+            wait = Some(33);
+        }
+        if self.fps > 0 {
+            let ms = 1000 / self.fps as u64;
+            wait = Some(wait.map_or(ms, |w: u64| w.min(ms)));
+        }
+        wait.map(|ms| self.last_frame + Duration::from_millis(ms))
     }
 
     /// Avança as animações. Devolve (terminou de redimensionar, terminou de deslizar).

@@ -73,6 +73,7 @@ fn main() {
     let mut app = app::App::new();
     let mut msg = MSG::default();
     loop {
+        let t0 = std::time::Instant::now();
         let wait = app.next_deadline().saturating_duration_since(std::time::Instant::now());
         let ms = (wait.as_millis() as u32).min(1000);
         unsafe {
@@ -93,5 +94,8 @@ fn main() {
         }
         app.after_events();
         app.run_timers();
+        if t0.elapsed() > std::time::Duration::from_millis(200) {
+            debug_log!("laço lento: {:?}", t0.elapsed());
+        }
     }
 }
