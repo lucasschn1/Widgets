@@ -12,6 +12,7 @@ use crate::card::{Act, Card, Press};
 use crate::config::{self, Get};
 use crate::events::{self, Cursor, Ev, MouseKind, CARD_CLASS};
 use crate::overlay::{GuideLines, Guides, Tooltip};
+use crate::popup::{GlassBar, GlassMenu, Part, Place};
 use crate::shared::Shared;
 use crate::theme::*;
 use crate::tray::{self, Tray, HOTKEY_PEEK, HOTKEY_POMODORO, NIN_BALLOONUSERCLICK};
@@ -31,7 +32,30 @@ const M_ARRANGE: u32 = 300_002;
 const M_LOCK: u32 = 300_003;
 const M_CLOSE: u32 = 300_004;
 const M_QUIT: u32 = 300_009;
+const M_EDIT: u32 = 300_010;
+const M_FOCUS_END: u32 = 300_011;
+const M_FOCUS: u32 = 300_020; // + minutos (0 = até desligar)
 const M_WIDGET: u32 = 300_100; // + índice em widgets::KEYS
+const M_LAYOUT: u32 = 301_000; // + índice do layout
+const M_LAYOUT_DEL: u32 = 302_000; // + índice do layout
+
+// botões das pílulas
+const B_UNDO: u32 = 1;
+const B_EDIT_ADD: u32 = 2;
+const B_EDIT_DONE: u32 = 3;
+
+const TOAST_SECONDS: f32 = 3.5;
+const TOAST_ACTION_SECONDS: f32 = 6.0;
+const SUCCESS: Rgba = Rgba::rgb(48, 209, 88);
+const WARNING: Rgba = Rgba::rgb(255, 184, 0);
+
+/// O que o botão "Desfazer" de um aviso desfaz.
+enum Undo {
+    /// reabre um widget fechado no mesmo lugar, devolvendo os vizinhos que subiram
+    Reopen { key: &'static str, pos: (i32, i32), mode: Mode, followers: Vec<(&'static str, (i32, i32))> },
+    /// volta um layout excluído
+    Layout { name: String, snapshot: Value },
+}
 
 pub struct App {
     sh: Shared,
@@ -54,6 +78,17 @@ pub struct App {
     next_alerts: Instant,
     next_watch: Instant,
     peek_seen: Instant,
+    menu: GlassMenu,
+    /// o atalho de "mostrar na frente" que deu para registrar
+    peek_hotkey: Option<String>,
+    toast: GlassBar,
+    toast_until: Option<Instant>,
+    toast_undo: Option<Undo>,
+    edit_bar: GlassBar,
+    /// modo foco: até quando (None dentro = até desligar)
+    focus_until: Option<Option<f64>>,
+    /// deslizes marcados para depois (ex.: depois de mudar de tamanho ao aplicar um layout)
+    later: Vec<(Instant, &'static str, (i32, i32))>,
     pub quit: bool,
 }
 
@@ -92,6 +127,14 @@ impl App {
             next_alerts: Instant::now() + ALERTS_EVERY,
             next_watch: Instant::now(),
             peek_seen: Instant::now(),
+            menu: GlassMenu::new(),
+            peek_hotkey: None,
+            toast: GlassBar::new(Place::Bottom),
+            toast_until: None,
+            toast_undo: None,
+            edit_bar: GlassBar::new(Place::Top),
+            focus_until: None,
+            later: Vec::new(),
             quit: false,
         };
         app.register_hotkeys();
@@ -111,11 +154,20 @@ impl App {
         let hwnd = self.tray.window();
         let wanted = config::setting_str(&self.sh.cfg, "atalho");
         let mut ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, &wanted);
+        let mut chosen = if ok { Some(wanted.clone()) } else { None };
         for alt in tray::FALLBACKS {
             if ok {
                 break;
             }
             ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, alt);
+            if ok {
+                chosen = Some(alt.to_string());
+            }
+        }
+        self.peek_hotkey = chosen;
+        if !wanted.is_empty() && self.peek_hotkey.as_deref() != Some(wanted.as_str()) {
+            let detail = format!("Atalho atual: {}", self.peek_hotkey.clone().unwrap_or_else(|| "nenhum".into()));
+            self.toast(&format!("{wanted} já é usado por outro programa"), Some(&detail), "atalhos", WARNING, None);
         }
         tray::register_hotkey(hwnd, HOTKEY_POMODORO, &config::setting_str(&self.sh.cfg, "atalho_pomodoro"));
     }
@@ -271,6 +323,11 @@ impl App {
     }
 
     pub fn set_visible(&mut self, key: &str, on: bool) -> bool {
+        self.set_visible_with(key, on, true, true)
+    }
+
+    /// `reflow`: os vizinhos de baixo sobem ao fechar; `place`: ao abrir, sai de cima dos outros.
+    fn set_visible_with(&mut self, key: &str, on: bool, reflow: bool, place: bool) -> bool {
         if !on && !self.tray.ok && self.cards.len() == 1 && self.find(key).is_some() {
             return false; // sem a bandeja, fechar o último widget encerraria o programa
         }
@@ -284,7 +341,10 @@ impl App {
                     let (w, h) = win::overlap(rect, o.card_rect());
                     j != i && w.min(h) > 0
                 });
-                if busy {
+                if self.sh.editing || self.sh.peeking {
+                    win::set_z(self.cards[i].hwnd, Z::Topmost);
+                }
+                if busy && place {
                     let lowest = (0..self.cards.len()).filter(|&j| j != i).max_by_key(|&j| self.cards[j].card_rect().3).unwrap();
                     let to = self.cards[i].below(&self.cards[lowest]);
                     self.cards[i].slide_to(to, ANIM_MS, &self.sh);
@@ -293,7 +353,7 @@ impl App {
         } else if !on {
             if let Some(i) = self.find(key) {
                 // os widgets encaixados embaixo sobem para ocupar o lugar
-                let followers = self.stack_below(i, None);
+                let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
                 let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.sh.backdrop_scale()).round() as i32;
                 let card = self.cards.remove(i);
                 self.tooltip.hide();
@@ -526,7 +586,7 @@ impl App {
             Act::Badge => self.badge_action(i),
             Act::Close => {
                 let key = self.cards[i].key();
-                self.set_visible(key, false);
+                self.close_widget(key);
                 return;
             }
             Act::Retry => self.with_kind(i, |k, ctx| k.retry(ctx)),
@@ -751,16 +811,45 @@ impl App {
 
     // ---------- menus ----------
 
+    fn layout_names(&self) -> Vec<String> {
+        self.sh.cfg["app"]["layouts"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Itens do menu que valem para todos os widgets (também é o menu da bandeja).
     fn common_entries(&self, with_close: bool) -> Vec<MenuItem> {
         let widgets_menu = widgets::KEYS
             .iter()
             .enumerate()
             .map(|(n, key)| MenuItem::Check(widgets::title(key).into(), self.find(key).is_some(), M_WIDGET + n as u32))
             .collect();
+        let names = self.layout_names();
+        let mut layouts: Vec<MenuItem> = names.iter().enumerate().map(|(n, name)| MenuItem::Cmd(name.clone(), M_LAYOUT + n as u32)).collect();
+        if !names.is_empty() {
+            layouts.push(MenuItem::Sep);
+            layouts.push(MenuItem::Sub(
+                "Excluir".into(),
+                names.iter().enumerate().map(|(n, name)| MenuItem::Cmd(name.clone(), M_LAYOUT_DEL + n as u32)).collect(),
+            ));
+        } else {
+            layouts.push(MenuItem::Cmd("Nenhum layout salvo".into(), 0));
+        }
+        let focus = match self.focus_until {
+            Some(until) => {
+                let when = until.map(|t| format!(" (até {})", win::clock_at(t))).unwrap_or_default();
+                vec![MenuItem::Cmd(format!("Sair do modo foco{when}"), M_FOCUS_END)]
+            }
+            None => [("30 minutos", 30), ("1 hora", 60), ("2 horas", 120), ("Até eu desligar", 0)]
+                .iter()
+                .map(|(label, minutes)| MenuItem::Cmd(label.to_string(), M_FOCUS + minutes))
+                .collect(),
+        };
         let mut entries = vec![
             MenuItem::Sub("Widgets".into(), widgets_menu),
+            MenuItem::Sub("Layouts".into(), layouts),
             MenuItem::Sep,
-            MenuItem::Cmd("Mostrar na frente".into(), M_PEEK),
+            MenuItem::Cmd((if self.sh.editing { "Concluir edição" } else { "Editar widgets" }).into(), M_EDIT),
+            MenuItem::Hint("Mostrar na frente".into(), M_PEEK, self.peek_hotkey.clone().unwrap_or_default()),
+            MenuItem::Sub("Modo foco".into(), focus),
             MenuItem::Cmd("Organizar widgets".into(), M_ARRANGE),
             MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK),
             MenuItem::Sep,
@@ -796,12 +885,32 @@ impl App {
         }
         items.extend(self.common_entries(card.is_some()));
         let (x, y) = win::pointer();
-        let Some(id) = tray::popup(self.tray.window(), &items, x, y) else { return };
-        self.menu_command(id, card);
+        let context = card.map(|i| self.cards[i].key());
+        self.menu.popup(items, x, y, context);
     }
 
     fn menu_command(&mut self, id: u32, card: Option<usize>) {
         match id {
+            0 => {}
+            M_EDIT => {
+                if self.sh.editing {
+                    self.end_edit();
+                } else {
+                    self.start_edit();
+                }
+            }
+            M_FOCUS_END => self.end_focus(),
+            id if (M_FOCUS..M_FOCUS + 1000).contains(&id) => self.start_focus(id - M_FOCUS),
+            id if (M_LAYOUT..M_LAYOUT + 1000).contains(&id) => {
+                if let Some(name) = self.layout_names().get((id - M_LAYOUT) as usize).cloned() {
+                    self.apply_layout(&name);
+                }
+            }
+            id if (M_LAYOUT_DEL..M_LAYOUT_DEL + 1000).contains(&id) => {
+                if let Some(name) = self.layout_names().get((id - M_LAYOUT_DEL) as usize).cloned() {
+                    self.delete_layout(&name);
+                }
+            }
             M_PEEK => self.toggle_peek(),
             M_ARRANGE => self.arrange(),
             M_LOCK => {
@@ -813,7 +922,7 @@ impl App {
             M_CLOSE => {
                 if let Some(i) = card {
                     let key = self.cards[i].key();
-                    self.set_visible(key, false);
+                    self.close_widget(key);
                 }
             }
             id if id >= M_WIDGET && id < M_WIDGET + 100 => {
@@ -836,10 +945,201 @@ impl App {
         }
     }
 
+    // ---------- avisos ----------
+
+    /// Aviso rápido na parte de baixo da tela, com um botão opcional (ex.: "Desfazer").
+    fn toast(&mut self, text: &str, detail: Option<&str>, icon: &'static str, color: Rgba, undo: Option<(&str, Undo)>) {
+        let mut parts = vec![Part::Icon(icon, color), Part::Text(text.into(), true)];
+        if let Some(d) = detail {
+            parts.push(Part::Muted(d.into()));
+        }
+        let seconds = if undo.is_some() { TOAST_ACTION_SECONDS } else { TOAST_SECONDS };
+        if let Some((label, action)) = undo {
+            parts.push(Part::Button(label.into(), B_UNDO, false));
+            self.toast_undo = Some(action);
+        } else {
+            self.toast_undo = None;
+        }
+        self.toast.show(parts, self.sh.animations);
+        self.toast_until = Some(Instant::now() + Duration::from_secs_f32(seconds));
+    }
+
+    fn run_undo(&mut self) {
+        let Some(undo) = self.toast_undo.take() else { return };
+        self.toast.hide(self.sh.animations);
+        self.toast_until = None;
+        match undo {
+            Undo::Reopen { key, pos, mode, followers } => {
+                if self.find(key).is_some() {
+                    return;
+                }
+                for (other, old) in followers {
+                    if let Some(j) = self.find(other) {
+                        self.cards[j].slide_to(old, ANIM_MS, &self.sh);
+                    }
+                }
+                let w = self.sh.cfg.obj_mut(key);
+                w.insert("x".into(), json!(pos.0));
+                w.insert("y".into(), json!(pos.1));
+                w.insert("tamanho".into(), json!(mode.code()));
+                self.set_visible_with(key, true, true, false);
+            }
+            Undo::Layout { name, snapshot } => {
+                self.sh.cfg.obj_mut("app").entry("layouts").or_insert(json!({}));
+                if let Some(l) = self.sh.cfg["app"]["layouts"].as_object_mut() {
+                    l.insert(name, snapshot);
+                }
+                self.sh.save();
+            }
+        }
+    }
+
+    /// Fecha um widget com aviso e "Desfazer" (que o devolve ao lugar, com os vizinhos).
+    fn close_widget(&mut self, key: &'static str) {
+        let Some(i) = self.find(key) else { return };
+        let followers: Vec<(&'static str, (i32, i32))> = self.stack_below(i, None).into_iter().map(|j| (self.cards[j].key(), self.cards[j].pos)).collect();
+        let pos = self.cards[i].pos;
+        let mode = if self.cards[i].temp { Mode::P } else { self.cards[i].mode };
+        if !self.set_visible(key, false) {
+            self.toast("Não dá para fechar o último widget sem o ícone na bandeja", None, "close", WARNING, None);
+            return;
+        }
+        let text = format!("{} fechado", widgets::title(key));
+        self.toast(&text, None, "close", WHITE, Some(("Desfazer", Undo::Reopen { key, pos, mode, followers })));
+    }
+
+    // ---------- layouts ----------
+
+    fn apply_layout(&mut self, name: &str) {
+        let Some(snapshot) = self.sh.cfg["app"]["layouts"].get(name).cloned() else { return };
+        let Some(map) = snapshot.as_object() else { return };
+        for (key, state) in map {
+            let Some(&key) = widgets::KEYS.iter().find(|k| **k == key.as_str()) else { continue };
+            if !state.bool_of("visible").unwrap_or(false) {
+                self.set_visible_with(key, false, false, true);
+                continue;
+            }
+            let (x, y) = (state.i64_of("x").unwrap_or(0) as i32, state.i64_of("y").unwrap_or(0) as i32);
+            let mode = state.str_of("tamanho").and_then(Mode::from_code).unwrap_or(Mode::G);
+            match self.find(key) {
+                None => {
+                    let w = self.sh.cfg.obj_mut(key);
+                    w.insert("x".into(), json!(x));
+                    w.insert("y".into(), json!(y));
+                    w.insert("tamanho".into(), json!(mode.code()));
+                    self.set_visible_with(key, true, true, false);
+                }
+                Some(i) => {
+                    if self.cards[i].temp {
+                        self.cards[i].temp = false;
+                        self.cards[i].mode = Mode::P;
+                    }
+                    if self.cards[i].mode != mode {
+                        self.resize_to(i, mode, false, false);
+                        self.later.push((Instant::now() + Duration::from_millis(ANIM_MS + 40), key, (x, y)));
+                    } else {
+                        self.cards[i].slide_to((x, y), ANIM_MS, &self.sh);
+                    }
+                }
+            }
+        }
+        self.toast(&format!("Layout \"{name}\" aplicado"), None, "check", SUCCESS, None);
+    }
+
+    fn delete_layout(&mut self, name: &str) {
+        let removed = self.sh.cfg["app"]["layouts"].as_object_mut().and_then(|l| l.remove(name));
+        self.sh.save();
+        if let Some(snapshot) = removed {
+            let undo = Undo::Layout { name: name.to_string(), snapshot };
+            self.toast(&format!("Layout \"{name}\" excluído"), None, "close", WHITE, Some(("Desfazer", undo)));
+        }
+    }
+
+    // ---------- modo edição ----------
+
+    /// Todos os widgets na frente, com "−" para fechar e o botão de tamanho sempre visível.
+    fn start_edit(&mut self) {
+        if self.sh.editing {
+            return;
+        }
+        if self.focus_until.is_some() {
+            self.end_focus();
+        }
+        self.end_peek();
+        self.sh.editing = true;
+        for c in &mut self.cards {
+            win::set_z(c.hwnd, Z::Topmost);
+            c.present(&self.sh, false);
+        }
+        self.edit_bar.show(
+            vec![
+                Part::Icon("edit", WHITE),
+                Part::Text("Editando widgets".into(), true),
+                Part::Muted("Arraste para mover  ·  −  fecha  ·  +  muda o tamanho".into()),
+                Part::Button("Adicionar widget".into(), B_EDIT_ADD, false),
+                Part::Button("Concluir".into(), B_EDIT_DONE, true),
+            ],
+            self.sh.animations,
+        );
+        self.edit_bar.focus();
+    }
+
+    fn end_edit(&mut self) {
+        if !self.sh.editing {
+            return;
+        }
+        self.sh.editing = false;
+        self.edit_bar.hide(self.sh.animations);
+        for i in 0..self.cards.len() {
+            win::set_z(self.cards[i].hwnd, Z::NoTopmost);
+            self.cards[i].close_hot = false;
+            self.send_to_back(i);
+            self.cards[i].present(&self.sh, false);
+        }
+    }
+
+    // ---------- modo foco ----------
+
+    /// Esconde os widgets por um tempo (ou até desligar), sem fechar nada.
+    fn start_focus(&mut self, minutes: u32) {
+        self.end_peek();
+        self.end_edit();
+        let until = (minutes > 0).then(|| win::now() + minutes as f64 * 60.0);
+        self.focus_until = Some(until);
+        self.sh.focus = true;
+        for c in &self.cards {
+            events::show(c.hwnd, false);
+        }
+        match until {
+            Some(t) => self.tray.set_tip(&format!("Modo foco até {}", win::clock_at(t))),
+            None => self.tray.set_tip("Modo foco ligado"),
+        }
+        self.toast("Modo foco ligado", Some("Os widgets voltam pelo ícone da bandeja"), "pin", Rgba::rgb(191, 90, 242), None);
+    }
+
+    fn end_focus(&mut self) {
+        if self.focus_until.take().is_none() {
+            return;
+        }
+        self.sh.focus = false;
+        self.tray.set_tip(tray::TIP);
+        for i in 0..self.cards.len() {
+            events::show(self.cards[i].hwnd, true);
+            self.send_to_back(i);
+        }
+        self.wake_all();
+    }
+
     // ---------- modos ----------
 
     /// Mostra os widgets por cima das janelas, até chamar de novo ou o mouse sair deles.
     pub fn toggle_peek(&mut self) {
+        if self.sh.editing {
+            return;
+        }
+        if self.focus_until.is_some() {
+            self.end_focus();
+        }
         if self.sh.peeking {
             self.end_peek();
             return;
@@ -901,6 +1201,11 @@ impl App {
             }
         };
         self.run_action(i, Act::Kind(widgets::pomodoro::TOGGLE));
+        if let Some(info) = self.cards[i].kind.status_line() {
+            let (title, detail, running) = info;
+            let color = if running { Rgba::rgb(255, 99, 88) } else { WHITE };
+            self.toast(&title, Some(&detail), "pomodoro", color, None);
+        }
     }
 
     fn wake_all(&mut self) {
@@ -1010,6 +1315,45 @@ impl App {
     pub fn handle(&mut self, ev: Ev) {
         match ev {
             Ev::Mouse { hwnd, kind, x, y, sx, sy } => {
+                if self.menu.owns(hwnd) {
+                    match kind {
+                        MouseKind::Move => self.menu.motion(hwnd, x, y),
+                        MouseKind::Up => {
+                            let context = self.menu.context;
+                            if let Some(id) = self.menu.click(hwnd, x, y) {
+                                let card = context.and_then(|k| self.find(k));
+                                self.menu_command(id, card);
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.toast.hwnd() == Some(hwnd) {
+                    match kind {
+                        MouseKind::Move => self.toast.motion(x, y),
+                        MouseKind::Leave => self.toast.leave(),
+                        MouseKind::Up if self.toast.click(x, y) == Some(B_UNDO) => self.run_undo(),
+                        _ => {}
+                    }
+                    return;
+                }
+                if self.edit_bar.hwnd() == Some(hwnd) {
+                    match kind {
+                        MouseKind::Move => self.edit_bar.motion(x, y),
+                        MouseKind::Leave => self.edit_bar.leave(),
+                        MouseKind::Up => match self.edit_bar.click(x, y) {
+                            Some(B_EDIT_DONE) => self.end_edit(),
+                            Some(B_EDIT_ADD) => {
+                                let items = self.common_entries(false).into_iter().take(1).collect();
+                                self.menu.popup(items, sx, sy, None);
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                    return;
+                }
                 let Some(i) = self.index(hwnd) else { return };
                 match kind {
                     MouseKind::Move => {
@@ -1025,6 +1369,17 @@ impl App {
                     MouseKind::Double => self.on_double(i, x, y),
                     MouseKind::Right => self.show_menu(Some(i)),
                     MouseKind::Leave => self.on_leave(i),
+                }
+            }
+            Ev::Key { hwnd, vk } => {
+                if self.menu.is_open() {
+                    let context = self.menu.context;
+                    if let Some(id) = self.menu.key(vk) {
+                        let card = context.and_then(|k| self.find(k));
+                        self.menu_command(id, card);
+                    }
+                } else if self.edit_bar.hwnd() == Some(hwnd) && vk == 0x1B {
+                    self.end_edit();
                 }
             }
             Ev::Wheel { hwnd, delta } => {
@@ -1043,7 +1398,8 @@ impl App {
             Ev::Hotkey(_) | Ev::Wake => {}
             Ev::TaskbarCreated => self.tray.add(),
             Ev::OtherInstance => {
-                if !self.sh.peeking {
+                self.toast("Os widgets já estão abertos", Some("Clique direito num widget ou no ícone da bandeja"), "widgets", ACCENT, None);
+                if !self.sh.peeking && !self.sh.editing {
                     self.toggle_peek();
                 }
             }
@@ -1065,6 +1421,16 @@ impl App {
         if let Some(t) = self.tooltip.next_due() {
             next = next.min(t);
         }
+        for t in [self.menu.next_due(), self.toast.next_frame(), self.edit_bar.next_frame(), self.toast_until].into_iter().flatten() {
+            next = next.min(t);
+        }
+        for (t, ..) in &self.later {
+            next = next.min(*t);
+        }
+        if let Some(Some(until)) = self.focus_until {
+            let secs = (until - win::now()).max(0.0);
+            next = next.min(Instant::now() + Duration::from_secs_f64(secs));
+        }
         if self.sh.peeking {
             next = next.min(Instant::now() + Duration::from_millis(250));
         }
@@ -1082,6 +1448,30 @@ impl App {
     pub fn run_timers(&mut self) {
         let now = Instant::now();
         self.tooltip.tick();
+        self.menu.watch();
+        self.toast.frame();
+        self.edit_bar.frame();
+        if self.toast_until.is_some_and(|t| now >= t) {
+            if self.toast.pointer_inside() {
+                self.toast_until = Some(now + Duration::from_millis(1500)); // o mouse está em cima: espera
+            } else {
+                self.toast_until = None;
+                self.toast_undo = None;
+                self.toast.hide(self.sh.animations);
+            }
+        }
+        if let Some(Some(until)) = self.focus_until {
+            if win::now() >= until {
+                self.end_focus();
+            }
+        }
+        let due: Vec<(&'static str, (i32, i32))> = self.later.iter().filter(|l| now >= l.0).map(|l| (l.1, l.2)).collect();
+        self.later.retain(|l| now < l.0);
+        for (key, to) in due {
+            if let Some(j) = self.find(key) {
+                self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+            }
+        }
         for i in 0..self.cards.len() {
             if self.cards[i].kind.next_tick().is_some_and(|t| now >= t) {
                 let was_loading = self.cards[i].status.loading;
@@ -1127,7 +1517,7 @@ impl App {
             }
         }
         if self.sh.peeking {
-            if self.cards.iter().any(|c| c.hover_target > 0.0) {
+            if self.cards.iter().any(|c| c.hover_target > 0.0) || self.menu.is_open() {
                 self.peek_seen = now;
             }
             if self.peek_seen.elapsed() > Duration::from_millis(PEEK_IDLE_MS) {

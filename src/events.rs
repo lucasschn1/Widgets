@@ -32,6 +32,8 @@ pub enum Ev {
     /// (x, y) na janela e (sx, sy) na tela, calculado na hora em que o Windows entregou a mensagem
     Mouse { hwnd: isize, kind: MouseKind, x: i32, y: i32, sx: i32, sy: i32 },
     Wheel { hwnd: isize, delta: i32 },
+    /// tecla numa janela pop-up (menu, barra de edição): código virtual
+    Key { hwnd: isize, vk: u32 },
     Tray(u32),
     Hotkey(i32),
     Wake,
@@ -160,6 +162,58 @@ unsafe extern "system" fn card_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+/// Janelas pop-up (menu de vidro, avisos, barra de edição): recebem mouse e teclado e podem
+/// ganhar o foco, para as setas, o Enter e o Esc funcionarem.
+unsafe extern "system" fn popup_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let id = hwnd.0 as isize;
+    let mouse = |kind| {
+        let (x, y) = lparam_xy(lp);
+        let mut pt = POINT { x, y };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
+        }
+        push(Ev::Mouse { hwnd: id, kind, x, y, sx: pt.x, sy: pt.y });
+    };
+    match msg {
+        WM_MOUSEMOVE => {
+            let new = TRACKING.with(|t| t.borrow_mut().insert(id));
+            if new {
+                let mut tme = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                unsafe {
+                    let _ = TrackMouseEvent(&mut tme);
+                }
+            }
+            mouse(MouseKind::Move);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            TRACKING.with(|t| t.borrow_mut().remove(&id));
+            push(Ev::Mouse { hwnd: id, kind: MouseKind::Leave, x: 0, y: 0, sx: 0, sy: 0 });
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            mouse(MouseKind::Down);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            mouse(MouseKind::Up);
+            LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            push(Ev::Key { hwnd: id, vk: wp.0 as u32 });
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let cursor = CURSORS.with(|c| c.borrow().get(&id).copied()).unwrap_or(Cursor::Arrow);
+            unsafe {
+                SetCursor(Some(load_cursor(cursor)));
+            }
+            LRESULT(1)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
+    }
+}
+
 unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
@@ -199,6 +253,7 @@ unsafe extern "system" fn message_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 
 pub const CARD_CLASS: PCWSTR = w!("DesktopWidgetsCard");
 pub const OVERLAY_CLASS: PCWSTR = w!("DesktopWidgetsOverlay");
+pub const POPUP_CLASS: PCWSTR = w!("DesktopWidgetsPopup");
 
 /// Nome da janela de mensagens: a segunda cópia do app a procura para pedir que esta se mostre.
 pub fn message_class() -> PCWSTR {
@@ -212,7 +267,8 @@ pub fn message_class() -> PCWSTR {
 pub fn register_classes() {
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
-        let classes: [(PCWSTR, WNDPROC, WNDCLASS_STYLES); 3] = [
+        let classes: [(PCWSTR, WNDPROC, WNDCLASS_STYLES); 4] = [
+            (POPUP_CLASS, WNDPROC::Some(popup_proc), WNDCLASS_STYLES(0)),
             (CARD_CLASS, WNDPROC::Some(card_proc), CS_DBLCLKS),
             (OVERLAY_CLASS, WNDPROC::Some(overlay_proc), WNDCLASS_STYLES(0)),
             (message_class(), WNDPROC::Some(message_proc), WNDCLASS_STYLES(0)),
@@ -241,6 +297,21 @@ pub fn create_layered(class: PCWSTR, click_through: bool) -> HWND {
         ex |= WS_EX_TRANSPARENT;
     }
     unsafe { CreateWindowExW(ex, class, w!("Widgets"), WS_POPUP, 0, 0, 1, 1, None, None, None, None).expect("CreateWindowExW") }
+}
+
+/// Janela pop-up transparente (menu, avisos): recebe cliques e pode ganhar o foco do teclado.
+pub fn create_popup() -> HWND {
+    let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+    unsafe { CreateWindowExW(ex, POPUP_CLASS, w!("Widgets"), WS_POPUP, 0, 0, 1, 1, None, None, None, None).expect("CreateWindowExW") }
+}
+
+/// Traz a janela para a frente com o foco (o Windows só deixa se o app estiver ativo, o que é
+/// o caso logo depois de um clique num widget ou na bandeja).
+pub fn focus(hwnd: HWND) {
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(hwnd));
+    }
 }
 
 pub fn create_message_window() -> HWND {

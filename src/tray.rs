@@ -9,7 +9,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::events::WM_TRAY;
 use crate::gfx::{wide, Canvas, Fill, Image};
 use crate::theme::Rgba;
-use crate::widgets::MenuItem;
 
 pub const TIP: &str = "Widgets da área de trabalho";
 pub const NIN_BALLOONUSERCLICK: u32 = 0x405;
@@ -198,45 +197,5 @@ pub fn register_hotkey(hwnd: HWND, id: i32, label: &str) -> bool {
     match parse_hotkey(label) {
         Some((mods, vk)) => unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_ok() },
         None => false,
-    }
-}
-
-// ---------- menu nativo ----------
-
-/// Mostra um menu do Windows no ponto (x, y) e devolve o número do item escolhido.
-pub fn popup(hwnd: HWND, items: &[MenuItem], x: i32, y: i32) -> Option<u32> {
-    unsafe fn build(items: &[MenuItem]) -> HMENU {
-        unsafe {
-            let menu = CreatePopupMenu().unwrap_or_default();
-            for item in items {
-                match item {
-                    MenuItem::Sep => {
-                        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-                    }
-                    MenuItem::Cmd(label, id) => {
-                        let w = wide(label);
-                        let _ = AppendMenuW(menu, MF_STRING, *id as usize, windows::core::PCWSTR(w.as_ptr()));
-                    }
-                    MenuItem::Check(label, on, id) | MenuItem::Radio(label, on, id) => {
-                        let w = wide(label);
-                        let flags = if *on { MF_STRING | MF_CHECKED } else { MF_STRING };
-                        let _ = AppendMenuW(menu, flags, *id as usize, windows::core::PCWSTR(w.as_ptr()));
-                    }
-                    MenuItem::Sub(label, sub) => {
-                        let w = wide(label);
-                        let _ = AppendMenuW(menu, MF_POPUP, build(sub).0 as usize, windows::core::PCWSTR(w.as_ptr()));
-                    }
-                }
-            }
-            menu
-        }
-    }
-    unsafe {
-        let menu = build(items);
-        let _ = SetForegroundWindow(hwnd); // senão o menu não fecha ao clicar fora
-        let id = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, x, y, hwnd, None);
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        (id.0 > 0).then_some(id.0 as u32)
     }
 }

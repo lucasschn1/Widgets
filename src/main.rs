@@ -30,6 +30,7 @@ mod events;
 mod gfx;
 mod imgops;
 mod overlay;
+mod popup;
 mod shared;
 mod theme;
 mod tray;

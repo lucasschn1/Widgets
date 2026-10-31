@@ -163,6 +163,8 @@ pub struct Status {
 #[derive(Clone)]
 pub enum MenuItem {
     Cmd(String, u32),
+    /// comando com o atalho de teclado escrito à direita
+    Hint(String, u32, String),
     Check(String, bool, u32),
     Radio(String, bool, u32),
     Sub(String, Vec<MenuItem>),
@@ -213,6 +215,10 @@ pub trait Kind {
     }
     fn status(&self) -> Status {
         Status::default()
+    }
+    /// Resumo para um aviso rápido: (título, detalhe, em andamento). Ex.: o atalho do Pomodoro.
+    fn status_line(&self) -> Option<(String, String, bool)> {
+        None
     }
     /// Clique no aviso de erro: tenta de novo.
     fn retry(&mut self, _ctx: &mut Ctx) {}
