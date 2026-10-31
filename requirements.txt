@@ -1,7 +1,0 @@
-# o que o app precisa para rodar pelo código (pythonw widget.pyw)
-pillow>=11.0
-winrt-runtime>=4.0.3
-winrt-Windows.Foundation>=4!10.0.28000
-winrt-Windows.Foundation.Collections>=4!10.0.28000
-winrt-Windows.Media.Control>=4!10.0.28000
-winrt-Windows.Storage.Streams>=4!10.0.28000

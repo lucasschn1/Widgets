@@ -1,0 +1,1177 @@
+//! O aplicativo: cria os widgets e coordena o mouse (arrastar, encaixar, reordenar), os menus,
+//! os modos (mostrar na frente), os atalhos, as notificações e as verificações periódicas.
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::PostQuitMessage;
+
+use crate::card::{Act, Card, Press};
+use crate::config::{self, Get};
+use crate::events::{self, Cursor, Ev, MouseKind, CARD_CLASS};
+use crate::overlay::{GuideLines, Guides, Tooltip};
+use crate::shared::Shared;
+use crate::theme::*;
+use crate::tray::{self, Tray, HOTKEY_PEEK, HOTKEY_POMODORO, NIN_BALLOONUSERCLICK};
+use crate::widgets::{self, Ctx, Kind, MenuItem, Mode, NotifyAction, Request};
+use crate::win::{self, Rect, Z};
+
+const BACKDROP_EVERY: Duration = Duration::from_secs(5);
+const FULLSCREEN_EVERY: Duration = Duration::from_secs(2);
+const POWER_EVERY: Duration = Duration::from_secs(30);
+const ALERTS_EVERY: Duration = Duration::from_secs(10);
+const WATCH_EVERY: Duration = Duration::from_millis(120);
+
+// itens do menu (os do widget usam os próprios números, abaixo de 100 000)
+const M_SIZE: u32 = 200_000; // + índice do tamanho
+const M_PEEK: u32 = 300_001;
+const M_ARRANGE: u32 = 300_002;
+const M_LOCK: u32 = 300_003;
+const M_CLOSE: u32 = 300_004;
+const M_QUIT: u32 = 300_009;
+const M_WIDGET: u32 = 300_100; // + índice em widgets::KEYS
+
+pub struct App {
+    sh: Shared,
+    cards: Vec<Card>,
+    tray: Tray,
+    tooltip: Tooltip,
+    guides: Guides,
+    /// enquanto arrasta: para onde cada outro widget vai se o arrastado sair do lugar
+    rest: HashMap<usize, (i32, i32)>,
+    origin: Rect,
+    preview: Option<(i32, i32)>,
+    move_dirty: Option<usize>,
+    notification_action: Option<(NotifyAction, Option<&'static str>)>,
+    notified: HashMap<&'static str, f64>,
+    high_since: HashMap<&'static str, f64>,
+    alert_cpu: (u64, u64),
+    next_backdrop: Instant,
+    next_fullscreen: Instant,
+    next_power: Instant,
+    next_alerts: Instant,
+    next_watch: Instant,
+    peek_seen: Instant,
+    pub quit: bool,
+}
+
+/// Acorda o laço principal (para as threads que buscam dados).
+pub fn wake() {
+    events::wake();
+}
+
+impl App {
+    pub fn new() -> App {
+        events::register_classes();
+        let msg_hwnd = events::create_message_window();
+        let cfg = config::load_config(widgets::KEYS);
+        let cache = config::load_cache();
+        let primary = win::work_areas()[0];
+        let s = win::scale_at(primary.0, primary.1);
+        let sh = Shared::new(cfg, cache, s);
+        let tray = Tray::new(msg_hwnd);
+        let mut app = App {
+            sh,
+            cards: Vec::new(),
+            tray,
+            tooltip: Tooltip::new(),
+            guides: Guides::new(),
+            rest: HashMap::new(),
+            origin: (0, 0, 0, 0),
+            preview: None,
+            move_dirty: None,
+            notification_action: None,
+            notified: HashMap::new(),
+            high_since: HashMap::new(),
+            alert_cpu: win::cpu_times(),
+            next_backdrop: Instant::now() + BACKDROP_EVERY,
+            next_fullscreen: Instant::now() + FULLSCREEN_EVERY,
+            next_power: Instant::now(),
+            next_alerts: Instant::now() + ALERTS_EVERY,
+            next_watch: Instant::now(),
+            peek_seen: Instant::now(),
+            quit: false,
+        };
+        app.register_hotkeys();
+        let visible: Vec<&str> =
+            widgets::KEYS.iter().copied().filter(|k| app.sh.cfg[*k].bool_of("visible").unwrap_or(true)).collect();
+        for key in visible {
+            app.create_card(key, true);
+        }
+        if app.cards.is_empty() && !app.tray.ok {
+            app.create_card("sistema", true); // sem bandeja, não pode ficar sem nada na tela
+        }
+        app.sh.save();
+        app
+    }
+
+    fn register_hotkeys(&mut self) {
+        let hwnd = self.tray.window();
+        let wanted = config::setting_str(&self.sh.cfg, "atalho");
+        let mut ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, &wanted);
+        for alt in tray::FALLBACKS {
+            if ok {
+                break;
+            }
+            ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, alt);
+        }
+        tray::register_hotkey(hwnd, HOTKEY_POMODORO, &config::setting_str(&self.sh.cfg, "atalho_pomodoro"));
+    }
+
+    // ---------- widgets ----------
+
+    fn index(&self, hwnd: isize) -> Option<usize> {
+        self.cards.iter().position(|c| c.hwnd.0 as isize == hwnd)
+    }
+
+    fn find(&self, key: &str) -> Option<usize> {
+        self.cards.iter().position(|c| c.key() == key)
+    }
+
+    /// Chama o widget `i` com acesso à configuração e trata o que ele pedir.
+    fn with_kind<R>(&mut self, i: usize, f: impl FnOnce(&mut dyn Kind, &mut Ctx) -> R) -> R {
+        let mut out = Vec::new();
+        let key = self.cards[i].key();
+        let r = {
+            let mut ctx = Ctx { cfg: &mut self.sh.cfg, cache: &mut self.sh.cache, key, out: &mut out };
+            f(self.cards[i].kind.as_mut(), &mut ctx)
+        };
+        self.requests(out, Some(i));
+        r
+    }
+
+    fn requests(&mut self, out: Vec<Request>, card: Option<usize>) {
+        for r in out {
+            match r {
+                Request::SaveConfig => self.sh.save(),
+                Request::SaveCache => self.sh.save_cache(),
+                Request::Open(target) => win::open_target(&target),
+                Request::Redraw => {
+                    if let Some(i) = card {
+                        self.cards[i].refresh(&self.sh);
+                    }
+                }
+                Request::Notify(kind, title, text, action) => {
+                    let key = card.map(|i| self.cards[i].key());
+                    self.notify(kind, &title, &text, 0.0, action.map(|a| (a, key)));
+                }
+            }
+        }
+    }
+
+    fn create_card(&mut self, key: &str, startup: bool) -> Option<usize> {
+        let kind = widgets::create(key, &self.sh.cfg, &self.sh.cache)?;
+        let wcfg = self.sh.cfg[key].clone();
+        let mode = wcfg
+            .str_of("tamanho")
+            .and_then(Mode::from_code)
+            .or_else(|| wcfg.bool_of("compact").map(|c| if c { Mode::P } else { Mode::G }))
+            .filter(|m| kind.sizes().contains(m))
+            .unwrap_or(kind.default_mode());
+        let hwnd = events::create_layered(CARD_CLASS, false);
+        let saved = match (wcfg.i64_of("x"), wcfg.i64_of("y")) {
+            (Some(x), Some(y)) => Some((x as i32, y as i32)),
+            _ => None,
+        };
+        let anchor = saved.unwrap_or_else(|| {
+            let a = win::work_areas()[0];
+            (a.2 - 200, a.1 + 100)
+        });
+        let s = win::scale_at(anchor.0 + 150, anchor.1 + 100);
+        let mut card = Card::new(kind, hwnd, mode, s);
+        card.pos = match saved {
+            Some(p) if card.visible_on_screen(p) => p,
+            _ => self.default_pos(&card),
+        };
+        // está num monitor com outra escala?
+        let (x0, y0, x1, y1) = card.card_rect();
+        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        if (scale - card.s).abs() > 0.01 {
+            card.set_scale(scale);
+        }
+        card.owner = win::pin_to_desktop(hwnd);
+        self.cards.push(card);
+        let i = self.cards.len() - 1;
+        self.with_kind(i, |k, ctx| k.start(ctx));
+        self.cards[i].refresh(&self.sh);
+        self.cards[i].present(&self.sh, true);
+        events::show(hwnd, !self.sh.focus);
+        self.send_to_back(i);
+        if !startup && (self.sh.peeking || self.sh.editing) {
+            win::set_z(hwnd, Z::Topmost);
+        }
+        Some(i)
+    }
+
+    /// Onde um widget novo aparece: embaixo do mais baixo, ou numa coluna nova à esquerda.
+    fn default_pos(&self, card: &Card) -> (i32, i32) {
+        let s = card.s;
+        let (w, h) = card.size();
+        let m = card.margin;
+        if self.cards.is_empty() {
+            let (_, top, right, _) = win::work_areas()[0];
+            let edge = (EDGE_GAP * s).round() as i32;
+            return (right - edge - (w - 2 * m) - m, top + edge - m);
+        }
+        let lowest = self.cards.iter().max_by_key(|c| c.card_rect().3).unwrap();
+        let (x, y) = card.below(lowest);
+        let (_, top, _, bottom) = win::area_for(lowest.card_rect());
+        if y + h - m <= bottom - (EDGE_GAP * s) as i32 {
+            return (x, y);
+        }
+        let left = self.cards.iter().map(|c| c.card_rect().0).min().unwrap();
+        (left - (WIDGET_GAP * s).round() as i32 - (w - 2 * m) - m, top + (EDGE_GAP * s).round() as i32 - m)
+    }
+
+    fn send_to_back(&self, i: usize) {
+        if !self.sh.peeking && !self.sh.editing {
+            win::set_z(self.cards[i].hwnd, Z::Bottom);
+        }
+    }
+
+    /// Widgets empilhados embaixo do retângulo (encaixados um no outro), em cadeia.
+    fn stack_below(&self, i: usize, rect: Option<Rect>) -> Vec<usize> {
+        let limit = ((WIDGET_GAP + 8.0) * self.cards[i].s) as i32;
+        let mut stack = Vec::new();
+        let mut frontier = vec![rect.unwrap_or_else(|| self.cards[i].card_rect())];
+        while let Some(top_rect) = frontier.pop() {
+            for (j, other) in self.cards.iter().enumerate() {
+                if j == i || stack.contains(&j) {
+                    continue;
+                }
+                let r = other.card_rect();
+                let gap = r.1 - top_rect.3;
+                if (0..=limit).contains(&gap) && win::overlap(top_rect, r).0 > 0 {
+                    stack.push(j);
+                    frontier.push(r);
+                }
+            }
+        }
+        stack
+    }
+
+    /// Depois de mudar de lugar: guarda a posição e confere a escala do monitor.
+    fn moved(&mut self, i: usize) {
+        let (x, y) = self.cards[i].pos;
+        let key = self.cards[i].key();
+        let w = self.sh.cfg.obj_mut(key);
+        w.insert("x".into(), json!(x));
+        w.insert("y".into(), json!(y));
+        self.sh.save();
+        self.send_to_back(i);
+        let (x0, y0, x1, y1) = self.cards[i].card_rect();
+        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        if (scale - self.cards[i].s).abs() > 0.01 {
+            self.cards[i].set_scale(scale);
+            self.cards[i].refresh(&self.sh);
+            self.cards[i].present(&self.sh, true);
+        }
+    }
+
+    pub fn set_visible(&mut self, key: &str, on: bool) -> bool {
+        if !on && !self.tray.ok && self.cards.len() == 1 && self.find(key).is_some() {
+            return false; // sem a bandeja, fechar o último widget encerraria o programa
+        }
+        self.sh.cfg.obj_mut(key).insert("visible".into(), json!(on));
+        self.sh.save();
+        if on && self.find(key).is_none() {
+            if let Some(i) = self.create_card(key, false) {
+                // se a posição guardada ficou ocupada, vai para baixo do último widget
+                let rect = self.cards[i].card_rect();
+                let busy = self.cards.iter().enumerate().any(|(j, o)| {
+                    let (w, h) = win::overlap(rect, o.card_rect());
+                    j != i && w.min(h) > 0
+                });
+                if busy {
+                    let lowest = (0..self.cards.len()).filter(|&j| j != i).max_by_key(|&j| self.cards[j].card_rect().3).unwrap();
+                    let to = self.cards[i].below(&self.cards[lowest]);
+                    self.cards[i].slide_to(to, ANIM_MS, &self.sh);
+                }
+            }
+        } else if !on {
+            if let Some(i) = self.find(key) {
+                // os widgets encaixados embaixo sobem para ocupar o lugar
+                let followers = self.stack_below(i, None);
+                let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.sh.backdrop_scale()).round() as i32;
+                let card = self.cards.remove(i);
+                self.tooltip.hide();
+                events::destroy(card.hwnd);
+                for j in followers {
+                    let j = if j > i { j - 1 } else { j };
+                    let to = (self.cards[j].pos.0, self.cards[j].pos.1 - shift);
+                    self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+                }
+            }
+        }
+        true
+    }
+
+    // ---------- tamanho ----------
+
+    fn set_mode(&mut self, i: usize, mode: Mode) {
+        if self.cards[i].temp && mode == self.cards[i].mode {
+            self.pin_open(i);
+            return;
+        }
+        if self.cards[i].temp {
+            self.cards[i].temp = false;
+            self.cards[i].mode = Mode::P; // o tamanho "de verdade" era o pequeno
+        }
+        self.resize_to(i, mode, true, false);
+    }
+
+    fn resize_to(&mut self, i: usize, mode: Mode, reflow: bool, temporary: bool) {
+        if self.cards[i].animating() || mode == self.cards[i].mode {
+            return;
+        }
+        let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
+        let old_h = self.cards[i].card_size().1;
+        self.cards[i].resize_to(mode, &self.sh, !temporary);
+        let delta = self.cards[i].card_size().1 - old_h;
+        events::set_cursor(self.cards[i].hwnd, Cursor::Arrow);
+        self.tooltip.hide();
+        // os widgets empilhados embaixo acompanham a mudança de altura, como no iPhone
+        for j in followers {
+            let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+            self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+        }
+    }
+
+    fn badge_action(&mut self, i: usize) {
+        if self.cards[i].temp {
+            self.pin_open(i);
+        } else {
+            let next = self.cards[i].next_mode();
+            self.resize_to(i, next, true, false);
+        }
+    }
+
+    /// Mantém aberto o widget que só estava aberto por causa do mouse.
+    fn pin_open(&mut self, i: usize) {
+        if !self.cards[i].temp || self.cards[i].animating() {
+            return;
+        }
+        self.cards[i].temp = false;
+        let small_size = self.cards[i].card_size_of(Mode::P);
+        let small = self.cards[i].card_rect_at(self.cards[i].pos, Some(small_size));
+        let delta = self.cards[i].card_size().1 - small_size.1;
+        for j in self.stack_below(i, Some(small)) {
+            let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+            self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+        }
+        let mode = self.cards[i].mode;
+        let key = self.cards[i].key();
+        let w = self.sh.cfg.obj_mut(key);
+        w.insert("tamanho".into(), json!(mode.code()));
+        w.remove("compact");
+        self.sh.save();
+        self.cards[i].present(&self.sh, false);
+    }
+
+    fn schedule_expand(&mut self, i: usize) {
+        let c = &self.cards[i];
+        if c.mode != Mode::P
+            || c.temp
+            || c.animating()
+            || c.press.is_some()
+            || c.expand_at.is_some()
+            || self.sh.editing
+            || !config::setting_bool(&self.sh.cfg, "expandir_hover")
+            || c.kind.sizes().len() < 2
+        {
+            return;
+        }
+        self.cards[i].expand_at = Some(Instant::now() + Duration::from_millis(HOVER_EXPAND_MS));
+    }
+
+    fn hover_expand(&mut self, i: usize) {
+        self.cards[i].expand_at = None;
+        let c = &self.cards[i];
+        if c.mode != Mode::P || c.press.is_some() || c.animating() || !c.pointer_inside() {
+            return;
+        }
+        for j in 0..self.cards.len() {
+            if j != i {
+                self.send_to_back(j); // este fica por cima dos vizinhos enquanto aberto
+            }
+        }
+        win::set_z(self.cards[i].hwnd, Z::Topmost);
+        win::set_z(self.cards[i].hwnd, Z::NoTopmost);
+        self.cards[i].temp = true;
+        let big = *self.cards[i].kind.sizes().last().unwrap();
+        self.resize_to(i, big, false, true);
+        self.cards[i].outside_since = None;
+    }
+
+    fn watch_pointer(&mut self, i: usize) {
+        let c = &self.cards[i];
+        if !c.temp {
+            return;
+        }
+        if c.pointer_inside() || c.press.is_some() || c.animating() {
+            self.cards[i].outside_since = None;
+        } else if c.outside_since.is_none() {
+            self.cards[i].outside_since = Some(Instant::now());
+        } else if c.outside_since.unwrap().elapsed() >= Duration::from_millis(HOVER_COLLAPSE_MS) {
+            self.resize_to(i, Mode::P, false, true);
+            self.cards[i].temp = false;
+        }
+    }
+
+    // ---------- mouse ----------
+
+    fn screen_xy(&self, i: usize, x: i32, y: i32) -> (i32, i32) {
+        (self.cards[i].pos.0 + x, self.cards[i].pos.1 + y)
+    }
+
+    fn on_motion(&mut self, i: usize, x: i32, y: i32) {
+        if self.cards[i].hover_target == 0.0 {
+            self.cards[i].set_hover(true);
+            self.schedule_expand(i);
+        }
+        if self.cards[i].drag.is_some() {
+            return;
+        }
+        let sh = &self.sh;
+        let card = &self.cards[i];
+        let close_hot = card.on_close(x, y, sh);
+        let on_badge = card.on_badge(x, y, sh) || close_hot;
+        let action = if on_badge { None } else { card.action_at(x, y, sh) };
+        let cursor = if on_badge || action.is_some() {
+            Cursor::Hand
+        } else if sh.editing {
+            Cursor::Move
+        } else {
+            Cursor::Arrow
+        };
+        let hot = if action.is_some() && !card.animating() { card.hot_at(x, y, sh) } else { None };
+        let tip = if !card.animating() && !on_badge && config::setting_bool(&sh.cfg, "dicas") { card.tooltip_at(x, y, sh) } else { None };
+        events::set_cursor(card.hwnd, cursor);
+        let changed = hot != card.hot || close_hot != card.close_hot;
+        let card = &mut self.cards[i];
+        card.close_hot = close_hot;
+        card.hot = hot;
+        if changed {
+            card.present(&self.sh, false);
+        }
+        let (sx, sy) = self.screen_xy(i, x, y);
+        self.tooltip.request(tip, sx, sy);
+        self.schedule_expand(i);
+    }
+
+    fn on_leave(&mut self, i: usize) {
+        let card = &mut self.cards[i];
+        card.set_hover(false);
+        card.expand_at = None;
+        let changed = card.hot.is_some() || card.close_hot;
+        card.hot = None;
+        card.close_hot = false;
+        if changed {
+            card.present(&self.sh, false);
+        }
+        self.tooltip.hide();
+    }
+
+    fn on_press(&mut self, i: usize, x: i32, y: i32, sx: i32, sy: i32) {
+        self.tooltip.hide();
+        if self.cards[i].animating() {
+            return;
+        }
+        let sh = &self.sh;
+        let card = &self.cards[i];
+        let action = if card.on_close(x, y, sh) {
+            Some(Act::Close)
+        } else if card.on_badge(x, y, sh) {
+            Some(Act::Badge)
+        } else {
+            card.action_at(x, y, sh)
+        };
+        let card = &mut self.cards[i];
+        card.press = Some(Press { x: sx, y: sy, action });
+        card.drag = None;
+        if action.is_some() && card.hot.is_some() {
+            card.pressing = true;
+            card.present(&self.sh, false);
+        }
+    }
+
+    fn on_release(&mut self, i: usize, x: i32, y: i32) {
+        let press = self.cards[i].press.take();
+        if self.cards[i].pressing {
+            self.cards[i].pressing = false;
+            self.cards[i].present(&self.sh, false);
+        }
+        if self.cards[i].drag.is_some() {
+            let (px, py) = (x, y);
+            self.drag_end(i, px, py);
+        } else if let Some(Press { action: Some(action), .. }) = press {
+            if !self.cards[i].animating() {
+                self.run_action(i, action);
+            }
+        }
+    }
+
+    fn on_double(&mut self, i: usize, x: i32, y: i32) {
+        let sh = &self.sh;
+        let card = &self.cards[i];
+        if !card.animating() && !card.on_badge(x, y, sh) && !card.on_close(x, y, sh) && card.action_at(x, y, sh).is_none() {
+            self.badge_action(i);
+        }
+    }
+
+    fn run_action(&mut self, i: usize, action: Act) {
+        match action {
+            Act::Badge => self.badge_action(i),
+            Act::Close => {
+                let key = self.cards[i].key();
+                self.set_visible(key, false);
+                return;
+            }
+            Act::Retry => self.with_kind(i, |k, ctx| k.retry(ctx)),
+            Act::Kind(n) => self.with_kind(i, |k, ctx| k.act(n, ctx)),
+        }
+        if let Some(card) = self.cards.get_mut(i) {
+            if !card.animating() {
+                card.refresh(&self.sh);
+            }
+        }
+    }
+
+    fn on_wheel(&mut self, i: usize, delta: i32) {
+        if self.cards[i].animating() || delta == 0 {
+            return;
+        }
+        self.tooltip.hide();
+        let (px, py) = win::pointer();
+        let (x, y) = (px - self.cards[i].pos.0, py - self.cards[i].pos.1);
+        let (lx, ly) = self.cards[i].logical(x, y);
+        let mode = self.cards[i].mode;
+        let steps = delta as f32 / 120.0;
+        self.with_kind(i, |k, ctx| k.wheel(lx, ly, steps, mode, ctx));
+        self.cards[i].refresh(&self.sh);
+    }
+
+    // ---------- arrastar e encaixar ----------
+
+    /// (sx, sy): posição do mouse na tela.
+    fn drag_move(&mut self, i: usize, sx: i32, sy: i32) {
+        let card = &self.cards[i];
+        let Some(press) = &card.press else { return };
+        if card.animating() || card.temp {
+            return;
+        }
+        if card.drag.is_none() {
+            let locked = self.sh.locked() && !self.sh.editing;
+            let dist = (((sx - press.x).pow(2) + (sy - press.y).pow(2)) as f32).sqrt();
+            if locked || dist < DRAG_START * card.s {
+                return;
+            }
+            let offset = (press.x - card.pos.0, press.y - card.pos.1);
+            let card = &mut self.cards[i];
+            card.drag = Some(offset);
+            card.pressing = false;
+            card.hot = None;
+            events::set_cursor(card.hwnd, Cursor::Move);
+            self.tooltip.hide();
+            self.drag_begin(i);
+        }
+        let (ox, oy) = self.cards[i].drag.unwrap();
+        let mut pos = (sx - ox, sy - oy);
+        let free = win::key_down(0x12); // com Alt, solta o widget sem encaixar nem reordenar
+        let column = if free { None } else { self.column_at(i, pos) };
+        let mut targets: HashMap<usize, (i32, i32)> = HashMap::new();
+        let mut guides = GuideLines::default();
+        self.preview = None;
+        if let Some(col) = column {
+            // sobre uma coluna: os outros abrem espaço para ele, como na tela do iPhone
+            let (t, slot) = self.layout_column(i, &col, pos);
+            targets = t;
+            self.preview = slot;
+        } else if !free {
+            let (p, g) = self.snap(i, pos);
+            pos = p;
+            guides = g;
+        }
+        self.guides.show(guides, self.cards[i].s);
+        for j in 0..self.cards.len() {
+            if j == i {
+                continue;
+            }
+            let to = targets.get(&j).or(self.rest.get(&j)).copied().unwrap_or(self.cards[j].pos);
+            self.cards[j].slide_to(to, REORDER_MS, &self.sh);
+        }
+        self.cards[i].pos = pos;
+        self.move_dirty = Some(i);
+    }
+
+    /// Guarda onde cada widget fica se este sair do lugar (a coluna dele fecha o espaço).
+    fn drag_begin(&mut self, i: usize) {
+        let followers = self.stack_below(i, None);
+        let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
+        self.rest = (0..self.cards.len())
+            .filter(|&j| j != i)
+            .map(|j| {
+                let p = self.cards[j].pos;
+                (j, if followers.contains(&j) { (p.0, p.1 - shift) } else { p })
+            })
+            .collect();
+        self.origin = self.cards[i].card_rect();
+    }
+
+    /// Coluna de widgets sob o cartão arrastado: (esquerda, topo, membros) ou None.
+    fn column_at(&self, i: usize, pos: (i32, i32)) -> Option<(i32, i32, Vec<usize>)> {
+        let card = &self.cards[i];
+        let rect = card.card_rect_at(pos, None);
+        let (w, h) = (rect.2 - rect.0, rect.3 - rect.1);
+        let tol = (12.0 * card.s) as i32;
+        let mut groups: Vec<(i32, Vec<usize>)> = Vec::new();
+        for (&j, &rp) in &self.rest {
+            let left = rp.0 + self.cards[j].margin;
+            match groups.iter_mut().find(|g| (g.0 - left).abs() <= tol) {
+                Some(g) => g.1.push(j),
+                None => groups.push((left, vec![j])),
+            }
+        }
+        let cy = (rect.1 + rect.3) as f32 / 2.0;
+        for (left, mut members) in groups {
+            let col_w = members.iter().map(|&j| self.cards[j].card_size().0).max().unwrap_or(0);
+            if (win::overlap(rect, (left, rect.1, left + col_w, rect.3)).0 as f32) < 0.6 * w.min(col_w) as f32 {
+                continue;
+            }
+            let tops: Vec<i32> = members.iter().map(|&j| self.rest[&j].1 + self.cards[j].margin).collect();
+            let bottoms: Vec<i32> = members.iter().zip(&tops).map(|(&j, t)| t + self.cards[j].card_size().1).collect();
+            let mut top = *tops.iter().min().unwrap();
+            if (self.origin.0 - left).abs() <= tol && self.origin.1 < top {
+                top = self.origin.1; // ele era o primeiro desta coluna
+            }
+            if (top as f32 - h as f32 / 2.0) <= cy && cy <= *bottoms.iter().max().unwrap() as f32 + h as f32 / 2.0 {
+                members.sort_by_key(|j| self.rest[j].1);
+                return Some((left, top, members));
+            }
+        }
+        None
+    }
+
+    /// Posições da coluna com este widget inserido onde o mouse está.
+    fn layout_column(&self, i: usize, col: &(i32, i32, Vec<usize>), pos: (i32, i32)) -> (HashMap<usize, (i32, i32)>, Option<(i32, i32)>) {
+        let (left, top, members) = col;
+        let card = &self.cards[i];
+        let rect = card.card_rect_at(pos, None);
+        let cy = (rect.1 + rect.3) as f32 / 2.0;
+        let gap = (WIDGET_GAP * card.s).round() as i32;
+        let index = members
+            .iter()
+            .filter(|&&j| ((self.rest[&j].1 + self.cards[j].margin) as f32 + self.cards[j].card_size().1 as f32 / 2.0) < cy)
+            .count();
+        let mut targets = HashMap::new();
+        let mut y = *top;
+        let mut slot = None;
+        for k in 0..=members.len() {
+            if k == index {
+                slot = Some((left - card.margin, y - card.margin));
+                y += rect.3 - rect.1 + gap;
+            }
+            if k == members.len() {
+                break;
+            }
+            let j = members[k];
+            targets.insert(j, (left - self.cards[j].margin, y - self.cards[j].margin));
+            y += self.cards[j].card_size().1 + gap;
+        }
+        (targets, slot)
+    }
+
+    /// Encaixa a posição nas bordas da tela e nos outros widgets; devolve também as guias.
+    fn snap(&self, i: usize, pos: (i32, i32)) -> ((i32, i32), GuideLines) {
+        let card = &self.cards[i];
+        let (s, m) = (card.s, card.margin);
+        let (w, h) = card.card_size();
+        let (x, y) = (pos.0 + m, pos.1 + m);
+        let (gap, edge, reach) = (WIDGET_GAP * s, EDGE_GAP * s, SNAP_DIST * s);
+        // candidatos: (posição do canto do cartão, linha-guia, retângulo de referência)
+        let mut xs: Vec<(f32, Option<f32>, Rect)> = Vec::new();
+        let mut ys: Vec<(f32, Option<f32>, Rect)> = Vec::new();
+        for area in win::work_areas() {
+            let (l, t, r, b) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
+            xs.push((l + edge, Some(l + edge), area));
+            xs.push((r - edge - w as f32, Some(r - edge), area));
+            ys.push((t + edge, Some(t + edge), area));
+            ys.push((b - edge - h as f32, Some(b - edge), area));
+        }
+        for (j, other) in self.cards.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let rect = other.card_rect();
+            let (l, t, r, b) = (rect.0 as f32, rect.1 as f32, rect.2 as f32, rect.3 as f32);
+            xs.extend([(l, Some(l), rect), (r - w as f32, Some(r), rect), ((l + r - w as f32) / 2.0, Some((l + r) / 2.0), rect)]);
+            ys.extend([(t, Some(t), rect), (b - h as f32, Some(b), rect), ((t + b - h as f32) / 2.0, Some((t + b) / 2.0), rect)]);
+            // lado a lado ou um embaixo do outro, com o espaço padrão (só se estiverem perto)
+            if win::overlap((x, y - reach as i32, x + w, y + h + reach as i32), rect).1 > 0 {
+                xs.push((r + gap, None, rect));
+                xs.push((l - gap - w as f32, None, rect));
+            }
+            if win::overlap((x - reach as i32, y, x + w + reach as i32, y + h), rect).0 > 0 {
+                ys.push((b + gap, None, rect));
+                ys.push((t - gap - h as f32, None, rect));
+            }
+        }
+        let best = |opts: &[(f32, Option<f32>, Rect)], cur: f32| {
+            opts.iter().filter(|o| (o.0 - cur).abs() <= reach).min_by(|a, b| (a.0 - cur).abs().total_cmp(&(b.0 - cur).abs())).copied()
+        };
+        let bx = best(&xs, x as f32);
+        let by = best(&ys, y as f32);
+        let nx = bx.map(|b| b.0.round() as i32).unwrap_or(x);
+        let ny = by.map(|b| b.0.round() as i32).unwrap_or(y);
+        let mut guides = GuideLines::default();
+        if let Some((_, Some(line), r)) = bx {
+            guides.v = Some((line.round() as i32, r.1.min(ny), r.3.max(ny + h)));
+        }
+        if let Some((_, Some(line), r)) = by {
+            guides.h = Some((line.round() as i32, r.0.min(nx), r.2.max(nx + w)));
+        }
+        ((nx - m, ny - m), guides)
+    }
+
+    fn drag_end(&mut self, i: usize, x: i32, y: i32) {
+        self.cards[i].drag = None;
+        self.guides.hide();
+        self.cards[i].present(&self.sh, true);
+        self.move_dirty = None;
+        if let Some(slot) = self.preview.take() {
+            self.cards[i].slide_to(slot, REORDER_MS, &self.sh); // para o espaço aberto na coluna
+        } else {
+            self.moved(i);
+        }
+        self.rest.clear();
+        self.on_motion(i, x, y); // volta o cursor e as dicas ao normal
+    }
+
+    // ---------- menus ----------
+
+    fn common_entries(&self, with_close: bool) -> Vec<MenuItem> {
+        let widgets_menu = widgets::KEYS
+            .iter()
+            .enumerate()
+            .filter_map(|(n, key)| {
+                let kind = widgets::create(key, &self.sh.cfg, &self.sh.cache)?;
+                Some(MenuItem::Check(kind.title().into(), self.find(key).is_some(), M_WIDGET + n as u32))
+            })
+            .collect();
+        let mut entries = vec![
+            MenuItem::Sub("Widgets".into(), widgets_menu),
+            MenuItem::Sep,
+            MenuItem::Cmd("Mostrar na frente".into(), M_PEEK),
+            MenuItem::Cmd("Organizar widgets".into(), M_ARRANGE),
+            MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK),
+            MenuItem::Sep,
+        ];
+        if with_close {
+            entries.push(MenuItem::Cmd("Fechar este widget".into(), M_CLOSE));
+        }
+        entries.push(MenuItem::Cmd("Sair".into(), M_QUIT));
+        entries
+    }
+
+    fn show_menu(&mut self, card: Option<usize>) {
+        self.tooltip.hide();
+        let mut items = Vec::new();
+        if let Some(i) = card {
+            let c = &self.cards[i];
+            let sizes = c.kind.sizes();
+            if sizes.len() > 1 {
+                let current = c.mode;
+                let temp = c.temp;
+                items.push(MenuItem::Sub(
+                    "Tamanho".into(),
+                    sizes.iter().enumerate().map(|(n, &m)| MenuItem::Radio(m.name().into(), m == current && !temp, M_SIZE + n as u32)).collect(),
+                ));
+            }
+            let env = widgets::Env { cfg: &self.sh.cfg, key: c.key() };
+            let own = c.kind.menu(&env);
+            if !own.is_empty() {
+                items.push(MenuItem::Sep);
+                items.extend(own);
+            }
+            items.push(MenuItem::Sep);
+        }
+        items.extend(self.common_entries(card.is_some()));
+        let (x, y) = win::pointer();
+        let Some(id) = tray::popup(self.tray.window(), &items, x, y) else { return };
+        self.menu_command(id, card);
+    }
+
+    fn menu_command(&mut self, id: u32, card: Option<usize>) {
+        match id {
+            M_PEEK => self.toggle_peek(),
+            M_ARRANGE => self.arrange(),
+            M_LOCK => {
+                let locked = self.sh.locked();
+                self.sh.cfg.obj_mut("app").insert("travado".into(), json!(!locked));
+                self.sh.save();
+            }
+            M_QUIT => self.exit(),
+            M_CLOSE => {
+                if let Some(i) = card {
+                    let key = self.cards[i].key();
+                    self.set_visible(key, false);
+                }
+            }
+            id if id >= M_WIDGET && id < M_WIDGET + 100 => {
+                let key = widgets::KEYS[(id - M_WIDGET) as usize];
+                let on = self.find(key).is_none();
+                self.set_visible(key, on);
+            }
+            id if id >= M_SIZE && id < M_SIZE + 10 => {
+                if let Some(i) = card {
+                    let mode = self.cards[i].kind.sizes()[(id - M_SIZE) as usize];
+                    self.set_mode(i, mode);
+                }
+            }
+            id if id < 100_000 => {
+                if let Some(i) = card {
+                    self.run_action(i, Act::Kind(id));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---------- modos ----------
+
+    /// Mostra os widgets por cima das janelas, até chamar de novo ou o mouse sair deles.
+    pub fn toggle_peek(&mut self) {
+        if self.sh.peeking {
+            self.end_peek();
+            return;
+        }
+        self.sh.peeking = true;
+        for c in &mut self.cards {
+            win::set_z(c.hwnd, Z::Topmost);
+            c.present(&self.sh, false); // opacidade total enquanto estão na frente
+        }
+        self.peek_seen = Instant::now();
+    }
+
+    fn end_peek(&mut self) {
+        if !self.sh.peeking {
+            return;
+        }
+        self.sh.peeking = false;
+        for i in 0..self.cards.len() {
+            win::set_z(self.cards[i].hwnd, Z::NoTopmost);
+            self.send_to_back(i);
+            self.cards[i].present(&self.sh, false);
+        }
+    }
+
+    /// Empilha os widgets em colunas a partir da direita da tela, com o espaço padrão.
+    pub fn arrange(&mut self) {
+        let mut order: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].content.is_some() && !self.cards[i].temp).collect();
+        if order.is_empty() {
+            return;
+        }
+        order.sort_by_key(|&i| (-self.cards[i].card_rect().2, self.cards[i].card_rect().1));
+        let (_, top, right, bottom) = win::area_for(self.cards[order[0]].card_rect());
+        let s = self.cards[order[0]].s;
+        let (edge, gap) = ((EDGE_GAP * s) as i32, (WIDGET_GAP * s) as i32);
+        let (mut y, mut column_w, mut right) = (top + edge, 0, right - edge);
+        for i in order {
+            let (w, h) = self.cards[i].card_size();
+            if column_w > 0 && y + h > bottom - edge {
+                right -= column_w + gap; // não cabe: próxima coluna
+                y = top + edge;
+                column_w = 0;
+            }
+            let m = self.cards[i].margin;
+            self.cards[i].slide_to((right - w - m, y - m), ANIM_MS, &self.sh);
+            y += h + gap;
+            column_w = column_w.max(w);
+        }
+    }
+
+    fn toggle_pomodoro(&mut self) {
+        let i = match self.find("pomodoro") {
+            Some(i) => i,
+            None => {
+                self.set_visible("pomodoro", true);
+                match self.find("pomodoro") {
+                    Some(i) => i,
+                    None => return,
+                }
+            }
+        };
+        self.run_action(i, Act::Kind(widgets::pomodoro::TOGGLE));
+    }
+
+    fn wake_all(&mut self) {
+        for c in &mut self.cards {
+            if c.stale {
+                c.refresh(&self.sh);
+            } else {
+                c.present(&self.sh, false);
+            }
+        }
+    }
+
+    // ---------- notificações ----------
+
+    fn notify(&mut self, kind: &'static str, title: &str, text: &str, cooldown: f64, action: Option<(NotifyAction, Option<&'static str>)>) {
+        if !config::notify_enabled(&self.sh.cfg, kind) {
+            return;
+        }
+        let now = win::now();
+        if now - self.notified.get(kind).copied().unwrap_or(0.0) < cooldown {
+            return;
+        }
+        self.notified.insert(kind, now);
+        self.notification_action = action;
+        self.tray.notify(title, text);
+    }
+
+    fn notification_clicked(&mut self) {
+        let Some((action, _)) = self.notification_action.clone() else { return };
+        match action {
+            NotifyAction::Open(target) => win::open_target(&target),
+            NotifyAction::Widget(key, n) => {
+                if let Some(i) = self.find(key) {
+                    self.run_action(i, Act::Kind(n));
+                }
+            }
+        }
+    }
+
+    // ---------- verificações periódicas ----------
+
+    fn check_backdrop(&mut self) {
+        self.sh.read_preferences();
+        let blur = config::setting_f64(&self.sh.cfg, "desfoque");
+        let changed = self.sh.backdrop.check(blur);
+        let progman = win::desktop_window();
+        for i in 0..self.cards.len() {
+            let c = &mut self.cards[i];
+            if progman.is_some() && c.owner != progman {
+                c.owner = win::pin_to_desktop(c.hwnd); // o Explorer reiniciou
+            }
+            if changed && c.content.is_some() && !c.animating() {
+                c.present(&self.sh, false);
+                if !c.visible_on_screen(c.pos) {
+                    // trouxe para dentro da tela (ex.: trocou o monitor)
+                    let (l, t, r, b) = win::work_areas()[0];
+                    let (w, h) = c.size();
+                    c.pos = (c.pos.0.clamp(l, r - w), c.pos.1.clamp(t, b - h));
+                    c.present(&self.sh, true);
+                    self.moved(i);
+                }
+            }
+        }
+    }
+
+    fn check_fullscreen(&mut self) {
+        let busy = win::fullscreen_busy();
+        if busy != self.sh.paused {
+            self.sh.paused = busy;
+            if !self.sh.suspended() {
+                self.wake_all();
+            }
+        }
+    }
+
+    /// Notifica CPU ou memória altas por alguns minutos e disco quase cheio.
+    fn check_alerts(&mut self) {
+        let now = win::now();
+        let (idle, total) = win::cpu_times();
+        let (last_idle, last_total) = self.alert_cpu;
+        self.alert_cpu = (idle, total);
+        let cpu = if total > last_total { 1.0 - (idle - last_idle) as f64 / (total - last_total) as f64 } else { 0.0 };
+        let (used, total_mem) = win::memory();
+        for (kind, value, text) in [
+            ("cpu", cpu, "A CPU está acima de 90% há 3 minutos."),
+            ("ram", used as f64 / total_mem as f64, "A memória está acima de 90% há 3 minutos."),
+        ] {
+            if value >= 0.9 && config::notify_enabled(&self.sh.cfg, kind) {
+                let since = *self.high_since.entry(kind).or_insert(now);
+                if now - since >= 180.0 {
+                    let title = if kind == "cpu" { "CPU alta" } else { "Memória quase cheia" };
+                    self.notify(kind, title, text, 1800.0, Some((NotifyAction::Open("taskmgr.exe".into()), None)));
+                }
+            } else {
+                self.high_since.remove(kind);
+            }
+        }
+        let (dused, dtotal, free) = win::disk_usage("C:\\");
+        if dused as f64 / dtotal as f64 >= 0.95 {
+            let text = format!("O disco C: está com {:.0}% de uso ({:.0} GB livres).", dused as f64 / dtotal as f64 * 100.0, win::gb(free));
+            self.notify("disco", "Disco quase cheio", &text, 86400.0, Some((NotifyAction::Open("ms-settings:storagesense".into()), None)));
+        }
+    }
+
+    // ---------- laço ----------
+
+    pub fn handle(&mut self, ev: Ev) {
+        match ev {
+            Ev::Mouse { hwnd, kind, x, y, sx, sy } => {
+                let Some(i) = self.index(hwnd) else { return };
+                match kind {
+                    MouseKind::Move => {
+                        if self.cards[i].press.is_some() {
+                            self.drag_move(i, sx, sy);
+                        }
+                        self.on_motion(i, x, y);
+                    }
+                    MouseKind::Down => {
+                        self.on_press(i, x, y, sx, sy);
+                    }
+                    MouseKind::Up => self.on_release(i, x, y),
+                    MouseKind::Double => self.on_double(i, x, y),
+                    MouseKind::Right => self.show_menu(Some(i)),
+                    MouseKind::Leave => self.on_leave(i),
+                }
+            }
+            Ev::Wheel { hwnd, delta } => {
+                if let Some(i) = self.index(hwnd) {
+                    self.on_wheel(i, delta);
+                }
+            }
+            Ev::Tray(msg) => match msg {
+                0x202 => self.toggle_peek(),   // WM_LBUTTONUP
+                0x205 => self.show_menu(None), // WM_RBUTTONUP
+                NIN_BALLOONUSERCLICK => self.notification_clicked(),
+                _ => {}
+            },
+            Ev::Hotkey(HOTKEY_PEEK) => self.toggle_peek(),
+            Ev::Hotkey(HOTKEY_POMODORO) => self.toggle_pomodoro(),
+            Ev::Hotkey(_) | Ev::Wake => {}
+            Ev::TaskbarCreated => self.tray.add(),
+            Ev::OtherInstance => {
+                if !self.sh.peeking {
+                    self.toggle_peek();
+                }
+            }
+            Ev::DisplayChange => self.next_backdrop = Instant::now(),
+        }
+    }
+
+    /// Depois de tratar os eventos de uma leva: mostra o widget arrastado na posição nova.
+    pub fn after_events(&mut self) {
+        if let Some(i) = self.move_dirty.take() {
+            if i < self.cards.len() {
+                self.cards[i].present(&self.sh, true);
+            }
+        }
+    }
+
+    pub fn next_deadline(&self) -> Instant {
+        let mut next = self.next_backdrop.min(self.next_fullscreen).min(self.next_power).min(self.next_alerts);
+        if let Some(t) = self.tooltip.next_due() {
+            next = next.min(t);
+        }
+        if self.sh.peeking {
+            next = next.min(Instant::now() + Duration::from_millis(250));
+        }
+        for c in &self.cards {
+            for t in [c.next_frame(), c.kind.next_tick(), c.expand_at].into_iter().flatten() {
+                next = next.min(t);
+            }
+            if c.temp {
+                next = next.min(self.next_watch);
+            }
+        }
+        next
+    }
+
+    pub fn run_timers(&mut self) {
+        let now = Instant::now();
+        self.tooltip.tick();
+        for i in 0..self.cards.len() {
+            if self.cards[i].kind.next_tick().is_some_and(|t| now >= t) {
+                let was_loading = self.cards[i].status.loading;
+                let redraw = self.with_kind(i, |k, ctx| k.tick(ctx));
+                let loading = self.cards[i].kind.status().loading;
+                if redraw && !self.cards[i].animating() {
+                    self.cards[i].refresh(&self.sh);
+                } else if loading != was_loading {
+                    self.cards[i].status = self.cards[i].kind.status();
+                    self.cards[i].present(&self.sh, false);
+                }
+            }
+            if self.cards[i].next_frame().is_some_and(|t| now >= t) {
+                let (resized, slid) = self.cards[i].frame(&self.sh);
+                if resized {
+                    let save = self.cards[i].finish_resize(&self.sh);
+                    if save {
+                        let (mode, pos) = (self.cards[i].mode, self.cards[i].pos);
+                        let key = self.cards[i].key();
+                        let w = self.sh.cfg.obj_mut(key);
+                        w.insert("tamanho".into(), json!(mode.code()));
+                        w.insert("x".into(), json!(pos.0));
+                        w.insert("y".into(), json!(pos.1));
+                        w.remove("compact");
+                        self.sh.save();
+                    }
+                    if !self.cards[i].temp {
+                        self.send_to_back(i);
+                    }
+                }
+                if slid && self.cards[i].drag.is_none() {
+                    self.moved(i);
+                }
+            }
+            if self.cards[i].expand_at.is_some_and(|t| now >= t) {
+                self.hover_expand(i);
+            }
+        }
+        if now >= self.next_watch {
+            self.next_watch = now + WATCH_EVERY;
+            for i in 0..self.cards.len() {
+                self.watch_pointer(i);
+            }
+        }
+        if self.sh.peeking {
+            if self.cards.iter().any(|c| c.hover_target > 0.0) {
+                self.peek_seen = now;
+            }
+            if self.peek_seen.elapsed() > Duration::from_millis(PEEK_IDLE_MS) {
+                self.end_peek();
+            }
+        }
+        if now >= self.next_backdrop {
+            self.next_backdrop = now + BACKDROP_EVERY;
+            self.check_backdrop();
+        }
+        if now >= self.next_fullscreen {
+            self.next_fullscreen = now + FULLSCREEN_EVERY;
+            self.check_fullscreen();
+        }
+        if now >= self.next_power {
+            self.next_power = now + POWER_EVERY;
+            self.sh.saving = win::on_battery() && config::setting_bool(&self.sh.cfg, "economia_bateria");
+        }
+        if now >= self.next_alerts {
+            self.next_alerts = now + ALERTS_EVERY;
+            self.check_alerts();
+        }
+    }
+
+    pub fn exit(&mut self) {
+        self.tray.remove();
+        for c in self.cards.drain(..) {
+            events::destroy(c.hwnd);
+        }
+        self.quit = true;
+        unsafe { PostQuitMessage(0) };
+    }
+}
+
+impl Shared {
+    /// Escala do monitor principal (para medidas que não dependem de um widget).
+    pub fn backdrop_scale(&self) -> f32 {
+        let a = win::work_areas()[0];
+        win::scale_at(a.0, a.1)
+    }
+}
+
+#[allow(dead_code)]
+fn unused(_: HWND, _: Value) {}

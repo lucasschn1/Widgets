@@ -1,2 +1,0 @@
-# só para gerar o Widgets.exe
-pyinstaller>=6.16
