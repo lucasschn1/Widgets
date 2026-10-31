@@ -1,0 +1,90 @@
+# Gera o Widgets.exe, o .zip e o instalador numa máquina Windows do GitHub e publica no Release.
+# Para lançar uma versão: mude __version__ em deskwidgets/__init__.py, faça o commit e
+#   git tag v2.0.0 && git push origin v2.0.0
+# Também dá para rodar à mão (aba Actions > Release > Run workflow): gera os arquivos sem publicar.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            packaging/requirements-build.txt
+
+      - name: Dependências
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r packaging/requirements-build.txt
+
+      - name: Versão
+        id: version
+        shell: pwsh
+        run: |
+          $v = python -c "import deskwidgets; print(deskwidgets.__version__)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and "v$v" -ne $env:GITHUB_REF_NAME) {
+            throw "A tag $env:GITHUB_REF_NAME não bate com __version__ = $v (deskwidgets/__init__.py)"
+          }
+
+      - name: Widgets.exe e .zip
+        run: python packaging/build.py
+
+      - name: Teste rápido do executável
+        shell: pwsh
+        run: |
+          $exe = "dist\Widgets\Widgets.exe"
+          if (-not (Test-Path $exe)) { throw "Widgets.exe não foi gerado" }
+          (Get-Item $exe).VersionInfo | Format-List ProductName, ProductVersion
+
+      - name: Instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.version }}" packaging\Widgets.iss
+          if ($LASTEXITCODE -ne 0) { throw "O Inno Setup falhou" }
+
+      - name: Guarda os arquivos (execução manual)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Widgets-${{ steps.version.outputs.version }}
+          path: |
+            dist/Widgets-win64.zip
+            dist/Widgets-Setup.exe
+
+      - name: Publica o Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Widgets ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/Widgets-win64.zip
+            dist/Widgets-Setup.exe
+          body: |
+            ## Instalar
+
+            **Pelo terminal** (PowerShell, não precisa de administrador):
+            ```powershell
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+            ```
+
+            **Ou baixe** o `Widgets-Setup.exe` abaixo e execute.
+
+            Na primeira vez, o Windows pode mostrar "O Windows protegeu o computador" (o app não tem
+            assinatura digital paga): clique em **Mais informações → Executar assim mesmo**.

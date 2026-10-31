@@ -1,0 +1,16 @@
+# dados pessoais (hoje ficam em %APPDATA%\Widgets, mas versões antigas guardavam aqui)
+config.json
+cache.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# saída do empacotamento
+build/
+dist/
+packaging/Widgets.ico
+
+# cópias locais
+backup/
