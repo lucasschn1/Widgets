@@ -466,6 +466,27 @@ impl GitHub {
         }
     }
 
+    /// Exemplo para a galeria: os dados guardados, ou inventados se não houver.
+    pub fn sample(cfg: &Value, cache: &Value) -> GitHub {
+        let mut g = GitHub::new(cfg, cache);
+        if g.data.is_none() {
+            g.data = cache.get("github").and_then(Data::from_json);
+        }
+        if g.data.is_none() {
+            let t = win::local_time();
+            let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
+            let days = (0..371).rev().map(|i| (today - i, if i % 4 == 0 { 0 } else { (i * 7 + i / 3) % 5 }, i % 6)).collect();
+            let now = win::now();
+            let rows = [("commit", "Ajusta o layout do cartão", "meu-projeto", 1.0), ("pr_merged", "Adiciona modo escuro", "meu-projeto  ·  #42", 5.0)]
+                .iter()
+                .map(|(icon, title, info, h)| Row { title: title.to_string(), info: info.to_string(), icon: icon.to_string(), when: now - h * 3600.0, url: String::new() })
+                .collect();
+            g.data = Some(Data { user: "voce".into(), days, total: 812, rows });
+        }
+        g.msg = String::new();
+        g
+    }
+
     pub fn update(&mut self, ctx: &mut Ctx) {
         if self.pending.is_some() {
             return;
@@ -821,6 +842,7 @@ impl Kind for GitHub {
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
             UPDATE => self.update(ctx),
+            ASK_USER => ctx.out.push(Request::Ask("user")),
             OPEN_PROFILE => {
                 let user = self.data.as_ref().map(|d| d.user.clone()).or_else(|| ctx.cfg["github"].str_of("usuario").map(String::from));
                 ctx.open(match user {
@@ -942,6 +964,13 @@ impl Kind for GitHub {
 
     fn retry(&mut self, ctx: &mut Ctx) {
         self.update(ctx);
+    }
+
+    fn input(&mut self, field: &str, value: &str, _extra: Option<&Value>, ctx: &mut Ctx) {
+        let user = value.trim().trim_start_matches('@');
+        if field == "user" && !user.is_empty() {
+            self.set_user(user, ctx);
+        }
     }
 
     fn start(&mut self, ctx: &mut Ctx) {

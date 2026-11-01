@@ -344,6 +344,38 @@ impl Media {
         }
     }
 
+    /// Exemplo para a galeria: uma música tocando, sem a thread da central de mídia.
+    pub fn sample() -> Media {
+        let (tx, _rx) = channel();
+        let snap = Snapshot {
+            empty: false,
+            pref: "auto".into(),
+            kind: "spotify",
+            title: "Nome da música".into(),
+            artist: "Artista  ·  Álbum".into(),
+            playing: true,
+            position: 74.0,
+            duration: 213.0,
+            can_toggle: true,
+            can_prev: true,
+            can_next: true,
+            ..Default::default()
+        };
+        Media {
+            tx,
+            shared: Arc::new(Mutex::new(None)),
+            pref: Arc::new(Mutex::new("auto".into())),
+            media: Some(snap),
+            sig: None,
+            msg: 0,
+            next_poll: Instant::now() + Duration::from_secs(3600),
+            next_message: Instant::now() + Duration::from_secs(3600),
+            art_cache: RefCell::new(None),
+            idle_cache: RefCell::new(HashMap::new()),
+            started: Instant::now(),
+        }
+    }
+
     fn has_media(&self) -> bool {
         self.media.as_ref().is_some_and(|m| !m.empty)
     }

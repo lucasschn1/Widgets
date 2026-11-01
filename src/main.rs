@@ -30,8 +30,12 @@ mod events;
 mod gfx;
 mod imgops;
 mod overlay;
+mod panel;
 mod popup;
+mod prompt;
+mod settings;
 mod shared;
+mod startup;
 mod theme;
 mod tray;
 mod util;
@@ -71,6 +75,7 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    startup::refresh();
     let mut app = app::App::new();
     let mut msg = MSG::default();
     loop {

@@ -524,6 +524,7 @@ impl Kind for System {
                 ctx.open(url);
             }
             UPDATE_WEATHER => self.update_weather(ctx),
+            ASK_CITY => ctx.out.push(super::Request::Ask("city")),
             _ => {}
         }
     }
@@ -632,6 +633,12 @@ impl Kind for System {
 
     fn retry(&mut self, ctx: &mut Ctx) {
         self.update_weather(ctx);
+    }
+
+    fn input(&mut self, field: &str, value: &str, extra: Option<&Value>, ctx: &mut Ctx) {
+        if field == "city" {
+            self.set_city(value, extra, ctx);
+        }
     }
 
     fn start(&mut self, ctx: &mut Ctx) {

@@ -30,6 +30,37 @@ pub fn title(key: &str) -> &'static str {
     }
 }
 
+/// Frase curta sobre o widget (galeria e boas-vindas).
+pub fn description(key: &str) -> &'static str {
+    match key {
+        "sistema" => "Tempo agora e nas próximas horas, com CPU, memória e disco.",
+        "midia" => "A música ou o vídeo tocando no Windows, com capa e controles.",
+        "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
+        "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
+        _ => "",
+    }
+}
+
+/// Ícone do widget na barra lateral das configurações (ver theme::icon).
+pub fn icon_name(key: &str) -> &'static str {
+    match key {
+        "sistema" => "clima",
+        "midia" => "midia",
+        "github" => "github",
+        "pomodoro" => "pomodoro",
+        _ => "widgets",
+    }
+}
+
+/// Um widget com dados de exemplo, sem janela nem threads (miniaturas da galeria).
+pub fn sample(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
+    match key {
+        "midia" => Some(Box::new(media::Media::sample())),
+        "github" => Some(Box::new(github::GitHub::sample(cfg, cache))),
+        _ => create(key, cfg, cache),
+    }
+}
+
 /// Cria o widget `key` (None para os que ainda não existem nesta versão).
 pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
     match key {
@@ -115,6 +146,8 @@ pub enum Request {
     Notify(&'static str, String, String, Option<NotifyAction>),
     Open(String),
     Redraw,
+    /// abrir a pergunta de vidro junto do widget: "city" ou "user"
+    Ask(&'static str),
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +253,9 @@ pub trait Kind {
     fn status_line(&self) -> Option<(String, String, bool)> {
         None
     }
+    /// Texto vindo de uma pergunta ou das configurações (ex.: "city", "user"); `extra` é a
+    /// cidade escolhida na lista de sugestões.
+    fn input(&mut self, _field: &str, _value: &str, _extra: Option<&Value>, _ctx: &mut Ctx) {}
     /// Clique no aviso de erro: tenta de novo.
     fn retry(&mut self, _ctx: &mut Ctx) {}
     /// Logo depois de criado (começar a buscar dados etc.).

@@ -13,6 +13,11 @@ use crate::config::{self, Get};
 use crate::events::{self, Cursor, Ev, MouseKind, CARD_CLASS};
 use crate::overlay::{GuideLines, Guides, Tooltip};
 use crate::popup::{GlassBar, GlassMenu, Part, Place};
+
+#[path = "app_panels.rs"]
+mod panels;
+use panels::{EditWhat, Panel};
+use crate::prompt;
 use crate::shared::Shared;
 use crate::theme::*;
 use crate::tray::{self, Tray, HOTKEY_PEEK, HOTKEY_POMODORO, NIN_BALLOONUSERCLICK};
@@ -38,6 +43,10 @@ const M_FOCUS: u32 = 300_020; // + minutos (0 = até desligar)
 const M_WIDGET: u32 = 300_100; // + índice em widgets::KEYS
 const M_LAYOUT: u32 = 301_000; // + índice do layout
 const M_LAYOUT_DEL: u32 = 302_000; // + índice do layout
+const M_SETTINGS: u32 = 300_030;
+const M_TIPS: u32 = 300_031;
+const M_GALLERY: u32 = 300_032;
+const M_SAVE_LAYOUT: u32 = 300_033;
 
 // botões das pílulas
 const B_UNDO: u32 = 1;
@@ -55,6 +64,12 @@ enum Undo {
     Reopen { key: &'static str, pos: (i32, i32), mode: Mode, followers: Vec<(&'static str, (i32, i32))> },
     /// volta um layout excluído
     Layout { name: String, snapshot: Value },
+    /// mostra de novo um widget ocultado na galeria
+    Show(&'static str),
+    /// volta as opções gerais como estavam (ex.: depois de "Restaurar padrão")
+    AppSettings(Value),
+    /// abre uma página das configurações (botão "Trocar" do aviso de atalho em uso)
+    OpenSettings(&'static str),
 }
 
 pub struct App {
@@ -89,6 +104,16 @@ pub struct App {
     focus_until: Option<Option<f64>>,
     /// deslizes marcados para depois (ex.: depois de mudar de tamanho ao aplicar um layout)
     later: Vec<(Instant, &'static str, (i32, i32))>,
+    /// janelas de configurações, perguntas e boas-vindas
+    panels: Vec<Panel>,
+    /// atalho que outro programa já usa: nome -> combinação pedida
+    hotkey_errors: HashMap<&'static str, String>,
+    update_status: String,
+    update_version: Option<String>,
+    /// opção mexida por um slider, para aplicar no vidro daqui a pouco (sem pesar a cada pixel)
+    pending_setting: Option<(Instant, &'static str)>,
+    /// abrir as boas-vindas (primeira vez)
+    welcome_at: Option<Instant>,
     pub quit: bool,
 }
 
@@ -135,6 +160,12 @@ impl App {
             edit_bar: GlassBar::new(Place::Top),
             focus_until: None,
             later: Vec::new(),
+            panels: Vec::new(),
+            hotkey_errors: HashMap::new(),
+            update_status: "Ainda não procurou".into(),
+            update_version: None,
+            pending_setting: None,
+            welcome_at: None,
             quit: false,
         };
         app.register_hotkeys();
@@ -147,6 +178,9 @@ impl App {
             app.create_card("sistema", true); // sem bandeja, não pode ficar sem nada na tela
         }
         app.sh.save();
+        if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
+            app.welcome_at = Some(Instant::now() + Duration::from_millis(1500));
+        }
         app
     }
 
@@ -167,7 +201,8 @@ impl App {
         self.peek_hotkey = chosen;
         if !wanted.is_empty() && self.peek_hotkey.as_deref() != Some(wanted.as_str()) {
             let detail = format!("Atalho atual: {}", self.peek_hotkey.clone().unwrap_or_else(|| "nenhum".into()));
-            self.toast(&format!("{wanted} já é usado por outro programa"), Some(&detail), "atalhos", WARNING, None);
+            self.hotkey_errors.insert("peek", wanted.clone());
+            self.toast(&format!("{wanted} já é usado por outro programa"), Some(&detail), "atalhos", WARNING, Some(("Trocar", Undo::OpenSettings("atalhos"))));
         }
         tray::register_hotkey(hwnd, HOTKEY_POMODORO, &config::setting_str(&self.sh.cfg, "atalho_pomodoro"));
     }
@@ -204,6 +239,11 @@ impl App {
                     if let Some(i) = card {
                         self.cards[i].refresh(&self.sh);
                     }
+                }
+                Request::Ask(what) => {
+                    let anchor = card.map(|i| self.cards[i].card_rect());
+                    let purpose = if what == "city" { prompt::Purpose::City } else { prompt::Purpose::GitHubUser };
+                    self.open_prompt(purpose, anchor);
                 }
                 Request::Notify(kind, title, text, action) => {
                     let key = card.map(|i| self.cards[i].key());
@@ -328,6 +368,7 @@ impl App {
 
     /// `reflow`: os vizinhos de baixo sobem ao fechar; `place`: ao abrir, sai de cima dos outros.
     fn set_visible_with(&mut self, key: &str, on: bool, reflow: bool, place: bool) -> bool {
+        self.panels_changed();
         if !on && !self.tray.ok && self.cards.len() == 1 && self.find(key).is_some() {
             return false; // sem a bandeja, fechar o último widget encerraria o programa
         }
@@ -821,6 +862,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(n, key)| MenuItem::Check(widgets::title(key).into(), self.find(key).is_some(), M_WIDGET + n as u32))
+            .chain([MenuItem::Sep, MenuItem::Cmd("Galeria de widgets…".into(), M_GALLERY)])
             .collect();
         let names = self.layout_names();
         let mut layouts: Vec<MenuItem> = names.iter().enumerate().map(|(n, name)| MenuItem::Cmd(name.clone(), M_LAYOUT + n as u32)).collect();
@@ -830,8 +872,11 @@ impl App {
                 "Excluir".into(),
                 names.iter().enumerate().map(|(n, name)| MenuItem::Cmd(name.clone(), M_LAYOUT_DEL + n as u32)).collect(),
             ));
+        }
+        if !names.is_empty() {
+            layouts.insert(names.len(), MenuItem::Cmd("Salvar layout atual…".into(), M_SAVE_LAYOUT));
         } else {
-            layouts.push(MenuItem::Cmd("Nenhum layout salvo".into(), 0));
+            layouts.push(MenuItem::Cmd("Salvar layout atual…".into(), M_SAVE_LAYOUT));
         }
         let focus = match self.focus_until {
             Some(until) => {
@@ -852,6 +897,9 @@ impl App {
             MenuItem::Sub("Modo foco".into(), focus),
             MenuItem::Cmd("Organizar widgets".into(), M_ARRANGE),
             MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK),
+            MenuItem::Sep,
+            MenuItem::Cmd("Configurações…".into(), M_SETTINGS),
+            MenuItem::Cmd("Atalhos e dicas".into(), M_TIPS),
             MenuItem::Sep,
         ];
         if with_close {
@@ -892,6 +940,10 @@ impl App {
     fn menu_command(&mut self, id: u32, card: Option<usize>) {
         match id {
             0 => {}
+            M_SETTINGS => self.open_settings("geral"),
+            M_TIPS => self.open_settings("atalhos"),
+            M_GALLERY => self.open_settings("widgets"),
+            M_SAVE_LAYOUT => self.open_prompt(prompt::Purpose::LayoutName, None),
             M_EDIT => {
                 if self.sh.editing {
                     self.end_edit();
@@ -984,6 +1036,16 @@ impl App {
                 w.insert("tamanho".into(), json!(mode.code()));
                 self.set_visible_with(key, true, true, false);
             }
+            Undo::Show(key) => {
+                self.set_visible(key, true);
+            }
+            Undo::AppSettings(old) => {
+                self.sh.cfg["app"] = old;
+                self.sh.save();
+                self.register_hotkeys_quiet();
+                self.apply_settings("*");
+            }
+            Undo::OpenSettings(page) => self.open_settings(page),
             Undo::Layout { name, snapshot } => {
                 self.sh.cfg.obj_mut("app").entry("layouts").or_insert(json!({}));
                 if let Some(l) = self.sh.cfg["app"]["layouts"].as_object_mut() {
@@ -1315,6 +1377,11 @@ impl App {
     pub fn handle(&mut self, ev: Ev) {
         match ev {
             Ev::Mouse { hwnd, kind, x, y, sx, sy } => {
+                if let Some(i) = self.panel_index(hwnd) {
+                    self.panel_mouse(i, kind, x, y);
+                    return;
+                }
+                let _ = (sx, sy);
                 if self.menu.owns(hwnd) {
                     match kind {
                         MouseKind::Move => self.menu.motion(hwnd, x, y),
@@ -1344,10 +1411,7 @@ impl App {
                         MouseKind::Leave => self.edit_bar.leave(),
                         MouseKind::Up => match self.edit_bar.click(x, y) {
                             Some(B_EDIT_DONE) => self.end_edit(),
-                            Some(B_EDIT_ADD) => {
-                                let items = self.common_entries(false).into_iter().take(1).collect();
-                                self.menu.popup(items, sx, sy, None);
-                            }
+                            Some(B_EDIT_ADD) => self.open_settings("widgets"),
                             _ => {}
                         },
                         _ => {}
@@ -1371,6 +1435,34 @@ impl App {
                     MouseKind::Leave => self.on_leave(i),
                 }
             }
+            Ev::Key { hwnd, vk } if self.panel_index(hwnd).is_some() => {
+                let i = self.panel_index(hwnd).unwrap();
+                self.panel_key(i, vk);
+            }
+            Ev::Wheel { hwnd, delta } if self.panel_index(hwnd).is_some() => {
+                let i = self.panel_index(hwnd).unwrap();
+                self.panel_wheel(i, delta);
+            }
+            Ev::PanelClose(hwnd) => {
+                if let Some(i) = self.panel_index(hwnd) {
+                    self.close_panel(i);
+                }
+            }
+            Ev::PanelMoved(hwnd) => {
+                if let Some(i) = self.panel_index(hwnd) {
+                    self.panels[i].win.dirty = true;
+                }
+            }
+            Ev::EditChange(hwnd, ctrl) | Ev::EditFocus(hwnd, ctrl, _) | Ev::EditKey(hwnd, ctrl, _) if self.panel_index(hwnd).is_some() => {
+                let i = self.panel_index(hwnd).unwrap();
+                let what = match ev {
+                    Ev::EditFocus(_, _, on) => EditWhat::Focus(on),
+                    Ev::EditKey(_, _, vk) => EditWhat::Key(vk),
+                    _ => EditWhat::Change,
+                };
+                self.edit_event(i, ctrl, what);
+            }
+            Ev::EditChange(..) | Ev::EditFocus(..) | Ev::EditKey(..) => {}
             Ev::Key { hwnd, vk } => {
                 if self.menu.is_open() {
                     let context = self.menu.context;
@@ -1427,6 +1519,9 @@ impl App {
         for (t, ..) in &self.later {
             next = next.min(*t);
         }
+        for t in [self.panels_due(), self.welcome_at].into_iter().flatten() {
+            next = next.min(t);
+        }
         if let Some(Some(until)) = self.focus_until {
             let secs = (until - win::now()).max(0.0);
             next = next.min(Instant::now() + Duration::from_secs_f64(secs));
@@ -1449,6 +1544,11 @@ impl App {
         let now = Instant::now();
         self.tooltip.tick();
         self.menu.watch();
+        self.panels_tick();
+        if self.welcome_at.is_some_and(|t| now >= t) {
+            self.welcome_at = None;
+            self.open_welcome();
+        }
         self.toast.frame();
         self.edit_bar.frame();
         if self.toast_until.is_some_and(|t| now >= t) {
@@ -1541,6 +1641,17 @@ impl App {
             self.check_alerts();
         }
     }
+
+    // ---------- atualizações ----------
+
+    fn check_updates(&mut self, manual: bool) {
+        self.update_status = "Procurar atualizações chega na próxima etapa".into();
+        if manual {
+            self.panels_changed();
+        }
+    }
+
+    fn install_update(&mut self) {}
 
     pub fn exit(&mut self) {
         self.tray.remove();

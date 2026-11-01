@@ -507,6 +507,16 @@ impl Canvas {
         unsafe { self.rt.FillRectangle(&r, &self.brush(c)) }
     }
 
+    /// Recorte retangular (área rolável): até `pop_rect_clip`, só aparece o que estiver dentro.
+    pub fn push_rect_clip(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let r = self.rect_px(x0, y0, x1, y1);
+        unsafe { self.rt.PushAxisAlignedClip(&r, D2D1_ANTIALIAS_MODE_ALIASED) }
+    }
+
+    pub fn pop_rect_clip(&mut self) {
+        unsafe { self.rt.PopAxisAlignedClip() }
+    }
+
     /// Daqui até `pop_clip`, só aparece o que estiver dentro do retângulo arredondado.
     pub fn push_round_clip(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
         let s = self.s;

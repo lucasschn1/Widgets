@@ -371,3 +371,22 @@ pub fn bring_to_front(hwnd: HWND) {
         let _ = SetForegroundWindow(hwnd);
     }
 }
+
+/// Barra de título escura (da cor do fundo, no Windows 11), cantos arredondados e, nas janelas
+/// sem barra, uma borda discreta.
+pub fn style_window(hwnd: HWND, caption: Option<crate::theme::Rgba>, frameless: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+    let set = |attr: i32, value: u32| unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(attr), &value as *const u32 as _, 4);
+    };
+    let colorref = |c: crate::theme::Rgba| c.0 as u32 | (c.1 as u32) << 8 | (c.2 as u32) << 16;
+    set(20, 1); // modo escuro
+    set(33, 2); // cantos arredondados
+    if let Some(c) = caption {
+        set(35, colorref(c)); // cor da barra de título
+        set(36, 0x00F5F2F2); // cor do título
+    }
+    if frameless {
+        set(34, colorref(crate::theme::Rgba::rgb(60, 60, 70))); // borda
+    }
+}

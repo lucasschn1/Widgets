@@ -212,3 +212,30 @@ fn load_wallpaper(path: &str) -> Option<Image> {
     // a cópia do Windows é a imagem que está na tela
     gfx::load_image(&transcoded()).or_else(|| gfx::load_image(std::path::Path::new(path)))
 }
+
+impl Backdrop {
+    /// Como `glass`, mas com outro desfoque e escurecimento (prévia ao vivo nas configurações).
+    pub fn glass_with(&self, content: &Image, radius: f32, x: i32, y: i32, blur_px: f64, tint: f64) -> Image {
+        let (w, h) = (content.w, content.h);
+        let (bx, by, bw, bh) = self.bbox(x, y, w, h);
+        let sigma = blur_px as f32 * self.s / DOWN;
+        let pad = (3.0 * sigma + 2.0).ceil();
+        let ox = (bx - pad).max(0.0).floor();
+        let oy = (by - pad).max(0.0).floor();
+        let cw = ((bx + bw + pad).min(self.sharp.w as f32) - ox).ceil().max(1.0) as u32;
+        let ch = ((by + bh + pad).min(self.sharp.h as f32) - oy).ceil().max(1.0) as u32;
+        let mut piece = self.sharp.crop(ox as u32, oy as u32, cw, ch);
+        blur(&mut piece.px, cw, ch, 3, sigma);
+        let mut base = piece.sample(bx - ox, by - oy, bw, bh, w, h);
+        let gray = base.gray();
+        let light = gray.iter().map(|&g| g as u64).sum::<u64>() as f32 / gray.len().max(1) as f32 / 255.0;
+        let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
+        let t = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
+        for p in base.px.chunks_exact_mut(3) {
+            for (c, tc) in p.iter_mut().zip(t) {
+                *c = (*c as f32 + (tc - *c as f32) * amount).round() as u8;
+            }
+        }
+        finish_glass(&base.to_image(), content, radius, self.s)
+    }
+}

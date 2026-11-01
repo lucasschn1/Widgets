@@ -49,6 +49,16 @@ pub struct Slide {
     dur: Duration,
 }
 
+/// Desenha um widget num tamanho e escala quaisquer (miniaturas, prévia).
+pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
+    let l = kind.layout(mode);
+    let mut c = Canvas::new((l.w * s).round() as u32, (l.h * s).round() as u32, s);
+    c.text_scale = sh.text_scale;
+    let env = Env { cfg: &sh.cfg, key: kind.key() };
+    kind.draw(&mut c, mode, &env);
+    c.finish()
+}
+
 pub struct Card {
     pub kind: Box<dyn Kind>,
     pub hwnd: HWND,
