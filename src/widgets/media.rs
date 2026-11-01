@@ -21,11 +21,11 @@ use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
 use windows_future::IAsyncOperation;
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{self, Anchor, Canvas, Face, Image};
-use crate::imgops::Rgb;
+use crate::imgops::{blur, Rgb};
 use crate::theme::*;
 use crate::win;
 
@@ -108,6 +108,8 @@ pub fn fmt_time(seconds: f64) -> String {
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub empty: bool,
+    /// quem está tocando (ex.: "Spotify.exe", "MSEdge"): para achar o áudio dele no mixer
+    pub app_id: String,
     pub pref: String,
     pub kind: &'static str,
     pub title: String,
@@ -151,6 +153,7 @@ enum Cmd {
 mod mixer {
     use windows::core::{Interface, PWSTR};
     use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
     use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -196,6 +199,11 @@ mod mixer {
             }
         }
         out
+    }
+
+    /// Medidores de pico das sessões de áudio do app (a "luz" do volume no mixer do Windows).
+    pub fn meters(app_id: &str) -> Vec<IAudioMeterInformation> {
+        sessions(app_id).into_iter().filter_map(|v| v.cast::<IAudioMeterInformation>().ok()).collect()
     }
 
     pub fn get(app_id: &str) -> Option<f32> {
@@ -282,6 +290,7 @@ impl Reader {
         let duration = ticks_to_secs(timeline.EndTime()?.Duration - timeline.StartTime()?.Duration);
         Ok(Snapshot {
             empty: false,
+            app_id: app_id.clone(),
             pref: pref.into(),
             kind: media_kind(&app_id),
             title: if title.is_empty() { "Sem título".into() } else { title },
@@ -366,7 +375,7 @@ const G_VOL_Y: f32 = 214.0;
 const G_TOG_Y: f32 = 250.0;
 const H: f32 = G_TOG_Y + 28.0;
 const VOL_X: (f32, f32) = (44.0, W - 44.0);
-const RADIUS: f32 = 26.0;
+const RADIUS: f32 = RADIUS_G;
 const ART: f32 = 76.0;
 const ART_RADIUS: f32 = 14.0;
 const ART_XY: (f32, f32) = (18.0, 18.0);
@@ -388,7 +397,7 @@ const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0);
 
 // médio: capa, título e artista, controles e uma barra de progresso fina
 const MEDIUM_H: f32 = 102.0;
-const M_RADIUS: f32 = 24.0;
+const M_RADIUS: f32 = RADIUS_M;
 const M_ART: f32 = 74.0;
 const M_ART_RADIUS: f32 = 12.0;
 const M_ART_XY: (f32, f32) = (14.0, 14.0);
@@ -406,6 +415,67 @@ const FADE_MS: f32 = 600.0;
 const BG_ZOOM: f32 = 1.2;
 const HUD: Duration = Duration::from_millis(1100);
 
+/// Duas cores fortes e diferentes da capa (para as ondas da ilha).
+fn art_colors(art: &Image) -> [Rgba; 2] {
+    let tiny = gfx::resize(&gfx::fit_square(art, 64), 6, 6);
+    // as mais vivas (saturadas e claras) primeiro
+    let mut px: Vec<(f32, Rgba)> = tiny
+        .px
+        .chunks(4)
+        .map(|p| {
+            let (b, g, r) = (p[0] as f32, p[1] as f32, p[2] as f32);
+            let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+            let sat = if mx > 0.0 { (mx - mn) / mx } else { 0.0 };
+            (sat * 0.7 + mx / 255.0 * 0.3, Rgba::rgb(p[2], p[1], p[0]))
+        })
+        .collect();
+    px.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let first = px[0].1;
+    let far = |c: Rgba| (c.0 as i32 - first.0 as i32).abs() + (c.1 as i32 - first.1 as i32).abs() + (c.2 as i32 - first.2 as i32).abs();
+    let second = px.iter().map(|p| p.1).find(|&c| far(c) > 90).unwrap_or(first.mix(WHITE, 0.4));
+    // claras o bastante para aparecer no preto
+    let lift = |c: Rgba| {
+        let l = c.0.max(c.1).max(c.2) as f32;
+        if l < 150.0 { c.mix(WHITE, (150.0 - l) / 255.0 + 0.1) } else { c }
+    };
+    [lift(first), lift(second)]
+}
+
+/// O fundo "capa viva" (w×h pixels) a partir da capa: ver `Media::background`.
+fn live_background(art: &Image, w: u32, h: u32) -> Image {
+    // a capa pequena guarda onde fica cada cor; mais saturada, para o fundo não ficar apagado
+    let tiny = gfx::resize(&gfx::fit_square(art, 96), 24, 24);
+    let mut rgb = Rgb::from_image(&tiny);
+    rgb.saturate(1.5);
+    let tiny = rgb.to_image();
+    // desfoque de verdade em meia resolução: manchas redondas, sem os quadrados da capa
+    let (hw, hh) = ((w / 2).max(8), (h / 2).max(8));
+    let mut detail = gfx::resize(&tiny, hw, hh);
+    let mut soft = detail.clone();
+    blur(&mut detail.px, hw, hh, 4, hh as f32 / 8.0);
+    blur(&mut soft.px, hw, hh, 4, hh as f32 / 3.0);
+    for (p, q) in detail.px.chunks_mut(4).zip(soft.px.chunks(4)) {
+        for ch in 0..3 {
+            p[ch] = ((p[ch] as f32 * 0.55 + q[ch] as f32 * 0.45) * 0.85) as u8;
+        }
+        p[3] = 255;
+    }
+    // já está tudo suave: ampliar agora não cria degraus
+    let mut big = gfx::resize(&detail, w, h);
+    // ruído fino (o mesmo nos três canais) para o degradê não virar faixas
+    for (i, p) in big.px.chunks_mut(4).enumerate() {
+        let mut n = (i as u32).wrapping_mul(0x9E37_79B9);
+        n ^= n >> 15;
+        n = n.wrapping_mul(0x85EB_CA6B);
+        n ^= n >> 13;
+        let d = (n % 3) as i16 - 1;
+        for ch in 0..3 {
+            p[ch] = (p[ch] as i16 + d).clamp(0, 255) as u8;
+        }
+    }
+    big
+}
+
 // ações
 const TOGGLE: u32 = 1;
 const NEXT: u32 = 2;
@@ -414,6 +484,7 @@ const OPEN_PLAYER: u32 = 4;
 const SHUFFLE: u32 = 6;
 const REPEAT: u32 = 7;
 const SOURCE: u32 = 10; // + índice em SOURCES
+const ISLAND: u32 = 8;
 const SEEK: u32 = 1000; // + milésimos da música (0 a 1000)
 const VOLUME: u32 = 3000; // + volume (0 a 100)
 
@@ -446,6 +517,10 @@ pub struct Media {
     volume_wanted: Option<(f32, Instant)>,
     /// próximo quadro da troca de fundo (um prazo fixo)
     frame_at: Instant,
+    /// medidores de som do app que está tocando (para as ondas da ilha): (app, medidores)
+    meters: RefCell<Option<(String, Vec<windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation>)>>,
+    /// cores da capa já calculadas: (capa, cores)
+    colors: RefCell<Option<(String, [Rgba; 2])>>,
 }
 
 impl Media {
@@ -479,6 +554,8 @@ impl Media {
             hud_until: None,
             volume_wanted: None,
             frame_at: next,
+            meters: RefCell::new(None),
+            colors: RefCell::new(None),
         }
     }
 
@@ -700,9 +777,13 @@ impl Media {
         true
     }
 
-    /// Fundo "capa viva": a capa reduzida a 12×12, mais saturada e ampliada (a ampliação suave
-    /// vira manchas de cor no mesmo lugar em que estão na capa), misturada com uma versão ainda
-    /// mais borrada. Fica maior que o cartão para ter espaço de se mexer.
+    /// Fundo "capa viva": as cores da capa no mesmo lugar em que estão nela, mais saturadas e
+    /// bem desfocadas (manchas de cor), misturadas com uma versão ainda mais borrada. Fica maior
+    /// que o cartão para ter espaço de se mexer.
+    ///
+    /// A capa é reduzida e o desfoque é gaussiano, feito em meia resolução: ampliar uma imagem
+    /// minúscula direto deixaria degraus e dobras no lugar de cada pixel. No fim entra um ruído
+    /// quase invisível, para o degradê não formar faixas.
     fn background(&self, s: f32, mode: Mode) -> Option<Image> {
         let m = self.media.as_ref().filter(|m| !m.empty)?;
         let (art, key) = (m.art.as_ref()?, m.art_key.as_ref()?);
@@ -711,18 +792,7 @@ impl Media {
         let cache_key = (key.clone(), w, h);
         let mut cache = self.bg_cache.borrow_mut();
         if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
-            let tiny = gfx::resize(&gfx::fit_square(art, 96), 12, 12);
-            let mut rgb = Rgb::from_image(&tiny);
-            rgb.saturate(1.5);
-            let tiny = rgb.to_image();
-            let mut big = gfx::resize(&tiny, w, h);
-            let soft = gfx::resize(&gfx::resize(&tiny, 4, 4), w, h);
-            for (p, q) in big.px.chunks_mut(4).zip(soft.px.chunks(4)) {
-                for ch in 0..3 {
-                    p[ch] = ((p[ch] as f32 * 0.55 + q[ch] as f32 * 0.45) * 0.85) as u8;
-                }
-            }
-            *cache = Some((cache_key, big));
+            *cache = Some((cache_key, live_background(art, w, h)));
         }
         cache.as_ref().map(|c| c.1.clone())
     }
@@ -1067,10 +1137,9 @@ impl Kind for Media {
                 return Some(SEEK + (f * 1000.0).round() as u32);
             }
         }
-        if self.on_art(x, y, mode) {
-            return env.shortcuts().then_some(OPEN_PLAYER);
-        }
-        None
+        // fora dos botões: o widget vira a ilha flutuante
+        let _ = env;
+        self.has_media().then_some(ISLAND)
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
@@ -1086,6 +1155,7 @@ impl Kind for Media {
                 let _ = self.tx.send(Cmd::Prev);
             }
             OPEN_PLAYER => self.open_player(ctx),
+            ISLAND => ctx.out.push(Request::Island),
             SHUFFLE => {
                 let _ = self.tx.send(Cmd::Shuffle(m.shuffle != Some(true)));
             }
@@ -1180,19 +1250,8 @@ impl Kind for Media {
         if !m.artist.is_empty() {
             song += &format!("\n\n{}", m.artist);
         }
-        if self.on_art(x, y, mode) {
-            let hint = if env.shortcuts() { "Clique para abrir o player" } else { "" };
-            if hint.is_empty() {
-                return Some(song);
-            }
-            return Some(song + if m.artist.is_empty() { "\n\n" } else { "\n" } + hint);
-        }
-        let text_area = match mode {
-            Mode::P => (86.0..=128.0).contains(&y),
-            Mode::M => x >= M_TEXT_X && y < M_CTRL_Y - 18.0,
-            Mode::G => x >= TEXT_X && y < BAR_Y - 6.0,
-        };
-        text_area.then_some(song)
+        let _ = (env, x, y, mode);
+        Some(song + if m.artist.is_empty() { "\n\n" } else { "\n\n" } + "Clique para virar a ilha flutuante")
     }
 
     /// Roda do mouse: o volume do app que está tocando (ou o do Windows, se não achar o app).
@@ -1212,6 +1271,50 @@ impl Kind for Media {
         let pref = env.wcfg().str_of("fonte").unwrap_or("auto");
         let sources = SOURCES.iter().enumerate().map(|(i, (v, label))| MenuItem::Radio(label.to_string(), *v == pref, SOURCE + i as u32)).collect();
         vec![MenuItem::Sub("Mostrar".into(), sources)]
+    }
+
+    fn island(&self) -> Option<IslandInfo> {
+        let m = self.media.as_ref().filter(|m| !m.empty)?;
+        let key = m.art_key.clone().unwrap_or_default();
+        let cached = self.colors.borrow().as_ref().filter(|c| c.0 == key).map(|c| c.1);
+        let colors = cached.unwrap_or_else(|| {
+            let found = m.art.as_ref().map(|a| art_colors(a)).unwrap_or([Rgba::rgb(10, 132, 255), Rgba::rgb(191, 90, 242)]);
+            *self.colors.borrow_mut() = Some((key, found));
+            found
+        });
+        let app = match m.kind {
+            "spotify" => "Spotify",
+            "youtube" => "YouTube",
+            _ => "Mídia",
+        };
+        Some(IslandInfo {
+            title: m.title.clone(),
+            artist: m.artist.clone(),
+            app: app.into(),
+            art: m.art.clone(),
+            colors,
+            playing: m.playing,
+            position: self.position(),
+            duration: m.duration,
+            can_prev: m.can_prev,
+            can_toggle: m.can_toggle,
+            can_next: m.can_next,
+            can_seek: m.can_seek,
+        })
+    }
+
+    fn sound_level(&self) -> Option<f32> {
+        let m = self.media.as_ref().filter(|m| !m.empty && !m.app_id.is_empty())?;
+        let mut meters = self.meters.borrow_mut();
+        if meters.as_ref().map(|x| x.0 != m.app_id).unwrap_or(true) {
+            *meters = Some((m.app_id.clone(), mixer::meters(&m.app_id)));
+        }
+        let list = &meters.as_ref()?.1;
+        if list.is_empty() {
+            return None;
+        }
+        let peak = list.iter().filter_map(|meter| unsafe { meter.GetPeakValue().ok() }).fold(0.0f32, f32::max);
+        Some(peak)
     }
 
     fn next_tick(&self) -> Option<Instant> {

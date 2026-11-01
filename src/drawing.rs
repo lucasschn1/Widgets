@@ -20,6 +20,11 @@ pub fn ring(c: &mut Canvas, cx: f32, cy: f32, diameter: f32, width: f32, frac: f
         c.stroke_circle(cx, cy, rc, color, width);
     } else {
         c.arc(cx, cy, rc, -90.0, end, color, width);
+        // a ponta brilha um pouco, como uma luz no fim do traço
+        let a = end.to_radians();
+        let (tx, ty) = (cx + rc * a.cos(), cy + rc * a.sin());
+        c.fill_circle(tx, ty, width * 0.95, color.alpha(0.22));
+        c.fill_circle(tx, ty, width * 0.62, color.mix(Rgba::rgb(255, 255, 255), 0.35));
     }
 }
 

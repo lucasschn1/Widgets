@@ -619,8 +619,8 @@ impl Tempo {
     fn radius(mode: Mode) -> f32 {
         match mode {
             Mode::P => SMALL_RADIUS,
-            Mode::M => 24.0,
-            Mode::G => 26.0,
+            Mode::M => RADIUS_M,
+            Mode::G => RADIUS_G,
         }
     }
 
@@ -855,6 +855,18 @@ impl Tempo {
         let (w, h) = (Self::width(mode), self.height(mode));
         let (top, bottom) = sky(self.code(), self.is_day());
         c.gradient_round_rect(0.0, 0.0, w, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h.min(G_H));
+        // a luz do sol (ou da lua) vindo do canto de cima, com o céu limpo
+        if self.code() <= 2 {
+            let (warm, amount) = if self.is_day() { (Rgba::rgb(255, 214, 130), 0.4) } else { (Rgba::rgb(200, 210, 255), 0.25) };
+            c.push_round_clip(0.0, 0.0, w, h, Self::radius(mode));
+            // muitos círculos bem fracos, para a luz sumir sem degraus
+            let steps = 40;
+            for i in 0..steps {
+                let r = 160.0 - i as f32 * (150.0 / steps as f32);
+                c.fill_circle(w - 26.0, -6.0, r, warm.alpha(amount / steps as f32));
+            }
+            c.pop_clip();
+        }
         if !self.is_day() && self.code() <= 2 {
             let mut seed: u32 = 7;
             let mut rnd = || {
@@ -871,8 +883,9 @@ impl Tempo {
     /// Cidade, temperatura grande e, à direita, ícone, condição e máxima/mínima.
     fn draw_top(&self, c: &mut Canvas, env: &Env) {
         let city = self.city(env);
-        c.text(PAD, 13.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(170.0));
-        c.text(PAD - 2.0, 30.0, &self.temp_text(), Face::Light, 40.0, FG, Anchor::LA, None);
+        c.text(PAD - 1.0, 14.0, "\u{e707}", Face::Icons, 11.5, FG, Anchor::LA, None);
+        c.text(PAD + 14.0, 13.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(190.0));
+        c.text(PAD - 2.0, 28.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = 30.0;

@@ -125,6 +125,20 @@ pub fn area_at(x: i32, y: i32) -> Rect {
     monitor_of(monitor).map(|(m, _)| m.work).unwrap_or_else(|| work_areas()[0])
 }
 
+/// O monitor onde está (ou mais perto de) o ponto: (tela inteira, área de trabalho).
+pub fn monitor_at(x: i32, y: i32) -> (Rect, Rect) {
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    monitor_of(monitor).map(|(m, _)| (m.screen, m.work)).unwrap_or_else(|| {
+        let a = work_areas()[0];
+        (a, a)
+    })
+}
+
+/// Se o ponto está em algum monitor.
+pub fn on_screen(x: i32, y: i32) -> bool {
+    monitors().iter().any(|r| x >= r.0 && x < r.2 && y >= r.1 && y < r.3)
+}
+
 /// Área de trabalho do monitor onde está o mouse (onde a pessoa está olhando).
 pub fn area_at_pointer() -> Rect {
     let (x, y) = pointer();

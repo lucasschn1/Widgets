@@ -390,7 +390,6 @@ fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookup
 
 const W: f32 = 320.0;
 const PAD: f32 = 18.0;
-const RADIUS: f32 = 26.0;
 const LIST_Y: f32 = 92.0;
 const ROW_H: f32 = 40.0;
 const ROWS: usize = 6;
@@ -799,8 +798,8 @@ impl Kind for GitHub {
     fn layout(&self, mode: Mode) -> Layout {
         match mode {
             Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
-            Mode::M => Layout { w: W, h: medium_h(), radius: RADIUS },
-            Mode::G => Layout { w: W, h: H, radius: RADIUS },
+            Mode::M => Layout { w: W, h: medium_h(), radius: RADIUS_M },
+            Mode::G => Layout { w: W, h: H, radius: RADIUS_G },
         }
     }
 

@@ -120,6 +120,8 @@ pub struct Gfx {
     formats: RefCell<HashMap<(Face, u32), IDWriteTextFormat>>,
     round: ID2D1StrokeStyle,
     icon_family: &'static str,
+    /// números grandes (temperatura, relógio): a fonte de títulos do Windows 11, se houver
+    display_family: &'static str,
 }
 
 thread_local! {
@@ -148,7 +150,8 @@ impl Gfx {
             };
             let round = d2d.CreateStrokeStyle(&props, None)?;
             let icon_family = if crate::win::font_exists("SegoeIcons.ttf") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
-            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family })
+            let display_family = if crate::win::font_exists("SegUIVar.ttf") { "Segoe UI Variable Display" } else { "Segoe UI" };
+            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family })
         }
     }
 
@@ -160,7 +163,7 @@ impl Gfx {
         let (family, weight): (&str, DWRITE_FONT_WEIGHT) = match face {
             Face::Regular => ("Segoe UI", DWRITE_FONT_WEIGHT_NORMAL),
             Face::Semibold => ("Segoe UI", DWRITE_FONT_WEIGHT_SEMI_BOLD),
-            Face::Light => ("Segoe UI", DWRITE_FONT_WEIGHT_LIGHT),
+            Face::Light => (self.display_family, DWRITE_FONT_WEIGHT_LIGHT),
             Face::Symbol => ("Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL),
             Face::Icons => (self.icon_family, DWRITE_FONT_WEIGHT_NORMAL),
         };

@@ -511,6 +511,7 @@ impl App {
             w.remove("compact");
         }
         self.remember_screens();
+        self.island_screens_changed();
         self.sh.save();
     }
 

@@ -389,8 +389,8 @@ impl Kind for Pomodoro {
     fn layout(&self, mode: Mode) -> Layout {
         match mode {
             Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
-            Mode::M => Layout { w: W, h: MEDIUM_H, radius: 24.0 },
-            Mode::G => Layout { w: W, h: HEIGHT, radius: 26.0 },
+            Mode::M => Layout { w: W, h: MEDIUM_H, radius: RADIUS_M },
+            Mode::G => Layout { w: W, h: HEIGHT, radius: RADIUS_G },
         }
     }
 

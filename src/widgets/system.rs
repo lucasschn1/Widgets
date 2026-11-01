@@ -536,8 +536,8 @@ impl Kind for System {
     fn layout(&self, mode: Mode) -> Layout {
         let radius = match mode {
             Mode::P => SMALL_RADIUS,
-            Mode::M => 24.0,
-            Mode::G => 26.0,
+            Mode::M => RADIUS_M,
+            Mode::G => RADIUS_G,
         };
         Layout { w: if mode == Mode::P { SMALL } else { W }, h: self.height(mode), radius }
     }

@@ -19,6 +19,8 @@ mod panels;
 use panels::{EditWhat, Panel};
 #[path = "app_screens.rs"]
 mod screens;
+#[path = "app_island.rs"]
+pub(crate) mod island;
 use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
@@ -128,6 +130,8 @@ pub struct App {
     next_screens: Instant,
     /// ao abrir com outros monitores: os widgets nascem na posição guardada, mesmo fora da tela
     keep_saved_pos: bool,
+    /// o Tocando agora como ilha flutuante (o cartão fica escondido no lugar dele)
+    island: Option<island::Island>,
     pub quit: bool,
 }
 
@@ -185,6 +189,7 @@ impl App {
             screens_pending: None,
             next_screens: Instant::now() + screens::SCREENS_EVERY,
             keep_saved_pos: false,
+            island: None,
             quit: false,
         };
         let screens_change = app.begin_screens_startup();
@@ -200,6 +205,10 @@ impl App {
             app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
         app.finish_screens_startup(screens_change);
+        // estava como ilha quando o app fechou: continua assim
+        if app.sh.cfg["midia"].bool_of("ilha").unwrap_or(false) && app.find("midia").is_some() {
+            app.open_island(false);
+        }
         app.sh.save();
         if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
             app.welcome_at = Some(Instant::now() + Duration::from_millis(1500));
@@ -240,6 +249,7 @@ impl App {
                         self.cards[i].refresh(&self.sh);
                     }
                 }
+                Request::Island => self.open_island(true),
                 Request::Ask(what) => {
                     let anchor = card.map(|i| self.cards[i].card_rect());
                     let purpose = if what == "city" { prompt::Purpose::City } else { prompt::Purpose::GitHubUser };
@@ -488,6 +498,10 @@ impl App {
                 // os widgets encaixados embaixo sobem para ocupar o lugar
                 let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
                 let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
+                if key == "midia" {
+                    self.drop_island();
+                    self.sh.cfg.obj_mut("midia").insert("ilha".into(), json!(false));
+                }
                 let card = self.cards.remove(i);
                 self.tooltip.hide();
                 events::destroy(card.hwnd);
@@ -1045,6 +1059,9 @@ impl App {
     }
 
     fn menu_command(&mut self, id: u32, card: Option<usize>) {
+        if self.island_menu(id) {
+            return;
+        }
         match id {
             0 => {}
             M_SETTINGS => self.open_settings("geral"),
@@ -1303,6 +1320,9 @@ impl App {
         self.sh.focus = false;
         self.tray.set_tip(tray::TIP);
         for i in 0..self.cards.len() {
+            if self.island.is_some() && self.cards[i].key() == "midia" {
+                continue; // está como ilha
+            }
             events::show(self.cards[i].hwnd, true);
             self.send_to_back(i);
         }
@@ -1507,6 +1527,10 @@ impl App {
                     }
                     return;
                 }
+                if self.island_owns(hwnd) {
+                    self.island_mouse(kind, x, y, sx, sy);
+                    return;
+                }
                 let Some(i) = self.index(hwnd) else { return };
                 match kind {
                     MouseKind::Move => {
@@ -1564,7 +1588,9 @@ impl App {
                 }
             }
             Ev::Wheel { hwnd, delta } => {
-                if let Some(i) = self.index(hwnd) {
+                if self.island_owns(hwnd) {
+                    self.island_wheel(delta);
+                } else if let Some(i) = self.index(hwnd) {
                     self.on_wheel(i, delta);
                 }
             }
@@ -1600,6 +1626,9 @@ impl App {
 
     pub fn next_deadline(&self) -> Instant {
         let mut next = self.next_backdrop.min(self.next_fullscreen).min(self.next_power).min(self.next_alerts).min(self.next_screens);
+        if let Some(t) = self.island_deadline() {
+            next = next.min(t);
+        }
         if let Some(t) = self.tooltip.next_due() {
             next = next.min(t);
         }
@@ -1635,6 +1664,7 @@ impl App {
         self.tooltip.tick();
         self.menu.watch();
         self.panels_tick();
+        self.island_tick();
         if self.welcome_at.is_some_and(|t| now >= t) {
             self.welcome_at = None;
             self.open_welcome();
@@ -1814,6 +1844,7 @@ impl App {
     }
 
     pub fn exit(&mut self) {
+        self.drop_island();
         self.tray.remove();
         for c in self.cards.drain(..) {
             events::destroy(c.hwnd);

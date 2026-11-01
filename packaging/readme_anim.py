@@ -4,6 +4,7 @@
 
 Lê %TEMP%/widgets-readme/<nome>/frames.txt (arquivo e duração em ms por linha) e grava:
 - docs/images/musica.gif: o Tocando agora trocando de música (GIF, para tocar em qualquer lugar)
+- docs/images/ilha.webp: o Tocando agora virando a ilha flutuante e voltando
 - docs/images/tamanhos.webp: o Tempo mudando de tamanho
 Precisa do Pillow (pip install pillow).
 """
@@ -38,9 +39,11 @@ def save_gif(frames, durations, path):
 def main():
     music, music_ms = load("musica")
     save_gif(music, music_ms, ROOT / "docs" / "images" / "musica.gif")
+    island, island_ms = load("ilha")
+    island[0].save(ROOT / "docs" / "images" / "ilha.webp", save_all=True, append_images=island[1:], duration=island_ms, loop=0, quality=86, method=6)
     sizes, sizes_ms = load("tamanhos")
     sizes[0].save(ROOT / "docs" / "images" / "tamanhos.webp", save_all=True, append_images=sizes[1:], duration=sizes_ms, loop=0, quality=88, method=6)
-    for name in ("musica.gif", "tamanhos.webp"):
+    for name in ("musica.gif", "ilha.webp", "tamanhos.webp"):
         p = ROOT / "docs" / "images" / name
         print(f"{p}  ({p.stat().st_size // 1024} KB)")
 

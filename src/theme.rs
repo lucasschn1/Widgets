@@ -53,8 +53,18 @@ pub const BLUR: f64 = 26.0;
 pub const SATURATION: f32 = 1.6;
 pub const TINT: (u8, u8, u8) = (18, 18, 24);
 pub const TINT_AMOUNT: f64 = 0.40;
-pub const SHEEN: f32 = 0.10; // reflexo branco no topo do vidro
-pub const EDGE: (f32, f32) = (0.45, 0.10); // opacidade da borda clara, no topo e na base
+pub const SHEEN: f32 = 0.12; // reflexo branco no topo do vidro
+pub const EDGE: (f32, f32) = (0.42, 0.07); // opacidade da borda clara, no topo e na base
+/// cantos dos cartões por tamanho: médio e grande (o pequeno é SMALL_RADIUS)
+pub const RADIUS_M: f32 = 26.0;
+pub const RADIUS_G: f32 = 28.0;
+
+/// Desaceleração com um leve passo além do ponto, voltando (a "mola" das animações).
+pub fn ease_spring(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (c1, c3) = (0.9, 1.9);
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
 
 pub const HOT_FILL: Rgba = Rgba(255, 255, 255, 42); // destaque do que está sob o mouse
 pub const PRESS_FILL: Rgba = Rgba(0, 0, 0, 80); // o que está sendo apertado "afunda"

@@ -73,6 +73,21 @@ do mouse em cima dele muda o volume do app que está tocando.
   <img src="docs/images/musica.gif" width="380" alt="Tocando agora mudando de cor conforme a música">
 </p>
 
+### Ilha flutuante
+
+Clique no Tocando agora (fora dos botões) e ele vira uma pílula preta por cima de todas as
+janelas. Parada, ela mostra a capa e ondas que seguem o som do app que está tocando. Com o mouse
+em cima, estica e mostra a música, tocar e avançar; com um clique, abre inteira, com a barra de
+progresso. Arraste para qualquer lugar da tela (perto do alto e do meio, ela encaixa lá) e ela
+lembra onde ficou. Em jogo ou vídeo em tela cheia naquele monitor, ela se esconde.
+
+Para devolver o widget à área de trabalho, use **Voltar para a área de trabalho** na ilha aberta
+ou o clique direito. Se nada tocar por 5 minutos, ela volta sozinha.
+
+<p align="center">
+  <img src="docs/images/ilha.webp" width="560" alt="O Tocando agora virando a ilha flutuante, esticando, abrindo e voltando">
+</p>
+
 **GitHub** traz o mapa de contribuições, a sequência de dias e as últimas atividades. Se você
 usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso
 quando alguém pede sua revisão.
@@ -195,6 +210,7 @@ src/
     mod.rs            a lista de widgets e o trait `Kind`, que todo widget implementa
     tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs
   app_screens.rs      vários monitores: o lugar dos widgets em cada combinação de telas
+  app_island.rs       a ilha flutuante do Tocando agora
   readme_images.rs    gera as imagens do README (cargo test readme -- --ignored)
 ```
 
@@ -224,7 +240,7 @@ As imagens do README são desenhadas pelo próprio código, com dados de exemplo
 <summary><b>Lançando uma versão</b></summary>
 
 1. Mude `version` no `Cargo.toml` e faça o commit.
-2. Crie e envie a tag: `git tag v3.4.0` e depois `git push origin main v3.4.0`.
+2. Crie e envie a tag: `git tag v3.5.0` e depois `git push origin main v3.5.0`.
 
 O GitHub Actions compila o `Widgets.exe`, gera o `.zip` e o instalador e publica o Release.
 Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua máquina,

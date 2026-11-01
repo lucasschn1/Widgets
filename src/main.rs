@@ -21,7 +21,7 @@ macro_rules! debug_log {
     };
 }
 
-mod app;
+pub(crate) mod app;
 mod backdrop;
 mod card;
 mod config;

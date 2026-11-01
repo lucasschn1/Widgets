@@ -261,9 +261,11 @@ pub fn finish_glass(base: &Image, content: &Image, radius: f32, s: f32) -> Image
     c.image(base, 0.0, 0.0);
     // reflexo branco no topo, sumindo até 60% da altura
     c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, WHITE.alpha(SHEEN)), (0.6, WHITE.alpha(0.0)), (1.0, WHITE.alpha(0.0))], 0.0, h);
+    c.image(content, 0.0, 0.0);
+    // borda fina e clara por cima de tudo, mais forte no alto, e um fio de luz logo abaixo dela
     let line = s.round().max(1.0);
     c.gradient_stroke_round_rect(0.0, 0.0, w, h, radius, WHITE.alpha(EDGE.0), WHITE.alpha(EDGE.1), line);
-    c.image(content, 0.0, 0.0);
+    c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
     c.pop_clip();
     c.finish()
 }

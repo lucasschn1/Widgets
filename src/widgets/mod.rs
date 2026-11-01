@@ -161,6 +161,37 @@ pub enum Request {
     Redraw,
     /// abrir a pergunta de vidro junto do widget: "city" ou "user"
     Ask(&'static str),
+    /// o Tocando agora vira a ilha flutuante
+    Island,
+}
+
+/// O que a ilha flutuante mostra (vem do Tocando agora).
+#[derive(Clone)]
+pub struct IslandInfo {
+    pub title: String,
+    pub artist: String,
+    /// nome do app que está tocando ("Spotify", "YouTube"...)
+    pub app: String,
+    pub art: Option<std::sync::Arc<crate::gfx::Image>>,
+    /// duas cores fortes da capa (as ondas e o fundo da transformação)
+    pub colors: [crate::theme::Rgba; 2],
+    pub playing: bool,
+    pub position: f64,
+    pub duration: f64,
+    pub can_prev: bool,
+    pub can_toggle: bool,
+    pub can_next: bool,
+    pub can_seek: bool,
+}
+
+/// Ações do Tocando agora que a ilha usa (os mesmos números do widget).
+pub mod island_act {
+    pub const TOGGLE: u32 = 1;
+    pub const NEXT: u32 = 2;
+    pub const PREV: u32 = 3;
+    pub const OPEN_PLAYER: u32 = 4;
+    /// + milésimos da música (0 a 1000)
+    pub const SEEK: u32 = 1000;
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +300,14 @@ pub trait Kind {
     fn retry(&mut self, _ctx: &mut Ctx) {}
     /// Logo depois de criado (começar a buscar dados etc.).
     fn start(&mut self, _ctx: &mut Ctx) {}
+    /// Para a ilha flutuante: o que está tocando (None: nada, ou o widget não é de música).
+    fn island(&self) -> Option<IslandInfo> {
+        None
+    }
+    /// Nível do som do app que está tocando agora (0 a 1; None se não dá para medir).
+    fn sound_level(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// Número no config: aceita inteiro ou fracionário.

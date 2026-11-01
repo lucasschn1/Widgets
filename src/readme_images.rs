@@ -347,6 +347,68 @@ fn readme() {
         println!("{}", dir.display());
     }
 
+    // ---------- ilha flutuante: as três formas e a animação ----------
+    {
+        let info = crate::widgets::IslandInfo {
+            title: SONGS[0].0.into(),
+            artist: SONGS[0].1.into(),
+            app: "Spotify".into(),
+            art: Some(cover(0)),
+            colors: [Rgba::rgb(255, 170, 90), Rgba::rgb(244, 96, 150)],
+            playing: true,
+            position: SONGS[0].2,
+            duration: SONGS[0].3,
+            can_prev: true,
+            can_toggle: true,
+            can_next: true,
+            can_seek: true,
+        };
+        // imagem parada: parada, com o mouse em cima e aberta
+        let shapes = crate::app::island::readme_shapes(&info, S);
+        let labels = ["Parada", "Com o mouse em cima", "Aberta, com um clique"];
+        let (margin, label_h, gap) = (40i32, 34i32, 26i32);
+        let width = shapes.iter().map(|i| i.w as i32).max().unwrap() + 2 * margin;
+        let height = shapes.iter().map(|i| i.h as i32 + label_h + gap).sum::<i32>() + 2 * margin - gap;
+        let wall = wallpaper(width as u32, height as u32);
+        let mut c = Canvas::new(width as u32, height as u32, 1.0);
+        c.image(&wall, 0.0, 0.0);
+        let mut y = margin;
+        for (img, label) in shapes.iter().zip(labels) {
+            c.text(width as f32 / 2.0, (y + label_h - 12) as f32, label, Face::Semibold, 16.0, WHITE.alpha(0.92), Anchor::MS, None);
+            y += label_h;
+            c.image(img, ((width - img.w as i32) / 2) as f32, y as f32);
+            y += img.h as i32 + gap;
+        }
+        save(&c.finish(), &docs().join("ilha.png"));
+
+        // animação: o cartão vira ilha, estica, abre, recolhe e volta para o lugar
+        let dir = frames_dir("ilha");
+        let (w, h) = (820u32, 400u32);
+        let wall = wallpaper(w, h);
+        let bd = Backdrop::from_picture(&wall, BLUR, S);
+        let (card_img, radius) = content(&song(0, 0.0), Mode::M, &cfg);
+        let (cx, cy) = ((w - 40 - card_img.w) as i32, (h - 40 - card_img.h) as i32);
+        let card_geo = (cx as f32, cy as f32, card_img.w as f32, card_img.h as f32, radius);
+        let with_card = compose(&wall, &bd, &[Item { img: card_img, radius, x: cx, y: cy }], &[]);
+        let frames = crate::app::island::readme_frames(&info, card_geo, (w as f32 / 2.0, 14.0), S);
+        let mut list = String::new();
+        for (k, (pill, ms)) in frames.into_iter().enumerate() {
+            let img = match pill {
+                None => with_card.clone(),
+                Some((img, (x, y))) => {
+                    let mut c = Canvas::new(w, h, 1.0);
+                    c.image(&wall, 0.0, 0.0);
+                    c.image(&img, x as f32, y as f32);
+                    c.finish()
+                }
+            };
+            gfx::save_png(&img, &dir.join(format!("{k:03}.png"))).unwrap();
+            list.push_str(&format!("{k:03}.png {ms}\n"));
+        }
+        std::fs::write(dir.join("frames.txt"), list).unwrap();
+        println!("{}", dir.display());
+    }
+
     // ---------- animação: mudando de tamanho ----------
     {
         let dir = frames_dir("tamanhos");
