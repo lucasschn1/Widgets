@@ -190,8 +190,8 @@ rode `packaging\build.ps1`.
 <details>
 <summary><b>A versão 2, em Python</b></summary>
 
-Até a versão 2.0 o app era em Python, com Pillow e Tkinter. O código continua no branch
-[`python`](https://github.com/lucasschn1/Widgets/tree/python). Com a reescrita em Rust, o
+Até a versão 2.0 o app era em Python, com Pillow e Tkinter. O código dessa época continua
+no histórico, na tag [`v2.0.0`](https://github.com/lucasschn1/Widgets/tree/v2.0.0). Com a reescrita em Rust, o
 download caiu de 22 MB para cerca de 1 MB, e o app passou a usar mais ou menos metade da memória.
 
 </details>
