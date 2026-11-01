@@ -35,6 +35,8 @@ pub struct ResizeAnim {
     r1: f32,
     x: i32,
     y: i32,
+    /// posição da janela no fim (pode andar para não passar da borda da tela)
+    to: (i32, i32),
     start: Instant,
     dur: Duration,
     pub save: bool,
@@ -69,6 +71,8 @@ pub struct Card {
     pub pos: (i32, i32),
     /// aberto só enquanto o mouse está em cima (era pequeno)
     pub temp: bool,
+    /// onde o pequeno estava antes de abrir pelo mouse (volta para lá ao fechar)
+    pub temp_home: Option<(i32, i32)>,
     pub hover: f32,
     pub hover_target: f32,
     pub hot: Option<Hot>,
@@ -105,6 +109,7 @@ impl Card {
             margin: (MARGIN * s).round() as i32,
             pos: (0, 0),
             temp: false,
+            temp_home: None,
             hover: 0.0,
             hover_target: 0.0,
             hot: None,
@@ -178,6 +183,38 @@ impl Card {
         (right - w - self.margin, bottom + (WIDGET_GAP * self.s).round() as i32 - self.margin)
     }
 
+    /// Na metade direita do monitor, o cartão cresce para a esquerda (a borda direita fica parada).
+    pub fn grows_left(&self, rect: win::Rect) -> bool {
+        let a = win::area_for(rect);
+        rect.0 + rect.2 > a.0 + a.2
+    }
+
+    /// Onde fica a janela quando o cartão em `old` passa a ter `size`: cresce para o lado de
+    /// dentro da tela e, se o lado que cresceu passaria da borda, anda só o necessário para
+    /// caber (nunca fica mais cortado do que já estava).
+    pub fn target_for(&self, old: win::Rect, size: (i32, i32)) -> (i32, i32) {
+        let a = win::area_for(old);
+        let edge = (EDGE_GAP * self.s).round() as i32;
+        let (w, h) = size;
+        let mut x0 = if self.grows_left(old) { old.2 - w } else { old.0 };
+        let mut y0 = old.1;
+        if x0 + w > old.2 && x0 + w > a.2 - edge {
+            x0 = ((a.2 - edge).max(old.2.min(a.2)) - w).max(a.0);
+        }
+        if x0 < old.0 && x0 < a.0 + edge {
+            x0 = (a.0 + edge).min(old.0.max(a.0));
+        }
+        if y0 + h > old.3 && y0 + h > a.3 - edge {
+            y0 = ((a.3 - edge).max(old.3.min(a.3)) - h).max(a.1);
+        }
+        (x0 - self.margin, y0 - self.margin)
+    }
+
+    /// Posição em que termina a animação de tamanho em andamento.
+    pub fn resize_goal(&self) -> Option<(i32, i32)> {
+        self.anim.as_ref().map(|a| a.to)
+    }
+
     pub fn set_scale(&mut self, s: f32) {
         self.s = s;
         self.margin = (MARGIN * s).round() as i32;
@@ -221,7 +258,7 @@ impl Card {
         self.status = self.kind.status();
         // na bateria, com a economia ligada, as animações contínuas param
         self.fps = if sh.saving { 0 } else { self.kind.overlay_fps() };
-        if sh.suspended() && self.content.is_some() {
+        if sh.suspended_at(self.card_rect()) && self.content.is_some() {
             self.stale = true; // redesenha quando voltar a aparecer
             return;
         }
@@ -246,6 +283,7 @@ impl Card {
         }
         let old = self.content.take().unwrap();
         let old_h = old.h as i32;
+        let to = self.target_for(self.card_rect_at(self.pos, Some((old.w as i32, old_h))), (w, h));
         let new = self.render(self.mode, sh);
         let r = self.radius_px(self.mode);
         self.anim = Some(ResizeAnim {
@@ -255,6 +293,7 @@ impl Card {
             r1: r,
             x: self.pos.0,
             y: self.pos.1,
+            to,
             start: Instant::now(),
             dur: Duration::from_millis(if sh.animations { GROW_MS } else { 0 }),
             save: false,
@@ -279,9 +318,10 @@ impl Card {
     /// Barato: não redesenha o conteúdo. Com `move_win`, também leva a janela para `pos`.
     pub fn present(&mut self, sh: &Shared, move_win: bool) {
         let Some(content) = &self.content else { return };
-        if sh.suspended() && !move_win {
+        if sh.suspended_at(self.card_rect()) && !move_win {
             return;
-        }        let m = self.margin;
+        }
+        let m = self.margin;
         let key = (self.pos, sh.backdrop.version, (content.w, content.h));
         if self.composed.as_ref().map(|c| (c.0, c.1, c.2)) != Some(key) {
             let glass = sh.backdrop.glass(content, self.radius_px(self.mode), self.pos.0 + m, self.pos.1 + m, sh.tint);
@@ -448,20 +488,19 @@ impl Card {
         self.hover_target = if on { 1.0 } else { 0.0 };
     }
 
-    /// Começa a animação de mudar de tamanho (o App move os vizinhos).
-    pub fn resize_to(&mut self, mode: Mode, sh: &Shared, save: bool) {
+    /// Começa a animação de mudar de tamanho, terminando com a janela em `to` (o App move os
+    /// vizinhos).
+    pub fn resize_to(&mut self, mode: Mode, sh: &Shared, save: bool, to: (i32, i32)) {
         if self.anim.is_some() || mode == self.mode || !self.kind.sizes().contains(&mode) {
             return;
         }
+        let right = self.grows_left(self.card_rect());
         let old = self.render(self.mode, sh);
         let r0 = self.radius_px(self.mode);
-        let old_mode = self.mode;
         self.mode = mode;
         let new = self.render(mode, sh);
         let r1 = self.radius_px(mode);
         let (x, y) = self.pos;
-        let win_w = old.w as i32 + 2 * self.margin;
-        let screen_w = win::area_for(self.card_rect_at(self.pos, Some(self.card_size_of(old_mode)))).2;
         self.anim = Some(ResizeAnim {
             old,
             new,
@@ -469,10 +508,11 @@ impl Card {
             r1,
             x,
             y,
+            to,
             start: Instant::now(),
             dur: Duration::from_millis(if sh.animations { ANIM_MS } else { 0 }),
             save,
-            right: x + win_w / 2 > screen_w / 2,
+            right,
         });
         self.hot = None;
         self.content = None;
@@ -495,14 +535,16 @@ impl Card {
         let fade = ease_in_out(((t - 0.1) / 0.7).clamp(0.0, 1.0));
         let content = Image::blend(&place(&a.old), &place(&a.new), fade);
         let m = self.margin;
-        let x = a.x + if a.right { a.old.w as i32 - w as i32 } else { 0 };
+        // a janela vai de onde estava até `to` junto com o tamanho
+        let x = (a.x as f32 + (a.to.0 - a.x) as f32 * e).round() as i32;
+        let y = (a.y as f32 + (a.to.1 - a.y) as f32 * e).round() as i32;
         let radius = a.r0 + (a.r1 - a.r0) * e;
-        let glass = sh.backdrop.glass(&content, radius, x + m, a.y + m, sh.tint);
+        let glass = sh.backdrop.glass(&content, radius, x + m, y + m, sh.tint);
         let mut img = Image::new(w + 2 * m as u32, h + 2 * m as u32);
         img.over(&glass, m, m);
-        win::blit(self.hwnd, &img, Some((x, a.y)), self.opacity(sh));
+        win::blit(self.hwnd, &img, Some((x, y)), self.opacity(sh));
         if t >= 1.0 {
-            self.pos = (x, a.y);
+            self.pos = a.to;
             return true;
         }
         false

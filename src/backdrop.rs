@@ -27,9 +27,9 @@ struct Signature {
     tile: String,
     color: String,
     mtime: Option<std::time::SystemTime>,
-    screens: Vec<win::Rect>,
+    /// (monitor, escala x100, papel de parede só dele)
+    screens: Vec<(win::Rect, i64, String)>,
     blur: i64,
-    scale: i64,
 }
 
 pub struct Backdrop {
@@ -37,6 +37,9 @@ pub struct Backdrop {
     pub version: u64,
     origin: (i32, i32),
     s: f32,
+    /// cada monitor e a sua escala (o vidro de cada um segue a escala dele)
+    screens: Vec<(win::Rect, f32)>,
+    walls: win::Wallpapers,
     image: Rgb,
     sharp: Rgb,
     gray: Vec<u8>,
@@ -44,21 +47,28 @@ pub struct Backdrop {
 
 impl Backdrop {
     pub fn new(blur_px: f64, s: f32) -> Backdrop {
-        let mut b = Backdrop { sig: None, version: 0, origin: (0, 0), s, image: Rgb::filled(1, 1, (0, 0, 0)), sharp: Rgb::filled(1, 1, (0, 0, 0)), gray: vec![0] };
+        let mut b = Backdrop { sig: None, version: 0, origin: (0, 0), s, screens: Vec::new(), walls: win::Wallpapers::new(), image: Rgb::filled(1, 1, (0, 0, 0)), sharp: Rgb::filled(1, 1, (0, 0, 0)), gray: vec![0] };
         b.check(blur_px);
         b
     }
 
-    fn signature(&self, blur_px: f64) -> Signature {
+    fn signature(&mut self, blur_px: f64) -> Signature {
+        let walls = self.walls.list();
+        let screens = win::monitor_list()
+            .into_iter()
+            .map(|m| {
+                let own = walls.iter().find(|(r, _)| *r == m.screen).map(|(_, p)| p.clone()).unwrap_or_default();
+                (m.screen, (m.scale * 100.0).round() as i64, own)
+            })
+            .collect();
         Signature {
             path: win::registry(DESKTOP, "WallPaper"),
             style: win::registry(DESKTOP, "WallpaperStyle"),
             tile: win::registry(DESKTOP, "TileWallpaper"),
             color: win::registry(COLORS, "Background"),
             mtime: std::fs::metadata(transcoded()).and_then(|m| m.modified()).ok(),
-            screens: win::monitors(),
+            screens,
             blur: blur_px.round() as i64,
-            scale: (self.s * 100.0) as i64,
         }
     }
 
@@ -77,21 +87,39 @@ impl Backdrop {
     fn build(&mut self, sig: &Signature, blur_px: f64) {
         let mut screens = sig.screens.clone();
         if screens.is_empty() {
-            screens = vec![win::work_areas()[0]];
+            screens = vec![(win::work_areas()[0], (self.s * 100.0).round() as i64, String::new())];
         }
-        let left = screens.iter().map(|r| r.0).min().unwrap();
-        let top = screens.iter().map(|r| r.1).min().unwrap();
-        let right = screens.iter().map(|r| r.2).max().unwrap();
-        let bottom = screens.iter().map(|r| r.3).max().unwrap();
+        self.screens = screens.iter().map(|(r, scale, _)| (*r, *scale as f32 / 100.0)).collect();
+        let left = screens.iter().map(|s| s.0.0).min().unwrap();
+        let top = screens.iter().map(|s| s.0.1).min().unwrap();
+        let right = screens.iter().map(|s| s.0.2).max().unwrap();
+        let bottom = screens.iter().map(|s| s.0.3).max().unwrap();
         self.origin = (left, top);
         let bg: Vec<u8> = sig.color.split_whitespace().filter_map(|v| v.parse().ok()).collect();
         let bg = if bg.len() >= 3 { (bg[0], bg[1], bg[2]) } else { (0, 0, 0) };
         let w = ((right - left) as f32 / DOWN).ceil() as u32;
         let h = ((bottom - top) as f32 / DOWN).ceil() as u32;
         let mut canvas = Rgb::filled(w.max(1), h.max(1), bg);
-        if let Some(picture) = load_wallpaper(&sig.path) {
+        // cada monitor pode ter o seu papel de parede ("Personalizar" > clique direito na imagem)
+        let first = screens[0].2.clone();
+        let mixed = sig.style != "22" && screens.iter().any(|s| !s.2.eq_ignore_ascii_case(&first));
+        if mixed {
+            let mut loaded: Vec<(String, Option<Image>)> = Vec::new();
+            for (area, _, path) in &screens {
+                if path.is_empty() {
+                    continue; // cor sólida
+                }
+                if !loaded.iter().any(|(p, _)| p == path) {
+                    let picture = gfx::load_image(std::path::Path::new(path)).or_else(|| load_wallpaper(&sig.path));
+                    loaded.push((path.clone(), picture));
+                }
+                if let Some((_, Some(picture))) = loaded.iter().find(|(p, _)| p == path) {
+                    self.paint(&mut canvas, picture, *area, &sig.style, sig.tile == "1");
+                }
+            }
+        } else if let Some(picture) = load_wallpaper(&sig.path) {
             // "Estender" (22) cobre todos os monitores com uma imagem só
-            let areas = if sig.style == "22" { vec![(left, top, right, bottom)] } else { screens };
+            let areas: Vec<win::Rect> = if sig.style == "22" { vec![(left, top, right, bottom)] } else { screens.iter().map(|s| s.0).collect() };
             for area in areas {
                 self.paint(&mut canvas, &picture, area, &sig.style, sig.tile == "1");
             }
@@ -99,7 +127,21 @@ impl Backdrop {
         canvas.saturate(SATURATION);
         self.sharp = canvas.extend_edges(PAD);
         let (cw, ch) = (canvas.w, canvas.h);
-        blur(&mut canvas.px, cw, ch, 3, (blur_px as f32) * self.s / DOWN);
+        let sigma = |scale: i64| (blur_px as f32) * scale as f32 / 100.0 / DOWN;
+        if screens.iter().all(|s| s.1 == screens[0].1) {
+            blur(&mut canvas.px, cw, ch, 3, sigma(screens[0].1));
+        } else {
+            // escalas diferentes: cada monitor desfocado na medida dele
+            for (area, scale, _) in &screens {
+                let x0 = ((area.0 - left) as f32 / DOWN).round().max(0.0) as u32;
+                let y0 = ((area.1 - top) as f32 / DOWN).round().max(0.0) as u32;
+                let w = (((area.2 - area.0) as f32 / DOWN).round() as u32).clamp(1, cw.saturating_sub(x0).max(1));
+                let h = (((area.3 - area.1) as f32 / DOWN).round() as u32).clamp(1, ch.saturating_sub(y0).max(1));
+                let mut piece = canvas.crop(x0, y0, w, h);
+                blur(&mut piece.px, w, h, 3, sigma(*scale));
+                canvas.paste(&piece, x0 as i32, y0 as i32);
+            }
+        }
         self.image = canvas.extend_edges(PAD);
         self.gray = self.image.gray();
     }
@@ -139,6 +181,11 @@ impl Backdrop {
             region.paste(&resized, (aw as i32 - w as i32) / 2, (ah as i32 - h as i32) / 2);
         }
         canvas.paste(&region, x0, y0);
+    }
+
+    /// Escala do monitor onde está o ponto.
+    fn scale_for(&self, x: i32, y: i32) -> f32 {
+        self.screens.iter().find(|(r, _)| x >= r.0 && x < r.2 && y >= r.1 && y < r.3).map(|s| s.1).unwrap_or(self.s)
     }
 
     /// Caixa (na imagem reduzida) correspondente a um retângulo da tela.
@@ -186,7 +233,7 @@ impl Backdrop {
                 *c = (*c as f32 + (t - *c as f32) * amount).round() as u8;
             }
         }
-        finish_glass(&base.to_image(), content, radius, self.s)
+        finish_glass(&base.to_image(), content, radius, self.scale_for(x, y))
     }
 }
 
@@ -218,7 +265,8 @@ impl Backdrop {
     pub fn glass_with(&self, content: &Image, radius: f32, x: i32, y: i32, blur_px: f64, tint: f64) -> Image {
         let (w, h) = (content.w, content.h);
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
-        let sigma = blur_px as f32 * self.s / DOWN;
+        let s = self.scale_for(x, y);
+        let sigma = blur_px as f32 * s / DOWN;
         let pad = (3.0 * sigma + 2.0).ceil();
         let ox = (bx - pad).max(0.0).floor();
         let oy = (by - pad).max(0.0).floor();
@@ -236,6 +284,6 @@ impl Backdrop {
                 *c = (*c as f32 + (tc - *c as f32) * amount).round() as u8;
             }
         }
-        finish_glass(&base.to_image(), content, radius, self.s)
+        finish_glass(&base.to_image(), content, radius, s)
     }
 }

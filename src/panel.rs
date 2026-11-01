@@ -150,10 +150,9 @@ pub struct PanelWin {
 impl PanelWin {
     /// Cria a janela (ainda escondida). `pos`: canto da área de desenho na tela; None: centralizada.
     pub fn new(title: &str, w: f32, h: f32, pos: Option<(i32, i32)>, frameless: bool) -> PanelWin {
-        let anchor = pos.unwrap_or_else(|| {
-            let a = win::work_areas()[0];
-            ((a.0 + a.2) / 2, (a.1 + a.3) / 2)
-        });
+        // sem posição: no meio do monitor onde está o mouse
+        let screen = win::area_at_pointer();
+        let anchor = pos.unwrap_or(((screen.0 + screen.2) / 2, (screen.1 + screen.3) / 2));
         let s = win::scale_at(anchor.0, anchor.1);
         let (pw, ph) = ((w * s).round() as i32, (h * s).round() as i32);
         let (style, ex) = if frameless {
@@ -169,7 +168,7 @@ impl PanelWin {
         let (x, y) = match pos {
             Some((x, y)) => (x + r.left, y + r.top),
             None => {
-                let a = win::work_areas()[0];
+                let a = screen;
                 ((a.0 + a.2 - ww) / 2, ((a.1 + a.3 - wh) / 2 - (20.0 * s) as i32).max(a.1))
             }
         };

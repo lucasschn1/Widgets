@@ -709,6 +709,8 @@ impl App {
             };
             snapshot.insert(key.to_string(), state);
         }
+        // em que monitores estava (para aplicar certo com outra combinação de telas)
+        snapshot.insert("_monitores".into(), super::screens::monitors_to_json(&self.screens));
         self.sh.cfg.obj_mut("app").entry("layouts").or_insert(json!({}))[name] = Value::Object(snapshot);
         self.sh.save();
         self.panels_changed();

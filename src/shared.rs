@@ -18,8 +18,8 @@ pub struct Shared {
     pub peeking: bool,
     /// modo edição: fechar, redimensionar e arrastar à vontade
     pub editing: bool,
-    /// pausado enquanto há um programa em tela cheia
-    pub paused: bool,
+    /// monitores com um programa em tela cheia: os widgets neles ficam pausados
+    pub paused: Vec<win::Rect>,
     /// modo foco: widgets escondidos
     pub focus: bool,
     /// economia de energia (na bateria)
@@ -39,7 +39,7 @@ impl Shared {
             tint: 0.4,
             peeking: false,
             editing: false,
-            paused: false,
+            paused: Vec::new(),
             focus: false,
             saving: false,
         };
@@ -47,9 +47,10 @@ impl Shared {
         sh
     }
 
-    /// Não vale a pena redesenhar: tela cheia ou modo foco.
-    pub fn suspended(&self) -> bool {
-        self.paused || self.focus
+    /// Não vale a pena redesenhar o widget nesse retângulo: modo foco, ou tela cheia no monitor dele.
+    pub fn suspended_at(&self, rect: win::Rect) -> bool {
+        let (cx, cy) = ((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2);
+        self.focus || self.paused.iter().any(|r| cx >= r.0 && cx < r.2 && cy >= r.1 && cy < r.3)
     }
 
     pub fn locked(&self) -> bool {

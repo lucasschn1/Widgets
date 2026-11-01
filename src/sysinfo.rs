@@ -378,6 +378,67 @@ pub fn net_bytes() -> (u64, u64) {
     }
 }
 
+/// Velocidade atual do processador, como o Gerenciador de Tarefas mostra: a velocidade base
+/// vezes o "% de desempenho do processador" (passa de 100% no turbo, cai na economia).
+pub struct CpuSpeed {
+    query: windows::Win32::System::Performance::PDH_HQUERY,
+    counter: windows::Win32::System::Performance::PDH_HCOUNTER,
+    base_mhz: f64,
+}
+
+impl CpuSpeed {
+    pub fn new() -> Option<CpuSpeed> {
+        use windows::Win32::System::Performance::*;
+        use windows::Win32::System::Power::{CallNtPowerInformation, ProcessorInformation, PROCESSOR_POWER_INFORMATION};
+        let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let mut info = vec![PROCESSOR_POWER_INFORMATION::default(); n];
+        let size = (n * std::mem::size_of::<PROCESSOR_POWER_INFORMATION>()) as u32;
+        let ok = unsafe { CallNtPowerInformation(ProcessorInformation, None, 0, Some(info.as_mut_ptr() as _), size) };
+        let base_mhz = info.first().map(|p| p.MaxMhz as f64).unwrap_or(0.0);
+        if ok.is_err() || base_mhz <= 0.0 {
+            return None;
+        }
+        unsafe {
+            let mut query = PDH_HQUERY::default();
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
+                return None;
+            }
+            let mut counter = PDH_HCOUNTER::default();
+            let path = wide(r"\Processor Information(_Total)\% Processor Performance");
+            if PdhAddEnglishCounterW(query, PCWSTR(path.as_ptr()), 0, &mut counter) != 0 {
+                let _ = PdhCloseQuery(query);
+                return None;
+            }
+            let _ = PdhCollectQueryData(query); // a primeira leitura só serve de base
+            Some(CpuSpeed { query, counter, base_mhz })
+        }
+    }
+
+    /// Lê de novo (chamar a cada poucos segundos); None até ter duas leituras.
+    pub fn ghz(&self) -> Option<f64> {
+        use windows::Win32::System::Performance::*;
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return None;
+            }
+            let mut value = PDH_FMT_COUNTERVALUE::default();
+            if PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, None, &mut value) != 0 {
+                return None;
+            }
+            let pct = value.Anonymous.doubleValue;
+            (pct > 0.0).then(|| self.base_mhz * pct / 100.0 / 1000.0)
+        }
+    }
+}
+
+impl Drop for CpuSpeed {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::System::Performance::PdhCloseQuery(self.query);
+        }
+    }
+}
+
 /// Segundos desde que o Windows ligou.
 pub fn uptime() -> u64 {
     unsafe { GetTickCount64() / 1000 }
@@ -420,8 +481,14 @@ mod tests {
     #[test]
     #[ignore] // lê o sistema de verdade: cargo test -- --ignored --nocapture
     fn read_everything() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let speed = CpuSpeed::new().expect("velocidade da CPU");
         let s = Sampler::new();
         s.set_active(true);
+        std::thread::sleep(Duration::from_millis(1000));
+        println!("CPU: {:.2} GHz (base {:.0} MHz)", speed.ghz().expect("leitura da velocidade"), speed.base_mhz);
         std::thread::sleep(Duration::from_millis(3500));
         let mut apps = s.latest().expect("leitura");
         apps.sort_by(|a, b| b.mem.cmp(&a.mem));

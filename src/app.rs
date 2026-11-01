@@ -17,6 +17,8 @@ use crate::popup::{GlassBar, GlassMenu, Part, Place};
 #[path = "app_panels.rs"]
 mod panels;
 use panels::{EditWhat, Panel};
+#[path = "app_screens.rs"]
+mod screens;
 use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
@@ -118,6 +120,14 @@ pub struct App {
     pending_setting: Option<(Instant, &'static str)>,
     /// abrir as boas-vindas (primeira vez)
     welcome_at: Option<Instant>,
+    /// monitores da combinação em que as posições guardadas valem, e o nome dela
+    screens: Vec<win::Monitor>,
+    screens_sig: String,
+    /// combinação nova esperando ficar parada (nome, desde quando)
+    screens_pending: Option<(String, Instant)>,
+    next_screens: Instant,
+    /// ao abrir com outros monitores: os widgets nascem na posição guardada, mesmo fora da tela
+    keep_saved_pos: bool,
     pub quit: bool,
 }
 
@@ -170,8 +180,14 @@ impl App {
             update_rx: None,
             pending_setting: None,
             welcome_at: None,
+            screens: Vec::new(),
+            screens_sig: String::new(),
+            screens_pending: None,
+            next_screens: Instant::now() + screens::SCREENS_EVERY,
+            keep_saved_pos: false,
             quit: false,
         };
+        let screens_change = app.begin_screens_startup();
         let visible: Vec<&str> =
             widgets::KEYS.iter().copied().filter(|k| app.sh.cfg[*k].bool_of("visible").unwrap_or(true)).collect();
         for key in visible {
@@ -183,6 +199,7 @@ impl App {
         if app.cards.is_empty() && !app.tray.ok {
             app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
+        app.finish_screens_startup(screens_change);
         app.sh.save();
         if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
             app.welcome_at = Some(Instant::now() + Duration::from_millis(1500));
@@ -257,7 +274,7 @@ impl App {
         let s = win::scale_at(anchor.0 + 150, anchor.1 + 100);
         let mut card = Card::new(kind, hwnd, mode, s);
         card.pos = match saved {
-            Some(p) if card.visible_on_screen(p) => p,
+            Some(p) if self.keep_saved_pos || card.visible_on_screen(p) => p,
             _ => self.default_pos(&card),
         };
         // está num monitor com outra escala?
@@ -470,7 +487,7 @@ impl App {
             if let Some(i) = self.find(key) {
                 // os widgets encaixados embaixo sobem para ocupar o lugar
                 let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
-                let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.sh.backdrop_scale()).round() as i32;
+                let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
                 let card = self.cards.remove(i);
                 self.tooltip.hide();
                 events::destroy(card.hwnd);
@@ -494,25 +511,55 @@ impl App {
         if self.cards[i].temp {
             self.cards[i].temp = false;
             self.cards[i].mode = Mode::P; // o tamanho "de verdade" era o pequeno
+            if let Some(home) = self.cards[i].temp_home.take() {
+                self.cards[i].pos = home;
+            }
         }
         self.resize_to(i, mode, true, false);
     }
 
+    /// `reflow`: os vizinhos saem da frente; `temporary`: aberto só pelo mouse (fica por cima
+    /// dos vizinhos e, ao fechar, volta para onde estava).
     fn resize_to(&mut self, i: usize, mode: Mode, reflow: bool, temporary: bool) {
         if self.cards[i].animating() || mode == self.cards[i].mode {
             return;
         }
         let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
-        let old_h = self.cards[i].card_size().1;
-        self.cards[i].resize_to(mode, &self.sh, !temporary);
-        let delta = self.cards[i].card_size().1 - old_h;
+        let old = self.cards[i].card_rect();
+        let home = if temporary && mode == Mode::P { self.cards[i].temp_home.take() } else { None };
+        let to = home.unwrap_or_else(|| self.cards[i].target_for(old, self.cards[i].card_size_of(mode)));
+        self.cards[i].resize_to(mode, &self.sh, !temporary, to);
         events::set_cursor(self.cards[i].hwnd, Cursor::Arrow);
         self.tooltip.hide();
-        // os widgets empilhados embaixo acompanham a mudança de altura, como no iPhone
-        for j in followers {
-            let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+        if !reflow {
+            return;
+        }
+        // os empilhados embaixo acompanham a borda de baixo, como no iPhone; e quem ficaria por
+        // baixo ou por cima do widget sai da frente
+        let new = self.cards[i].card_rect_at(to, None);
+        let dy = new.3 - old.3;
+        let start = followers.into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + dy))).collect();
+        for (j, to) in self.make_room(i, old, new, start) {
             self.cards[j].slide_to(to, ANIM_MS, &self.sh);
         }
+    }
+
+    /// Depois de um widget mudar de tamanho (de `old` para `new`): os vizinhos saem da frente,
+    /// para ninguém ficar por cima ou por baixo de outro nem cortado pela borda da tela.
+    /// `start`: para onde alguns já iam (os encaixados embaixo). Devolve quem muda de lugar.
+    fn make_room(&self, i: usize, old: Rect, new: Rect, start: HashMap<usize, (i32, i32)>) -> Vec<(usize, (i32, i32))> {
+        let now: Vec<(i32, i32)> = self.cards.iter().map(|c| c.slide.as_ref().map(|s| s.to).unwrap_or(c.pos)).collect();
+        let rects: Vec<Rect> = self.cards.iter().zip(&now).map(|(c, p)| c.card_rect_at(*p, None)).collect();
+        let below: Vec<Vec<usize>> = (0..self.cards.len()).map(|j| self.stack_below(j, None)).collect();
+        let start_rects = start.iter().map(|(&j, &p)| (j, self.cards[j].card_rect_at(p, None))).collect();
+        let s = self.cards[i].s;
+        screens::make_room(i, old, new, &rects, &start_rects, &below, s, win::area_for)
+            .into_iter()
+            .map(|(j, r)| {
+                let m = self.cards[j].margin;
+                (j, (r.0 - m, r.1 - m))
+            })
+            .collect()
     }
 
     fn badge_action(&mut self, i: usize) {
@@ -530,17 +577,19 @@ impl App {
             return;
         }
         self.cards[i].temp = false;
-        let small_size = self.cards[i].card_size_of(Mode::P);
-        let small = self.cards[i].card_rect_at(self.cards[i].pos, Some(small_size));
-        let delta = self.cards[i].card_size().1 - small_size.1;
-        for j in self.stack_below(i, Some(small)) {
-            let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+        let home = self.cards[i].temp_home.take().unwrap_or(self.cards[i].pos);
+        let small = self.cards[i].card_rect_at(home, Some(self.cards[i].card_size_of(Mode::P)));
+        let big = self.cards[i].card_rect();
+        let start = self.stack_below(i, Some(small)).into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + big.3 - small.3))).collect();
+        for (j, to) in self.make_room(i, small, big, start) {
             self.cards[j].slide_to(to, ANIM_MS, &self.sh);
         }
-        let mode = self.cards[i].mode;
+        let (mode, pos) = (self.cards[i].mode, self.cards[i].pos);
         let key = self.cards[i].key();
         let w = self.sh.cfg.obj_mut(key);
         w.insert("tamanho".into(), json!(mode.code()));
+        w.insert("x".into(), json!(pos.0));
+        w.insert("y".into(), json!(pos.1));
         w.remove("compact");
         self.sh.save();
         self.cards[i].present(&self.sh, false);
@@ -560,6 +609,7 @@ impl App {
         win::set_z(self.cards[i].hwnd, Z::Topmost);
         win::set_z(self.cards[i].hwnd, Z::NoTopmost);
         self.cards[i].temp = true;
+        self.cards[i].temp_home = Some(self.cards[i].pos);
         let big = *self.cards[i].kind.sizes().last().unwrap();
         self.resize_to(i, big, false, true);
         self.cards[i].outside_since = None;
@@ -1131,14 +1181,25 @@ impl App {
     fn apply_layout(&mut self, name: &str) {
         let Some(snapshot) = self.sh.cfg["app"]["layouts"].get(name).cloned() else { return };
         let Some(map) = snapshot.as_object() else { return };
+        // salvo com outros monitores: cada widget vai para o lugar equivalente nestes
+        let moves = self.layout_moves(&snapshot);
         for (key, state) in map {
             let Some(&key) = widgets::KEYS.iter().find(|k| **k == key.as_str()) else { continue };
             if !state.bool_of("visible").unwrap_or(false) {
                 self.set_visible_with(key, false, false, true);
                 continue;
             }
-            let (x, y) = (state.i64_of("x").unwrap_or(0) as i32, state.i64_of("y").unwrap_or(0) as i32);
+            let (mut x, mut y) = (state.i64_of("x").unwrap_or(0) as i32, state.i64_of("y").unwrap_or(0) as i32);
             let mode = state.str_of("tamanho").and_then(Mode::from_code).unwrap_or(Mode::G);
+            if let Some(&(_, pos, s)) = moves.iter().find(|m| m.0 == key) {
+                (x, y) = pos;
+                if let Some(i) = self.find(key) {
+                    if (self.cards[i].s - s).abs() > 0.01 {
+                        self.cards[i].set_scale(s);
+                        self.cards[i].refresh(&self.sh);
+                    }
+                }
+            }
             match self.find(key) {
                 None => {
                     let w = self.sh.cfg.obj_mut(key);
@@ -1356,27 +1417,18 @@ impl App {
             if progman.is_some() && c.owner != progman {
                 c.owner = win::pin_to_desktop(c.hwnd); // o Explorer reiniciou
             }
+            // (trocar de monitor é com o `check_screens`)
             if changed && c.content.is_some() && !c.animating() {
                 c.present(&self.sh, false);
-                if !c.visible_on_screen(c.pos) {
-                    // trouxe para dentro da tela (ex.: trocou o monitor)
-                    let (l, t, r, b) = win::work_areas()[0];
-                    let (w, h) = c.size();
-                    c.pos = (c.pos.0.clamp(l, r - w), c.pos.1.clamp(t, b - h));
-                    c.present(&self.sh, true);
-                    self.moved(i);
-                }
             }
         }
     }
 
     fn check_fullscreen(&mut self) {
-        let busy = win::fullscreen_busy();
+        let busy = win::fullscreen_screens();
         if busy != self.sh.paused {
             self.sh.paused = busy;
-            if !self.sh.suspended() {
-                self.wake_all();
-            }
+            self.wake_all(); // os que voltaram a aparecer se redesenham (os pausados esperam)
         }
     }
 
@@ -1530,7 +1582,10 @@ impl App {
                     self.toggle_peek();
                 }
             }
-            Ev::DisplayChange => self.next_backdrop = Instant::now(),
+            Ev::DisplayChange => {
+                self.next_backdrop = Instant::now();
+                self.next_screens = Instant::now();
+            }
         }
     }
 
@@ -1544,7 +1599,7 @@ impl App {
     }
 
     pub fn next_deadline(&self) -> Instant {
-        let mut next = self.next_backdrop.min(self.next_fullscreen).min(self.next_power).min(self.next_alerts);
+        let mut next = self.next_backdrop.min(self.next_fullscreen).min(self.next_power).min(self.next_alerts).min(self.next_screens);
         if let Some(t) = self.tooltip.next_due() {
             next = next.min(t);
         }
@@ -1636,6 +1691,8 @@ impl App {
                         w.insert("y".into(), json!(pos.1));
                         w.remove("compact");
                         self.sh.save();
+                    } else if !self.cards[i].temp {
+                        self.moved(i); // abriu detalhes perto da borda e subiu um pouco
                     }
                     if !self.cards[i].temp {
                         self.send_to_back(i);
@@ -1649,11 +1706,12 @@ impl App {
                 self.hover_expand(i);
             }
             // abriu ou fechou detalhes: os widgets empilhados embaixo acompanham
-            if let Some((old_h, delta)) = self.cards[i].grew.take() {
+            if let Some((old_h, _)) = self.cards[i].grew.take() {
                 let w = self.cards[i].card_size().0;
-                let rect = self.cards[i].card_rect_at(self.cards[i].pos, Some((w, old_h)));
-                for j in self.stack_below(i, Some(rect)) {
-                    let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+                let old = self.cards[i].card_rect_at(self.cards[i].pos, Some((w, old_h)));
+                let new = self.cards[i].card_rect_at(self.cards[i].resize_goal().unwrap_or(self.cards[i].pos), None);
+                let start = self.stack_below(i, Some(old)).into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + new.3 - old.3))).collect();
+                for (j, to) in self.make_room(i, old, new, start) {
                     self.cards[j].slide_to(to, GROW_MS, &self.sh);
                 }
             }
@@ -1671,6 +1729,9 @@ impl App {
             if self.peek_seen.elapsed() > Duration::from_millis(PEEK_IDLE_MS) {
                 self.end_peek();
             }
+        }
+        if now >= self.next_screens {
+            self.check_screens();
         }
         if now >= self.next_backdrop {
             self.next_backdrop = now + BACKDROP_EVERY;
@@ -1759,14 +1820,6 @@ impl App {
         }
         self.quit = true;
         unsafe { PostQuitMessage(0) };
-    }
-}
-
-impl Shared {
-    /// Escala do monitor principal (para medidas que não dependem de um widget).
-    pub fn backdrop_scale(&self) -> f32 {
-        let a = win::work_areas()[0];
-        win::scale_at(a.0, a.1)
     }
 }
 

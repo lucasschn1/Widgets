@@ -30,23 +30,76 @@ pub fn font_exists(name: &str) -> bool {
 
 // ---------- monitores ----------
 
-/// [(retângulo do monitor, área de trabalho sem a barra de tarefas)], o principal primeiro.
-pub fn monitor_areas() -> Vec<(Rect, Rect)> {
+/// Um monitor ligado.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Monitor {
+    /// identifica o aparelho (continua o mesmo se ele virar o principal ou mudar de lado)
+    pub id: String,
+    pub screen: Rect,
+    /// área de trabalho, sem a barra de tarefas
+    pub work: Rect,
+    /// 1 = 96 dpi
+    pub scale: f32,
+}
+
+fn rect_of(r: RECT) -> Rect {
+    (r.left, r.top, r.right, r.bottom)
+}
+
+fn wide_str(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// Caminho do monitor ligado a uma saída de vídeo (ex.: "\\.\DISPLAY1"): diz qual é o aparelho,
+/// mesmo quando o Windows troca o número da saída. Vazio se não descobrir.
+fn monitor_path(device: &[u16]) -> String {
+    let mut n = 0;
+    loop {
+        let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        // 1 = EDD_GET_DEVICE_INTERFACE_NAME
+        if !unsafe { EnumDisplayDevicesW(PCWSTR(device.as_ptr()), n, &mut dd, 1) }.as_bool() {
+            return String::new();
+        }
+        if (dd.StateFlags & DISPLAY_DEVICE_ACTIVE).0 != 0 {
+            return wide_str(&dd.DeviceID).to_lowercase();
+        }
+        n += 1;
+    }
+}
+
+fn monitor_of(monitor: HMONITOR) -> Option<(Monitor, bool)> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let mut id = monitor_path(&info.szDevice);
+    if id.is_empty() {
+        id = wide_str(&info.szDevice).to_lowercase();
+    }
+    let (mut dx, mut dy) = (96u32, 96u32);
+    unsafe {
+        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+    }
+    let m = info.monitorInfo;
+    Some((Monitor { id, screen: rect_of(m.rcMonitor), work: rect_of(m.rcWork), scale: dx as f32 / 96.0 }, m.dwFlags & 1 != 0))
+}
+
+/// Monitores ligados, o principal primeiro.
+pub fn monitor_list() -> Vec<Monitor> {
     unsafe extern "system" fn found(monitor: HMONITOR, _dc: HDC, _rect: *mut RECT, data: LPARAM) -> BOOL {
-        let out = &mut *(data.0 as *mut Vec<(Rect, Rect)>);
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
-        if GetMonitorInfoW(monitor, &mut info).as_bool() {
-            let r = |r: RECT| (r.left, r.top, r.right, r.bottom);
-            let area = (r(info.rcMonitor), r(info.rcWork));
-            if info.dwFlags & 1 != 0 {
-                out.insert(0, area); // o monitor principal vem primeiro
+        let out = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
+        if let Some((m, primary)) = monitor_of(monitor) {
+            if primary {
+                out.insert(0, m);
             } else {
-                out.push(area);
+                out.push(m);
             }
         }
         true.into()
     }
-    let mut out: Vec<(Rect, Rect)> = Vec::new();
+    let mut out: Vec<Monitor> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(found), LPARAM(&mut out as *mut _ as isize));
     }
@@ -54,16 +107,28 @@ pub fn monitor_areas() -> Vec<(Rect, Rect)> {
 }
 
 pub fn monitors() -> Vec<Rect> {
-    monitor_areas().into_iter().map(|(screen, _)| screen).collect()
+    monitor_list().into_iter().map(|m| m.screen).collect()
 }
 
 pub fn work_areas() -> Vec<Rect> {
-    let areas: Vec<Rect> = monitor_areas().into_iter().map(|(_, work)| work).collect();
+    let areas: Vec<Rect> = monitor_list().into_iter().map(|m| m.work).collect();
     if areas.is_empty() {
         unsafe { vec![(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))] }
     } else {
         areas
     }
+}
+
+/// Área de trabalho do monitor onde está (ou mais perto de) o ponto.
+pub fn area_at(x: i32, y: i32) -> Rect {
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    monitor_of(monitor).map(|(m, _)| m.work).unwrap_or_else(|| work_areas()[0])
+}
+
+/// Área de trabalho do monitor onde está o mouse (onde a pessoa está olhando).
+pub fn area_at_pointer() -> Rect {
+    let (x, y) = pointer();
+    area_at(x, y)
 }
 
 /// Largura e altura da interseção de dois retângulos (0 se não se tocam).
@@ -269,8 +334,83 @@ pub fn on_battery() -> bool {
 }
 
 /// Jogo, vídeo em tela cheia ou apresentação: os widgets nem aparecem.
-pub fn fullscreen_busy() -> bool {
-    unsafe { SHQueryUserNotificationState().map(|s| matches!(s.0, 2..=4)).unwrap_or(false) }
+/// Devolve os monitores tomados (o da janela em tela cheia; todos no modo apresentação), para
+/// pausar só os widgets que ficam neles.
+pub fn fullscreen_screens() -> Vec<Rect> {
+    unsafe {
+        // 4 = QUNS_PRESENTATION_MODE: o Windows pede silêncio em tudo
+        if SHQueryUserNotificationState().is_ok_and(|s| s.0 == 4) {
+            return monitors();
+        }
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
+            return Vec::new();
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == std::process::id() {
+            return Vec::new();
+        }
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(fg, &mut class) as usize;
+        let class = String::from_utf16_lossy(&class[..n]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return Vec::new(); // a própria área de trabalho ou a barra de tarefas
+        }
+        // janela comum maximizada (com barra de título) não conta, mesmo cobrindo a tela
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        if style & WS_CAPTION.0 == WS_CAPTION.0 {
+            return Vec::new();
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() {
+            return Vec::new();
+        }
+        let monitor = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
+        let Some((m, _)) = (!monitor.is_invalid()).then(|| monitor_of(monitor)).flatten() else { return Vec::new() };
+        let (l, t, rr, b) = m.screen;
+        if r.left <= l && r.top <= t && r.right >= rr && r.bottom >= b {
+            vec![m.screen]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Papel de parede de cada monitor (retângulo, arquivo), quando o Windows informa.
+pub struct Wallpapers(Option<windows::Win32::UI::Shell::IDesktopWallpaper>);
+
+impl Wallpapers {
+    pub fn new() -> Wallpapers {
+        Wallpapers(None)
+    }
+
+    pub fn list(&mut self) -> Vec<(Rect, String)> {
+        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL};
+        use windows::Win32::UI::Shell::{DesktopWallpaper, IDesktopWallpaper};
+        if self.0.is_none() {
+            self.0 = unsafe { CoCreateInstance::<_, IDesktopWallpaper>(&DesktopWallpaper, None, CLSCTX_ALL) }.ok();
+        }
+        let Some(dw) = &self.0 else { return Vec::new() };
+        let mut out = Vec::new();
+        unsafe {
+            let Ok(count) = dw.GetMonitorDevicePathCount() else {
+                self.0 = None; // o Explorer reiniciou: pega de novo da próxima vez
+                return out;
+            };
+            for i in 0..count {
+                let Ok(id) = dw.GetMonitorDevicePathAt(i) else { continue };
+                let id_str = PCWSTR(id.0);
+                // monitores desligados não têm retângulo
+                if let (Ok(r), Ok(path)) = (dw.GetMonitorRECT(id_str), dw.GetWallpaper(id_str)) {
+                    out.push((rect_of(r), path.to_string().unwrap_or_default()));
+                    CoTaskMemFree(Some(path.0 as _));
+                }
+                CoTaskMemFree(Some(id.0 as _));
+            }
+        }
+        out
+    }
 }
 
 /// "Mostrar animações no Windows" (Acessibilidade → Efeitos visuais).

@@ -309,6 +309,8 @@ pub struct GlassBar {
     fade: Option<(f32, f32, Instant)>,
     img: Option<Image>,
     s: f32,
+    /// área de trabalho do monitor onde a pílula aparece (escolhida ao mostrar)
+    area: win::Rect,
 }
 
 const BAR_H: f32 = 46.0;
@@ -332,6 +334,7 @@ impl GlassBar {
             fade: None,
             img: None,
             s: 1.0,
+            area: (0, 0, 0, 0),
         }
     }
 
@@ -342,6 +345,11 @@ impl GlassBar {
     pub fn show(&mut self, parts: Vec<Part>, animations: bool) {
         self.parts = parts;
         self.hot = None;
+        // aparece no monitor onde está o mouse (ali que a pessoa está olhando); se já estava
+        // visível, continua no mesmo lugar
+        if !self.visible || self.area.2 <= self.area.0 {
+            self.area = win::area_at_pointer();
+        }
         if self.hwnd.is_none() {
             let h = events::create_popup();
             events::show(h, true);
@@ -401,8 +409,8 @@ impl GlassBar {
     }
 
     fn render(&mut self) {
-        let area = win::work_areas()[0];
-        let s = win::scale_at(area.0, area.1);
+        let area = self.area;
+        let s = win::scale_at((area.0 + area.2) / 2, (area.1 + area.3) / 2);
         self.s = s;
         let probe = Canvas::new(1, 1, s);
         // medidas de cada parte (lógicas)

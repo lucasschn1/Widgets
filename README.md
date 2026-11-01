@@ -44,9 +44,11 @@ Quando sair uma versão nova, o próprio app avisa e atualiza com um clique. Par
 a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, no tamanho grande, os
 próximos dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
 
-**Sistema** mostra CPU, memória e disco em três anéis. No tamanho grande, aparecem os 5 apps
-que mais usam o recurso escolhido, cada um com o seu ícone (no disco, as unidades), junto com
-a rede e há quanto tempo o PC está ligado.
+**Sistema** mostra CPU, memória e disco em três anéis, com a porcentagem e quanto está em uso
+agora (a velocidade da CPU em GHz, a memória e o disco em GB). Clique num anel e o widget vira
+para mostrar os 3 apps que mais usam aquele recurso (no disco, as unidades). No tamanho
+grande, aparecem os 5 primeiros, cada um com o seu ícone, junto com a rede e há quanto tempo o
+PC está ligado.
 
 **Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
 outros). O fundo ganha as cores da capa. No tamanho grande, há também o volume do app,
@@ -100,6 +102,16 @@ configurar a cidade do clima.
 <p align="center">
   <img src="docs/images/boas-vindas.png" width="600" alt="Boas-vindas">
 </p>
+
+## Com mais de um monitor
+
+Os widgets lembram onde ficam em cada combinação de telas. Se você tira o notebook do monitor
+externo, eles vão para a tela do notebook sem ficar um em cima do outro; quando você conecta de
+novo, cada um volta para onde estava. Numa combinação nova (o notebook virou a segunda tela, ou
+mudou de lado), eles ficam no mesmo canto do mesmo monitor, no tamanho certo para a escala dele.
+
+Avisos e janelas abrem no monitor onde está o mouse. Um jogo ou vídeo em tela cheia pausa só os
+widgets daquele monitor, e cada tela usa o próprio papel de parede no vidro.
 
 ## Tudo no clique direito
 

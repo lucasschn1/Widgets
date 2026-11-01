@@ -1,5 +1,6 @@
 //! Widget Sistema: três anéis (CPU, memória e disco) no estilo dos anéis de atividade. Clicar num
-//! anel abre a lista dos apps que mais usam aquele recurso (no disco, as unidades).
+//! anel mostra os apps que mais usam aquele recurso (no disco, as unidades): no pequeno e no
+//! médio o cartão "vira" e mostra os 3 primeiros; no grande, a lista fica embaixo dos anéis.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, Status, SMALL, SMALL_RADIUS};
 use crate::gfx::{Anchor, Canvas, Face, Image};
-use crate::sysinfo::{self, AppUse, Drive, Sampler};
+use crate::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
 use crate::theme::*;
 use crate::win;
 
@@ -16,7 +17,10 @@ const PAD: f32 = 16.0;
 const M_H: f32 = 150.0;
 const ROW_H: f32 = 38.0;
 const LIST_N: usize = 5;
-/// cabeçalho e link, quando a lista abre embaixo (pequeno e médio); as linhas somam a isso
+/// médio virado: linhas mais baixas, para caber 3 embaixo do cabeçalho
+const BACK_ROW_H: f32 = 34.0;
+const BACK_LIST_Y: f32 = 44.0;
+const BACK_N: usize = 3;
 const SEG_Y: f32 = 150.0;
 const G_LIST_Y: f32 = 194.0;
 const G_FOOT_Y: f32 = G_LIST_Y + ROW_H * LIST_N as f32 + 6.0;
@@ -28,8 +32,8 @@ const BARS_MS: f32 = 650.0;
 
 // ações
 const SELECT: u32 = 10; // + recurso (0 CPU, 1 memória, 2 disco)
-const OPEN_TASKMGR: u32 = 1;
 const OPEN_EXPLORER: u32 = 2;
+const CLOSE: u32 = 3;
 
 const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
 const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
@@ -65,6 +69,9 @@ pub struct System {
     from: [f32; 3],
     ring_since: Instant,
     details: [String; 3],
+    /// quanto está em uso agora, curto (médio e grande): "2,84 GHz", "10,9/16 GB", "412/477 GB"
+    amounts: [String; 3],
+    speed: Option<CpuSpeed>,
     last_cpu: (u64, u64),
     last_net: (u64, u64, Instant),
     rates: (f64, f64),
@@ -73,8 +80,10 @@ pub struct System {
     apps: Vec<AppUse>,
     drives: Vec<Drive>,
     drives_at: Option<Instant>,
-    /// recurso aberto na lista (no grande, sempre um)
+    /// recurso aberto na lista do grande (sem escolha: memória)
     selected: Option<usize>,
+    /// pequeno ou médio "virado" mostrando os apps deste recurso (desvira ao mudar de tamanho)
+    flipped: Cell<Option<usize>>,
     bars_since: Instant,
     /// o último tamanho desenhado (para saber se a lista está na tela)
     mode_seen: Cell<Mode>,
@@ -85,7 +94,9 @@ pub struct System {
 
 impl System {
     pub fn new() -> System {
-        System::with(Sampler::new())
+        let mut s = System::with(Sampler::new());
+        s.speed = CpuSpeed::new();
+        s
     }
 
     fn with(sampler: Sampler) -> System {
@@ -94,6 +105,8 @@ impl System {
             from: [0.0; 3],
             ring_since: Instant::now(),
             details: Default::default(),
+            amounts: Default::default(),
+            speed: None,
             last_cpu: win::cpu_times(),
             last_net: (0, 0, Instant::now()),
             rates: (0.0, 0.0),
@@ -103,6 +116,7 @@ impl System {
             drives: Vec::new(),
             drives_at: None,
             selected: None,
+            flipped: Cell::new(None),
             bars_since: Instant::now(),
             mode_seen: Cell::new(Mode::M),
             status: Status::default(),
@@ -119,6 +133,7 @@ impl System {
         let mut s = System::with(Sampler::idle());
         s.target = [0.24, 0.68, 0.54];
         s.from = s.target;
+        s.amounts = ["2,84 GHz".into(), "10,9/16 GB".into(), "258/477 GB".into()];
         s.ring_since = Instant::now() - Duration::from_secs(5);
         s
     }
@@ -134,10 +149,17 @@ impl System {
         let (used, total_mem) = win::memory();
         let (dused, dtotal, _) = win::disk_usage("C:\\");
         let values = [cpu as f32, (used as f64 / total_mem as f64) as f32, (dused as f64 / dtotal.max(1) as f64) as f32];
+        let ghz = self.speed.as_ref().and_then(CpuSpeed::ghz);
+        let speed = ghz.map(|g| format!(" · {} GHz", br(g, 2))).unwrap_or_default();
         self.details = [
-            format!("{}% em uso · {cores} núcleos", (cpu * 100.0).round()),
+            format!("{}% em uso · {cores} núcleos{speed}", (cpu * 100.0).round()),
             format!("{} de {:.0} GB em uso", br(win::gb(used), 1), win::gb(total_mem)),
             format!("C: {:.0} de {:.0} GB em uso", win::gb(dused), win::gb(dtotal)),
+        ];
+        self.amounts = [
+            ghz.map(|g| format!("{} GHz", br(g, 2))).unwrap_or_else(|| format!("{cores} núcleos")),
+            format!("{}/{:.0} GB", br(win::gb(used), 1), win::gb(total_mem)),
+            format!("{:.0}/{:.0} GB", win::gb(dused), win::gb(dtotal)),
         ];
         // os anéis partem de onde estão agora (mudança pequena: sem animação, para poupar a CPU)
         let shown = self.shown();
@@ -165,7 +187,7 @@ impl System {
 
     /// A lista de apps está na tela, mas a primeira leitura ainda não chegou.
     fn waiting_apps(&self) -> bool {
-        self.list_visible() && self.apps.is_empty() && self.current(self.mode_seen.get()) != Some(2)
+        self.list_visible() && self.apps.is_empty() && self.showing(self.mode_seen.get()) != Some(2)
     }
 
     fn animating(&self) -> bool {
@@ -174,11 +196,23 @@ impl System {
 
     /// A lista está na tela?
     fn list_visible(&self) -> bool {
-        self.mode_seen.get() == Mode::G
+        self.showing(self.mode_seen.get()).is_some()
     }
 
+    /// Recurso destacado nos anéis do grande.
     fn current(&self, mode: Mode) -> Option<usize> {
         (mode == Mode::G).then(|| self.selected.unwrap_or(1))
+    }
+
+    /// De qual recurso a lista de apps está na tela (no grande, sempre uma; virado, a dele).
+    fn showing(&self, mode: Mode) -> Option<usize> {
+        if mode == Mode::G { self.current(mode) } else { self.flipped.get() }
+    }
+
+    /// Botão de voltar aos anéis, no cartão virado.
+    fn close_rect(mode: Mode) -> (f32, f32, f32, f32) {
+        let r = if mode == Mode::P { SMALL } else { W };
+        (r - 38.0, 8.0, r - 10.0, 36.0)
     }
 
     fn base_h(mode: Mode) -> f32 {
@@ -269,8 +303,19 @@ impl System {
         }
     }
 
+    /// Vira (ou desvira, com None) o pequeno ou o médio para mostrar os apps de um recurso.
+    fn flip(&mut self, i: Option<usize>) {
+        self.flipped.set(i);
+        self.refresh_list(i);
+    }
+
     fn select(&mut self, i: Option<usize>) {
         self.selected = i;
+        self.refresh_list(i);
+    }
+
+    /// A lista vai aparecer: as barras enchem de novo e a leitura dos apps liga (ou desliga).
+    fn refresh_list(&mut self, i: Option<usize>) {
         self.bars_since = Instant::now();
         if i == Some(2) || self.drives_at.is_none() {
             self.drives = sysinfo::drives();
@@ -331,8 +376,11 @@ impl System {
             } else {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
-                c.text(x0 + 13.0, y + 7.0, NAMES[i], Face::Regular, 12.0, MUTED, Anchor::LM, None);
-                c.text(x1 - 6.0, y + 7.0, &pct, Face::Semibold, 13.5, text, Anchor::RM, None);
+                let pw = c.text(x1 - 6.0, y + 7.0, &pct, Face::Semibold, 13.5, text, Anchor::RM, None);
+                // quanto está em uso agora, antes da porcentagem
+                let aw = c.text(x1 - 6.0 - pw - 7.0, y + 7.5, &self.amounts[i], Face::Regular, 11.0, MUTED, Anchor::RM, None);
+                let name_w = (x1 - 6.0 - pw - 7.0 - aw - 6.0) - (x0 + 13.0);
+                c.text(x0 + 13.0, y + 7.0, NAMES[i], Face::Regular, 12.0, MUTED, Anchor::LM, Some(name_w.max(10.0)));
                 let (bx0, bx1, by) = (x0, x1 - 6.0, y + 19.0);
                 c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.12));
                 let w = (bx1 - bx0) * shown[i].clamp(0.0, 1.0);
@@ -343,7 +391,7 @@ impl System {
         }
     }
 
-    fn draw_list(&self, c: &mut Canvas, mode: Mode, which: usize, y0: f32) {
+    fn draw_list(&self, c: &mut Canvas, which: usize, y0: f32, n_max: usize, row_h: f32) {
         let rows = self.rows(which);
         if rows.is_empty() {
             let msg = if which == 2 { "Nenhuma unidade encontrada" } else { "Lendo os apps…" };
@@ -351,8 +399,8 @@ impl System {
             return;
         }
         let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
-        for (n, row) in rows.iter().enumerate() {
-            let y = y0 + ROW_H * n as f32;
+        for (n, row) in rows.iter().take(n_max).enumerate() {
+            let y = y0 + row_h * n as f32;
             let icon = 26.0;
             let ix = PAD;
             match &row.icon {
@@ -378,7 +426,66 @@ impl System {
                 c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(which));
             }
         }
-        let _ = mode;
+    }
+
+    fn draw_close(&self, c: &mut Canvas, mode: Mode) {
+        let (x0, y0, x1, y1) = Self::close_rect(mode);
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        c.fill_circle(cx, cy, 12.0, WHITE.alpha(0.14));
+        c.line(&[(cx - 4.0, cy - 4.0), (cx + 4.0, cy + 4.0)], FG, 1.6);
+        c.line(&[(cx + 4.0, cy - 4.0), (cx - 4.0, cy + 4.0)], FG, 1.6);
+    }
+
+    /// Médio virado: o recurso, quanto está em uso e os 3 apps que mais usam (ou as unidades).
+    fn draw_back_m(&self, c: &mut Canvas, which: usize) {
+        let y = 22.0;
+        c.fill_circle(PAD + 4.0, y, 4.0, color(which));
+        let nw = c.text(PAD + 14.0, y, TITLES[which], Face::Semibold, 13.5, FG, Anchor::LM, None);
+        let pct = format!("{}%", (self.target[which] * 100.0).round());
+        let pw = c.text(PAD + 14.0 + nw + 7.0, y, &pct, Face::Semibold, 13.5, color(which), Anchor::LM, None);
+        let x = PAD + 14.0 + nw + 7.0 + pw + 8.0;
+        let room = Self::close_rect(Mode::M).0 - 8.0 - x;
+        c.text(x, y + 0.5, &self.amounts[which], Face::Regular, 11.5, MUTED, Anchor::LM, Some(room.max(10.0)));
+        self.draw_close(c, Mode::M);
+        self.draw_list(c, which, BACK_LIST_Y, BACK_N, BACK_ROW_H);
+    }
+
+    /// Pequeno virado: o recurso escolhido e os 3 apps que mais usam (ou as unidades).
+    fn draw_back_p(&self, c: &mut Canvas, which: usize) {
+        let pct = format!("{}%", (self.target[which] * 100.0).round());
+        c.fill_circle(17.0, 22.0, 4.0, color(which));
+        let name = if which == 1 { "RAM" } else { NAMES[which] };
+        let nw = c.text(26.0, 22.0, name, Face::Semibold, 12.5, FG, Anchor::LM, None);
+        c.text(26.0 + nw + 6.0, 22.0, &pct, Face::Semibold, 12.5, color(which), Anchor::LM, None);
+        self.draw_close(c, Mode::P);
+        let rows = self.rows(which);
+        if rows.is_empty() {
+            let msg = if which == 2 { "Nenhuma unidade" } else { "Lendo os apps…" };
+            c.text(SMALL / 2.0, 90.0, msg, Face::Regular, 11.5, MUTED, Anchor::MM, None);
+            return;
+        }
+        let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
+        for (n, row) in rows.iter().take(BACK_N).enumerate() {
+            // as linhas sobem e aparecem uma depois da outra
+            let t = ease_out((since - n as f32 * 60.0) / 380.0);
+            let y = 44.0 + 36.0 * n as f32 + (1.0 - t) * 8.0;
+            let icon = 22.0;
+            match &row.icon {
+                Some(img) => {
+                    let s = c.s;
+                    c.image_px(img, (12.0 * s).round(), ((y + 3.0) * s).round(), (icon * s).round(), (icon * s).round(), t);
+                }
+                None => {
+                    c.fill_round_rect(12.0, y + 3.0, 12.0 + icon, y + 3.0 + icon, 6.0, WHITE.alpha(0.16 * t));
+                    let letter: String = row.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                    c.text(12.0 + icon / 2.0, y + 3.0 + icon / 2.0, &letter, Face::Semibold, 11.0, FG.alpha(t), Anchor::MM, None);
+                }
+            }
+            let tx = 12.0 + icon + 8.0;
+            let w = SMALL - tx - 10.0;
+            c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(t), Anchor::LA, Some(w));
+            c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * t), Anchor::LA, Some(w));
+        }
     }
 
     fn draw_seg(&self, c: &mut Canvas, which: usize) {
@@ -423,50 +530,67 @@ impl Kind for System {
 
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         if self.mode_seen.get() != mode {
+            // mudou de tamanho: o cartão desvira
             self.mode_seen.set(mode);
+            self.flipped.set(None);
             self.sampler.set_active(self.list_visible());
+        }
+        if let Some(which) = self.flipped.get() {
+            match mode {
+                Mode::P => return self.draw_back_p(c, which),
+                Mode::M => return self.draw_back_m(c, which),
+                Mode::G => {}
+            }
         }
         self.draw_rings(c, mode);
         self.draw_metrics(c, mode);
         if mode == Mode::G {
             let which = self.current(mode).unwrap_or(1);
             self.draw_seg(c, which);
-            self.draw_list(c, mode, which, G_LIST_Y);
+            self.draw_list(c, which, G_LIST_Y, LIST_N, ROW_H);
             self.draw_footer(c);
         }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
-        let open = if self.current(mode) == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR };
+        let inside = |(x0, y0, x1, y1): (f32, f32, f32, f32)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y);
+        if mode != Mode::G && self.flipped.get().is_some() {
+            // virado: um clique em qualquer lugar volta aos anéis
+            return Some(CLOSE);
+        }
         if mode == Mode::G {
-            let inside = |(x0, y0, x1, y1): (f32, f32, f32, f32)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y);
             if let Some(i) = (0..3).find(|&i| inside(Self::seg_rect(i))) {
                 return Some(SELECT + i as u32);
             }
             if y >= G_LIST_Y && y < G_FOOT_Y {
-                return env.shortcuts().then_some(open);
+                // as unidades abrem o Explorador; os apps não abrem nada
+                return (self.current(mode) == Some(2) && env.shortcuts()).then_some(OPEN_EXPLORER);
             }
         }
         let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
-        if mode == Mode::G {
-            return Some(SELECT + i as u32);
-        }
-        // no pequeno e no médio, o anel abre o Gerenciador de Tarefas (ou o Explorador, no disco)
-        env.shortcuts().then_some(if i == 2 { OPEN_EXPLORER } else { OPEN_TASKMGR })
+        Some(SELECT + i as u32)
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
-            OPEN_TASKMGR => ctx.open("taskmgr.exe"),
             OPEN_EXPLORER => ctx.open("shell:MyComputerFolder"),
-            a if (SELECT..SELECT + 3).contains(&a) => self.select(Some((a - SELECT) as usize)),
+            CLOSE => self.flip(None),
+            a if (SELECT..SELECT + 3).contains(&a) => {
+                let i = (a - SELECT) as usize;
+                if self.mode_seen.get() == Mode::G {
+                    self.select(Some(i));
+                } else {
+                    self.flip(Some(i));
+                }
+            }
             _ => {}
         }
     }
 
-    fn hot_rect(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<Hot> {
-        if mode != Mode::G && !env.shortcuts() {
-            return None;
+    fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
+        if mode != Mode::G && self.flipped.get().is_some() {
+            let (x0, y0, x1, y1) = Self::close_rect(mode);
+            return Some((x0 - 2.0, y0 - 2.0, x1 + 2.0, y1 + 2.0, 16.0));
         }
         if mode == Mode::G && (y >= SEG_Y || y >= G_LIST_Y) {
             return None;
@@ -483,22 +607,20 @@ impl Kind for System {
         None
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
+    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
         if mode == Mode::G && y >= SEG_Y {
             return None;
         }
+        if mode != Mode::G && self.flipped.get().is_some() {
+            return Some("Clique para voltar aos anéis".into());
+        }
         let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
-        let action = match mode {
-            Mode::G if i == 2 => "Clique para ver as unidades".to_string(),
-            Mode::G => "Clique para ver os apps que mais usam".to_string(),
-            _ if env.shortcuts() => format!("Clique para abrir {}", if i == 2 { "o Explorador de Arquivos" } else { "o Gerenciador de Tarefas" }),
-            _ => "No tamanho grande, aparecem os apps que mais usam".to_string(),
-        };
+        let action = if i == 2 { "Clique para ver as unidades" } else { "Clique para ver os apps que mais usam" };
         Some(format!("{}  ·  {}%\n{}\n{action}", TITLES[i], (self.target[i] * 100.0).round(), self.details[i]))
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
-        vec![MenuItem::Cmd("Abrir o Gerenciador de Tarefas".into(), OPEN_TASKMGR)]
+        Vec::new()
     }
 
     fn next_tick(&self) -> Option<Instant> {
@@ -533,7 +655,7 @@ impl System {
                 if let Some(apps) = self.sampler.latest() {
                     self.apps = apps;
                 }
-                if self.current(self.mode_seen.get()) == Some(2) && self.drives_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                if self.showing(self.mode_seen.get()) == Some(2) && self.drives_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
                     self.drives = sysinfo::drives();
                     self.drives_at = Some(now);
                 }
@@ -555,8 +677,15 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
         let cfg = serde_json::json!({"sistema": {}, "app": {}});
-        for (mode, name) in [(Mode::M, "m"), (Mode::G, "g"), (Mode::P, "p")] {
+        let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6)];
+        let flips = [(Mode::M, "m", None), (Mode::G, "g", None), (Mode::P, "p", None), (Mode::P, "p_virado", Some(1)), (Mode::M, "m_virado", Some(0))];
+        for (mode, name, flip) in flips {
             let s = System::sample();
+            s.mode_seen.set(mode);
+            s.flipped.set(flip);
+            let mut s = s;
+            s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
+            s.bars_since = Instant::now() - Duration::from_secs(5);
             let l = s.layout(mode);
             let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
             c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
