@@ -1,5 +1,5 @@
 ; Instalador (Widgets-Setup.exe), gerado pelo Inno Setup 6 a partir de dist\Widgets
-; (que o packaginguild.ps1 cria):
+; (que o packaging\build.ps1 cria):
 ;   ISCC.exe /DAppVersion=3.0.0 packaging\Widgets.iss
 ; Instala para o usuário atual, sem pedir administrador, na mesma pasta que o install.ps1 usa.
 
