@@ -1,8 +1,7 @@
-//! Ícone na bandeja do sistema, notificações do Windows e atalhos globais de teclado.
+//! Ícone na bandeja do sistema e notificações do Windows.
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -115,87 +114,5 @@ impl Tray {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
         }
-    }
-
-    pub fn window(&self) -> HWND {
-        self.hwnd
-    }
-}
-
-// ---------- atalhos globais ----------
-
-/// alternativas para "mostrar na frente", se o atalho escolhido já for de outro programa
-pub const FALLBACKS: [&str; 4] = ["Ctrl+Alt+W", "Win+Alt+W", "Ctrl+Shift+W", "Ctrl+Alt+Espaço"];
-pub const HOTKEY_PEEK: i32 = 1;
-pub const HOTKEY_POMODORO: i32 = 2;
-
-const MODIFIERS: [(&str, u32); 4] = [("Ctrl", 0x2), ("Alt", 0x1), ("Shift", 0x4), ("Win", 0x8)];
-const KEY_NAMES: [(u32, &str); 25] = [
-    (0x20, "Espaço"),
-    (0x0D, "Enter"),
-    (0x09, "Tab"),
-    (0x25, "Esquerda"),
-    (0x26, "Cima"),
-    (0x27, "Direita"),
-    (0x28, "Baixo"),
-    (0x2D, "Insert"),
-    (0x2E, "Delete"),
-    (0x24, "Home"),
-    (0x23, "End"),
-    (0x21, "PageUp"),
-    (0x22, "PageDown"),
-    (0xBC, ","),
-    (0xBE, "."),
-    (0xBD, "-"),
-    (0xBB, "="),
-    (0xC0, "'"),
-    (0xDE, "~"),
-    (0xBA, "Ç"),
-    (0xBF, ";"),
-    (0xDB, "´"),
-    (0xDD, "["),
-    (0xDC, "]"),
-    (0xE2, "\\"),
-];
-
-pub fn key_name(vk: u32) -> Option<String> {
-    match vk {
-        0x30..=0x39 | 0x41..=0x5A => Some(char::from_u32(vk).unwrap().to_string()),
-        0x70..=0x87 => Some(format!("F{}", vk - 0x6F)),
-        0x60..=0x69 => Some(format!("Num{}", vk - 0x60)),
-        _ => KEY_NAMES.iter().find(|(v, _)| *v == vk).map(|(_, n)| n.to_string()),
-    }
-}
-
-/// "Ctrl+Alt+W" -> (modificadores, tecla virtual).
-pub fn parse_hotkey(label: &str) -> Option<(u32, u32)> {
-    if label.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = label.split('+').collect();
-    let (key, mods) = parts.split_last()?;
-    let mut flags = 0;
-    for m in mods {
-        flags |= MODIFIERS.iter().find(|(n, _)| n == m)?.1;
-    }
-    let vk = if key.chars().count() == 1 && key.is_ascii() && key.chars().all(|c| c.is_ascii_alphanumeric()) {
-        key.to_ascii_uppercase().chars().next()? as u32
-    } else if let Some(n) = key.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
-        0x6F + n
-    } else if let Some(n) = key.strip_prefix("Num").and_then(|n| n.parse::<u32>().ok()) {
-        0x60 + n
-    } else {
-        KEY_NAMES.iter().find(|(_, n)| n == key)?.0
-    };
-    Some((flags, vk))
-}
-
-pub fn register_hotkey(hwnd: HWND, id: i32, label: &str) -> bool {
-    unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), id);
-    }
-    match parse_hotkey(label) {
-        Some((mods, vk)) => unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods | 0x4000), vk).is_ok() },
-        None => false,
     }
 }

@@ -117,11 +117,6 @@ impl App {
 
     pub(super) fn close_panel(&mut self, i: usize) {
         let p = self.panels.remove(i);
-        if let PanelKind::Settings(st) = &p.kind {
-            if st.recording.is_some() {
-                self.register_hotkeys_quiet();
-            }
-        }
         if let PanelKind::Welcome(_) = &p.kind {
             if !self.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
                 self.sh.cfg.obj_mut("app").insert("dicas_vistas".into(), json!(true));
@@ -170,17 +165,11 @@ impl App {
             sh: &self.sh,
             visible: self.cards.iter().map(|c| c.key()).collect(),
             modes: self.cards.iter().map(|c| (c.key(), if c.temp { Mode::P } else { c.mode })).collect(),
-            peek_hotkey: self.peek_hotkey.clone(),
-            hotkey_errors: &self.hotkey_errors,
             origin: p.win.client_origin(),
             render: &render,
             startup: startup::enabled(),
             update_status: self.update_status.clone(),
             update_version: self.update_version.clone(),
-        };
-        let recording = match &p.kind {
-            PanelKind::Settings(st) => st.recording,
-            _ => None,
         };
         p.win.anims.running = false;
         let (w, h) = (p.win.w, p.win.h);
@@ -192,7 +181,6 @@ impl App {
                 hover: p.win.hover.as_deref(),
                 pressed: p.win.pressed.as_deref(),
                 focus: p.win.focus.as_deref(),
-                recording,
                 anims: &mut p.win.anims,
                 animations: self.sh.animations,
                 ox: 0.0,
@@ -279,29 +267,6 @@ impl App {
     }
 
     pub(super) fn panel_key(&mut self, i: usize, vk: u32) {
-        if let PanelKind::Settings(st) = &mut self.panels[i].kind {
-            if let Some(id) = st.recording {
-                let name: &'static str = if id == "atalho:peek" { "peek" } else { "pomodoro" };
-                match vk {
-                    0x1B => {
-                        st.recording = None;
-                        self.register_hotkeys_quiet();
-                    }
-                    0x08 | 0x2E => {
-                        st.recording = None;
-                        self.set_hotkey(name, String::new());
-                    }
-                    _ => {
-                        if let Some(label) = hotkey_label(vk) {
-                            st.recording = None;
-                            self.set_hotkey(name, label);
-                        }
-                    }
-                }
-                self.panels[i].win.dirty = true;
-                return;
-            }
-        }
         if vk == 0x1B && self.panels[i].win.focus.is_none() {
             self.close_panel(i);
         }
@@ -455,14 +420,6 @@ impl App {
             A::SaveLayout => self.open_prompt(Purpose::LayoutName, None),
             A::ApplyLayout(name) => self.apply_layout(&name),
             A::DeleteLayout(name) => self.delete_layout(&name),
-            A::Record(id) => {
-                if let PanelKind::Settings(st) = &mut self.panels[i].kind {
-                    st.recording = Some(id);
-                }
-                // senão o atalho atual é engolido pelo Windows enquanto se grava
-                self.unregister_hotkeys();
-                events::focus(self.panels[i].win.hwnd);
-            }
             A::Restore(page) => self.restore_page(page),
             A::TestNotify => self.tray.notify("Tudo certo", "As notificações dos widgets estão funcionando."),
             A::Welcome => self.open_welcome(),
@@ -641,7 +598,6 @@ impl App {
             old.as_object().map(|m| m.iter().filter(|(k, _)| matches!(k.as_str(), "layouts" | "dicas_vistas" | "travado")).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         self.sh.cfg["app"] = Value::Object(keep);
         self.sh.save();
-        self.register_hotkeys_quiet();
         self.apply_settings("*");
         self.toast("Configurações restauradas", None, "undo", SUCCESS, Some(("Desfazer", Undo::AppSettings(old))));
     }
@@ -783,42 +739,6 @@ impl App {
         self.toast("Tudo pronto!", Some("Clique direito num widget para ver as opções"), "check", SUCCESS, None);
     }
 
-    // ---------- atalhos ----------
-
-    fn unregister_hotkeys(&mut self) {
-        let hwnd = self.tray.window();
-        for id in [HOTKEY_PEEK, HOTKEY_POMODORO] {
-            tray::register_hotkey(hwnd, id, "");
-        }
-    }
-
-    pub(super) fn register_hotkeys_quiet(&mut self) {
-        let hwnd = self.tray.window();
-        let peek = self.peek_hotkey.clone().unwrap_or_else(|| config::setting_str(&self.sh.cfg, "atalho"));
-        tray::register_hotkey(hwnd, HOTKEY_PEEK, &peek);
-        tray::register_hotkey(hwnd, HOTKEY_POMODORO, &config::setting_str(&self.sh.cfg, "atalho_pomodoro"));
-    }
-
-    fn set_hotkey(&mut self, name: &'static str, label: String) {
-        let (setting, id) = if name == "peek" { ("atalho", HOTKEY_PEEK) } else { ("atalho_pomodoro", HOTKEY_POMODORO) };
-        self.set_setting(setting, json!(label));
-        self.register_hotkeys_quiet();
-        let ok = label.is_empty() || tray::register_hotkey(self.tray.window(), id, &label);
-        if name == "peek" {
-            self.peek_hotkey = (!label.is_empty() && ok).then(|| label.clone());
-        }
-        if ok {
-            self.hotkey_errors.remove(name);
-            if !label.is_empty() {
-                self.toast(&format!("Atalho {label} definido"), None, "atalhos", SUCCESS, None);
-            }
-        } else {
-            self.hotkey_errors.insert(name, label.clone());
-            self.toast(&format!("{label} já é usado por outro programa"), Some("Escolha outra combinação"), "atalhos", WARNING, None);
-        }
-        self.panels_changed();
-    }
-
     // ---------- timers ----------
 
     pub(super) fn panels_due(&self) -> Option<Instant> {
@@ -882,28 +802,3 @@ pub enum EditWhat {
     Key(u32),
 }
 
-/// Atalho da tecla apertada agora (com os modificadores); None se ainda falta a tecla.
-fn hotkey_label(vk: u32) -> Option<String> {
-    if matches!(vk, 0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5) {
-        return None; // só um modificador por enquanto
-    }
-    let mut parts = Vec::new();
-    if win::key_down(0x11) {
-        parts.push("Ctrl");
-    }
-    if win::key_down(0x12) {
-        parts.push("Alt");
-    }
-    if win::key_down(0x10) {
-        parts.push("Shift");
-    }
-    if win::key_down(0x5B) || win::key_down(0x5C) {
-        parts.push("Win");
-    }
-    let function = (0x70..=0x87).contains(&vk);
-    if !parts.iter().any(|p| matches!(*p, "Ctrl" | "Alt" | "Win")) && !function {
-        return None; // sem Ctrl, Alt ou Win o atalho atrapalharia a digitação
-    }
-    let key = tray::key_name(vk)?;
-    Some(parts.into_iter().map(String::from).chain(std::iter::once(key)).collect::<Vec<_>>().join("+"))
-}

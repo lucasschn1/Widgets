@@ -50,7 +50,6 @@ pub struct SettingsState {
     pub thumbs: HashMap<&'static str, (bool, Option<Image>)>,
     preview: Option<((i32, i32, u32, u32, i64, i64, u64), Image)>,
     pub city: Suggest,
-    pub recording: Option<&'static str>,
 }
 
 impl SettingsState {
@@ -88,8 +87,6 @@ pub struct View<'a> {
     pub sh: &'a Shared,
     pub visible: Vec<&'static str>,
     pub modes: HashMap<&'static str, Mode>,
-    pub peek_hotkey: Option<String>,
-    pub hotkey_errors: &'a HashMap<&'static str, String>,
     /// canto da área de desenho na tela (para o vidro das miniaturas e da prévia)
     pub origin: (i32, i32),
     /// cartão de um widget: (conteúdo, raio) no tamanho e escala pedidos
@@ -112,7 +109,7 @@ fn nav_items() -> Vec<(&'static str, String, &'static str)> {
     items.extend([
         ("-", String::new(), ""),
         ("avisos", "Notificações".into(), "avisos"),
-        ("atalhos", "Atalhos e dicas".into(), "atalhos"),
+        ("dicas", "Dicas".into(), "atalhos"),
         ("sobre", "Sobre".into(), "sobre"),
     ]);
     items
@@ -127,7 +124,7 @@ fn page_title(page: &str) -> (String, Option<String>) {
         "aparencia" => ("Aparência", Some("Vidro, texto e animações. Tudo muda na hora.")),
         "widgets" => ("Galeria de widgets", Some("Escolha quais widgets ficam na sua área de trabalho.")),
         "avisos" => ("Notificações", Some("Quando os widgets podem chamar sua atenção.")),
-        "atalhos" => ("Atalhos e dicas", Some("Atalhos de teclado globais e gestos do mouse.")),
+        "dicas" => ("Dicas", Some("Gestos do mouse e o que dá para fazer com o clique direito.")),
         _ => ("Sobre", None),
     };
     (t.into(), s.map(String::from))
@@ -143,7 +140,6 @@ pub enum Control {
     Button(&'static str, String, A, &'static str, Option<&'static str>),
     Buttons(Vec<(String, String, A)>),
     Entry(&'static str, String, String, f32),
-    Hotkey(&'static str, String, bool),
 }
 
 impl Control {
@@ -183,9 +179,6 @@ impl Control {
             }
             Control::Entry(id, value, placeholder, width) => {
                 ui.entry(id, rx - width, cy - 17.0, rx, cy + 17.0, value, placeholder, false);
-            }
-            Control::Hotkey(id, label, error) => {
-                ui.hotkey(id, rx - 280.0, cy - 17.0, rx, cy + 17.0, label, *error);
             }
         }
     }
@@ -315,7 +308,7 @@ pub fn draw(st: &mut SettingsState, ui: &mut Ui, v: &View) {
         "aparencia" => page_aparencia(st, ui, x, w, v),
         "widgets" => page_widgets(st, ui, x, w, v),
         "avisos" => page_avisos(ui, x, w, v),
-        "atalhos" => page_atalhos(ui, x, w, v),
+        "dicas" => page_dicas(ui, x, w),
         "sobre" => page_sobre(ui, x, w, v),
         key => page_widget(st, ui, x, w, v, key),
     };
@@ -565,13 +558,10 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
             let y = section(ui, x, y, "Durações");
             let y = rows(ui, x, y, w, r);
             let y = section(ui, x, y, "Comportamento");
-            let hotkey = config::setting_str(&v.sh.cfg, "atalho_pomodoro");
             let y = rows(ui, x, y, w, vec![
                 Row("Começar a próxima fase sozinho".into(), Some("Sem precisar clicar quando o foco ou a pausa acaba".into()),
                     sw("pomodoro_auto", wcfg.bool_of("auto").unwrap_or(false), A::Toggle("pomodoro_auto"))),
                 Row("Avisar no fim de cada fase".into(), Some(NOTIFY[5].2.into()), notify("pomodoro")),
-                Row("Atalho global".into(), Some("Começa ou pausa de qualquer programa".into()),
-                    Control::Hotkey("atalho:pomodoro", hotkey, v.hotkey_errors.contains_key("pomodoro"))),
             ]);
             let date = crate::win::local_time().iso_date();
             let stats = &wcfg["hoje"];
@@ -614,19 +604,8 @@ fn page_avisos(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     restore(ui, x, y, w, "avisos")
 }
 
-fn page_atalhos(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
-    let y = section(ui, x, 4.0, "Teclado (funcionam em qualquer programa)");
-    let mut r = Vec::new();
-    for (name, label, setting, id) in [("peek", "Mostrar widgets na frente", "atalho", "atalho:peek"), ("pomodoro", "Começar ou pausar o Pomodoro", "atalho_pomodoro", "atalho:pomodoro")] {
-        let error = v.hotkey_errors.get(name);
-        let desc = match error {
-            Some(e) => format!("{e} já é usado por outro programa"),
-            None => "Clique no campo e aperte a combinação".into(),
-        };
-        r.push(Row(label.into(), Some(desc), Control::Hotkey(id, config::setting_str(&v.sh.cfg, setting), error.is_some())));
-    }
-    let y = rows(ui, x, y, w, r);
-    let y = section(ui, x, y, "Mouse");
+fn page_dicas(ui: &mut Ui, x: f32, w: f32) -> f32 {
+    let y = section(ui, x, 4.0, "Mouse");
     rows(ui, x, y, w, TIPS.iter().map(|(t, d)| Row(t.to_string(), Some(d.to_string()), Control::None)).collect())
 }
 
@@ -644,7 +623,7 @@ fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     rows(ui, x, y, w, vec![
         Row("Boas-vindas".into(), Some("Rever a apresentação e escolher os widgets de novo".into()), btn("boas_vindas", "Abrir", A::Welcome)),
         Row("Pasta das configurações".into(), Some(data), Control::Button("pasta", "Abrir pasta".into(), A::OpenData, "secondary", Some("folder"))),
-        Row("Restaurar todas as configurações".into(), Some("Aparência, comportamento, atalhos e notificações (layouts ficam)".into()),
+        Row("Restaurar todas as configurações".into(), Some("Aparência, comportamento e notificações (layouts ficam)".into()),
             Control::Button("restaurar_tudo", "Restaurar".into(), A::ResetAll, "danger", None)),
     ])
 }

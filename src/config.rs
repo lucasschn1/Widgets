@@ -71,8 +71,6 @@ pub fn default_setting(name: &str) -> Value {
         "esmaecer" | "expandir_hover" | "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
         "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("auto"),
-        "atalho" => json!("Ctrl+Alt+W"),
-        "atalho_pomodoro" => json!("Ctrl+Alt+P"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true}),
         _ => Value::Null,
     }

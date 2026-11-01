@@ -72,7 +72,7 @@ pub const WELCOME_H: f32 = 580.0;
 const STEPS: [(&str, &str); 3] = [
     ("Escolha seus widgets", "Clique para marcar os que você quer na área de trabalho. Dá para mudar depois."),
     ("Deixe com a sua cara", "Algumas informações para os widgets mostrarem o que importa para você."),
-    ("Tudo pronto!", "Alguns atalhos para aproveitar melhor."),
+    ("Tudo pronto!", "Algumas dicas para aproveitar melhor."),
 ];
 
 pub struct WelcomeState {
@@ -204,15 +204,8 @@ fn step_personal(st: &WelcomeState, ui: &mut Ui, x: f32, y: f32, w: f32) {
 }
 
 fn step_tips(ui: &mut Ui, x: f32, mut y: f32, w: f32, v: &View) {
-    let mut items: Vec<(String, String)> = Vec::new();
-    if let Some(h) = &v.peek_hotkey {
-        items.push((h.clone(), "Mostra os widgets na frente das janelas".into()));
-    }
-    let pomodoro = crate::config::setting_str(&v.sh.cfg, "atalho_pomodoro");
-    if !pomodoro.is_empty() {
-        items.push((pomodoro, "Começa ou pausa o Pomodoro".into()));
-    }
-    items.extend(TIPS.iter().take(4).map(|(a, b)| (a.to_string(), b.to_string())));
+    let _ = v;
+    let items: Vec<(String, String)> = [TIPS[0], TIPS[2], TIPS[3], TIPS[5]].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     for (title, desc) in items {
         if title.contains('+') {
             ui.keycaps(x, y + 12.0, &title);

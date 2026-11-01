@@ -35,7 +35,6 @@ pub enum Ev {
     /// tecla numa janela pop-up (menu, barra de edição): código virtual
     Key { hwnd: isize, vk: u32 },
     Tray(u32),
-    Hotkey(i32),
     Wake,
     TaskbarCreated,
     /// janela de painel: pediram para fechar (X da barra de título)
@@ -460,10 +459,6 @@ unsafe extern "system" fn message_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
     match msg {
         WM_TRAY => {
             push(Ev::Tray((lp.0 & 0xFFFF) as u32));
-            LRESULT(0)
-        }
-        WM_HOTKEY => {
-            push(Ev::Hotkey(wp.0 as i32));
             LRESULT(0)
         }
         WM_WAKE => {

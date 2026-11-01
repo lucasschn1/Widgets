@@ -51,7 +51,7 @@ usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios pri
 quando alguém pede sua revisão.
 
 **Pomodoro** é um relógio com timer de foco e pausas. Ele conta os ciclos até a pausa longa,
-soma quanto você focou no dia e começa ou pausa de qualquer lugar com `Ctrl+Alt+P`.
+soma quanto você focou no dia, e começa ou pausa com um clique (ou pelo clique direito).
 
 <p align="center">
   <img src="docs/images/pomodoro.webp" width="300" alt="O Pomodoro rodando">
@@ -77,8 +77,8 @@ fecha quando você sai.
 ## Configurações
 
 Tudo muda na hora, sem botão de salvar. Dá para ajustar o quanto o vidro desfoca e escurece
-(com uma prévia ao vivo), escolher quais widgets aparecem, mudar os atalhos de teclado e
-decidir quais avisos você quer receber.
+(com uma prévia ao vivo), escolher quais widgets aparecem e decidir quais avisos você quer
+receber.
 
 <table>
   <tr>
@@ -94,17 +94,18 @@ configurar a cidade do clima.
   <img src="docs/images/boas-vindas.png" width="600" alt="Boas-vindas">
 </p>
 
-## Atalhos que valem a pena conhecer
+## Tudo no clique direito
+
+O app não usa atalhos de teclado globais, para não roubar combinações de outros programas (nem o
+AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no ícone da bandeja:
 
 | | |
 |---|---|
-| `Ctrl+Alt+W` | Traz os widgets para a frente das janelas |
-| `Ctrl+Alt+P` | Começa ou pausa o Pomodoro |
-| Clique direito | Menu com layouts, modo foco, modo edição e configurações |
+| Mostrar na frente | Traz os widgets para a frente das janelas |
 | Modo edição | Fecha, redimensiona e move tudo de uma vez (e tem "Desfazer") |
 | Modo foco | Esconde os widgets por 30 min, 1 h, 2 h ou até você desligar |
-
-Os dois atalhos de teclado podem ser trocados em Configurações → Atalhos e dicas.
+| Layouts | Guarda e troca arrumações dos widgets |
+| No Pomodoro | Começar, pausar, pular de fase e mudar as durações |
 
 ---
 
@@ -134,7 +135,7 @@ packaging/            build.ps1 (Widgets.exe e .zip) e o instalador do Inno Setu
 res/                  ícone e manifesto embutidos no Widgets.exe (pelo build.rs)
 src/
   main.rs             inicia o app e roda o laço de mensagens
-  app.rs              cria os widgets e coordena arraste, encaixe, menus, avisos, modos e atalhos
+  app.rs              cria os widgets e coordena arraste, encaixe, menus, avisos e modos
   app_panels.rs       a parte do app que cuida das configurações, perguntas e boas-vindas
   config.rs           lê e grava as opções (config.json e cache.json), com os valores padrão
   shared.rs           o estado que todos os widgets consultam
@@ -148,7 +149,7 @@ src/
   prompt.rs           as perguntas de vidro, as sugestões de cidade e as boas-vindas
   popup.rs            o menu de vidro e os avisos com "Desfazer"
   overlay.rs          guias de encaixe e dicas do mouse
-  tray.rs             ícone na bandeja, notificações e atalhos globais
+  tray.rs             ícone na bandeja e notificações
   updates.rs          procurar e instalar versões novas
   startup.rs          iniciar com o Windows
   win.rs, util.rs, imgops.rs, drawing.rs

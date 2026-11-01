@@ -249,10 +249,6 @@ pub trait Kind {
     fn status(&self) -> Status {
         Status::default()
     }
-    /// Resumo para um aviso rápido: (título, detalhe, em andamento). Ex.: o atalho do Pomodoro.
-    fn status_line(&self) -> Option<(String, String, bool)> {
-        None
-    }
     /// Texto vindo de uma pergunta ou das configurações (ex.: "city", "user"); `extra` é a
     /// cidade escolhida na lista de sugestões.
     fn input(&mut self, _field: &str, _value: &str, _extra: Option<&Value>, _ctx: &mut Ctx) {}

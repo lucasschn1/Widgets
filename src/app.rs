@@ -21,7 +21,7 @@ use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
 use crate::theme::*;
-use crate::tray::{self, Tray, HOTKEY_PEEK, HOTKEY_POMODORO, NIN_BALLOONUSERCLICK};
+use crate::tray::{self, Tray, NIN_BALLOONUSERCLICK};
 use crate::widgets::{self, Ctx, Kind, MenuItem, Mode, NotifyAction, Request};
 use crate::win::{self, Rect, Z};
 
@@ -69,8 +69,6 @@ enum Undo {
     Show(&'static str),
     /// volta as opções gerais como estavam (ex.: depois de "Restaurar padrão")
     AppSettings(Value),
-    /// abre uma página das configurações (botão "Trocar" do aviso de atalho em uso)
-    OpenSettings(&'static str),
     /// instala a versão nova (botão "Atualizar" do aviso de atualização)
     Update,
 }
@@ -101,8 +99,6 @@ pub struct App {
     next_watch: Instant,
     peek_seen: Instant,
     menu: GlassMenu,
-    /// o atalho de "mostrar na frente" que deu para registrar
-    peek_hotkey: Option<String>,
     toast: GlassBar,
     toast_until: Option<Instant>,
     toast_undo: Option<Undo>,
@@ -113,8 +109,6 @@ pub struct App {
     later: Vec<(Instant, &'static str, (i32, i32))>,
     /// janelas de configurações, perguntas e boas-vindas
     panels: Vec<Panel>,
-    /// atalho que outro programa já usa: nome -> combinação pedida
-    hotkey_errors: HashMap<&'static str, String>,
     update_status: String,
     update_version: Option<String>,
     next_update: Instant,
@@ -163,7 +157,6 @@ impl App {
             next_watch: Instant::now(),
             peek_seen: Instant::now(),
             menu: GlassMenu::new(),
-            peek_hotkey: None,
             toast: GlassBar::new(Place::Bottom),
             toast_until: None,
             toast_undo: None,
@@ -171,7 +164,6 @@ impl App {
             focus_until: None,
             later: Vec::new(),
             panels: Vec::new(),
-            hotkey_errors: HashMap::new(),
             update_status: "Ainda não procurou".into(),
             update_version: None,
             next_update: Instant::now() + UPDATE_FIRST,
@@ -180,7 +172,6 @@ impl App {
             welcome_at: None,
             quit: false,
         };
-        app.register_hotkeys();
         let visible: Vec<&str> =
             widgets::KEYS.iter().copied().filter(|k| app.sh.cfg[*k].bool_of("visible").unwrap_or(true)).collect();
         for key in visible {
@@ -194,29 +185,6 @@ impl App {
             app.welcome_at = Some(Instant::now() + Duration::from_millis(1500));
         }
         app
-    }
-
-    fn register_hotkeys(&mut self) {
-        let hwnd = self.tray.window();
-        let wanted = config::setting_str(&self.sh.cfg, "atalho");
-        let mut ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, &wanted);
-        let mut chosen = if ok { Some(wanted.clone()) } else { None };
-        for alt in tray::FALLBACKS {
-            if ok {
-                break;
-            }
-            ok = tray::register_hotkey(hwnd, HOTKEY_PEEK, alt);
-            if ok {
-                chosen = Some(alt.to_string());
-            }
-        }
-        self.peek_hotkey = chosen;
-        if !wanted.is_empty() && self.peek_hotkey.as_deref() != Some(wanted.as_str()) {
-            let detail = format!("Atalho atual: {}", self.peek_hotkey.clone().unwrap_or_else(|| "nenhum".into()));
-            self.hotkey_errors.insert("peek", wanted.clone());
-            self.toast(&format!("{wanted} já é usado por outro programa"), Some(&detail), "atalhos", WARNING, Some(("Trocar", Undo::OpenSettings("atalhos"))));
-        }
-        tray::register_hotkey(hwnd, HOTKEY_POMODORO, &config::setting_str(&self.sh.cfg, "atalho_pomodoro"));
     }
 
     // ---------- widgets ----------
@@ -905,13 +873,13 @@ impl App {
             MenuItem::Sub("Layouts".into(), layouts),
             MenuItem::Sep,
             MenuItem::Cmd((if self.sh.editing { "Concluir edição" } else { "Editar widgets" }).into(), M_EDIT),
-            MenuItem::Hint("Mostrar na frente".into(), M_PEEK, self.peek_hotkey.clone().unwrap_or_default()),
+            MenuItem::Cmd("Mostrar na frente".into(), M_PEEK),
             MenuItem::Sub("Modo foco".into(), focus),
             MenuItem::Cmd("Organizar widgets".into(), M_ARRANGE),
             MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK),
             MenuItem::Sep,
             MenuItem::Cmd("Configurações…".into(), M_SETTINGS),
-            MenuItem::Cmd("Atalhos e dicas".into(), M_TIPS),
+            MenuItem::Cmd("Dicas".into(), M_TIPS),
             MenuItem::Sep,
         ];
         if with_close {
@@ -953,7 +921,7 @@ impl App {
         match id {
             0 => {}
             M_SETTINGS => self.open_settings("geral"),
-            M_TIPS => self.open_settings("atalhos"),
+            M_TIPS => self.open_settings("dicas"),
             M_GALLERY => self.open_settings("widgets"),
             M_SAVE_LAYOUT => self.open_prompt(prompt::Purpose::LayoutName, None),
             M_EDIT => {
@@ -1054,10 +1022,8 @@ impl App {
             Undo::AppSettings(old) => {
                 self.sh.cfg["app"] = old;
                 self.sh.save();
-                self.register_hotkeys_quiet();
                 self.apply_settings("*");
             }
-            Undo::OpenSettings(page) => self.open_settings(page),
             Undo::Update => self.install_update(),
             Undo::Layout { name, snapshot } => {
                 self.sh.cfg.obj_mut("app").entry("layouts").or_insert(json!({}));
@@ -1261,25 +1227,6 @@ impl App {
             self.cards[i].slide_to((right - w - m, y - m), ANIM_MS, &self.sh);
             y += h + gap;
             column_w = column_w.max(w);
-        }
-    }
-
-    fn toggle_pomodoro(&mut self) {
-        let i = match self.find("pomodoro") {
-            Some(i) => i,
-            None => {
-                self.set_visible("pomodoro", true);
-                match self.find("pomodoro") {
-                    Some(i) => i,
-                    None => return,
-                }
-            }
-        };
-        self.run_action(i, Act::Kind(widgets::pomodoro::TOGGLE));
-        if let Some(info) = self.cards[i].kind.status_line() {
-            let (title, detail, running) = info;
-            let color = if running { Rgba::rgb(255, 99, 88) } else { WHITE };
-            self.toast(&title, Some(&detail), "pomodoro", color, None);
         }
     }
 
@@ -1498,9 +1445,7 @@ impl App {
                 NIN_BALLOONUSERCLICK => self.notification_clicked(),
                 _ => {}
             },
-            Ev::Hotkey(HOTKEY_PEEK) => self.toggle_peek(),
-            Ev::Hotkey(HOTKEY_POMODORO) => self.toggle_pomodoro(),
-            Ev::Hotkey(_) | Ev::Wake => {}
+            Ev::Wake => {}
             Ev::TaskbarCreated => self.tray.add(),
             Ev::OtherInstance => {
                 self.toast("Os widgets já estão abertos", Some("Clique direito num widget ou no ícone da bandeja"), "widgets", ACCENT, None);

@@ -661,11 +661,6 @@ impl Kind for Pomodoro {
         Some(self.next)
     }
 
-    fn status_line(&self) -> Option<(String, String, bool)> {
-        let title = if self.running() { "Pomodoro rodando" } else { "Pomodoro pausado" };
-        Some((title.into(), format!("{}  ·  {} restantes", self.phase.label(), fmt_timer(self.left())), self.running()))
-    }
-
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
         if let Some(end) = self.end {
             let now = win::now();

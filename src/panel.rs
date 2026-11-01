@@ -48,7 +48,6 @@ pub enum A {
     SaveLayout,
     ApplyLayout(String),
     DeleteLayout(String),
-    Record(&'static str),
     Restore(&'static str),
     TestNotify,
     Welcome,
@@ -367,7 +366,6 @@ pub struct Ui<'a> {
     pub hover: Option<&'a str>,
     pub pressed: Option<&'a str>,
     pub focus: Option<&'a str>,
-    pub recording: Option<&'a str>,
     pub anims: &'a mut Anims,
     pub animations: bool,
     /// deslocamento desta parte do desenho na janela (lógico) e o recorte das áreas clicáveis
@@ -564,29 +562,6 @@ impl Ui<'_> {
         let rect = (x0 + 11.0 + self.ox, y0 + 4.0 + self.oy, x1 - 11.0 + self.ox, y1 - 5.0 + self.oy);
         let visible = rect.1 >= cy0 && rect.3 <= cy1 && rect.0 >= cx0 && rect.2 <= cx1;
         self.entries.push(EntrySpec { id: id.into(), rect, value: value.into(), placeholder: placeholder.into(), visible, bg });
-    }
-
-    /// Campo de atalho: mostra as teclas; clique e aperte a combinação nova.
-    pub fn hotkey(&mut self, id: &'static str, x0: f32, y0: f32, x1: f32, y1: f32, label: &str, error: bool) {
-        let recording = self.recording == Some(id);
-        let hot = self.hot(id);
-        let outline = if recording { ACCENT } else if error { DANGER.with_a(200) } else { LINE };
-        self.rect(x0, y0, x1, y1, 7.0, Some(if hot { FIELD_HOVER } else { FIELD }), Some(outline), 1.0);
-        let cy = (y0 + y1) / 2.0;
-        if recording {
-            self.text(x0 + 12.0, cy, "Pressione o atalho…  (Esc cancela, Backspace remove)", 11.5, FG, Face::Regular, Anchor::LM, Some(x1 - x0 - 24.0));
-        } else if !label.is_empty() {
-            let mut x = x0 + 8.0;
-            for part in label.split('+') {
-                let tw = self.text_width(part, 11.5, Face::Semibold) + 16.0;
-                self.rect(x, cy - 11.0, x + tw, cy + 11.0, 5.0, Some(WHITE.with_a(22)), Some(WHITE.with_a(34)), 1.0);
-                self.text(x + tw / 2.0, cy, part, 11.5, FG, Face::Semibold, Anchor::MM, None);
-                x += tw + 5.0;
-            }
-        } else {
-            self.text(x0 + 12.0, cy, "Nenhum  ·  clique para definir", 11.5, FAINT, Face::Regular, Anchor::LM, None);
-        }
-        self.region(id, x0, y0, x1, y1, A::Record(id), Cursor::Hand);
     }
 
     /// Teclas desenhadas (Ctrl, Alt, W) a partir de (x, cy); devolve a largura.
