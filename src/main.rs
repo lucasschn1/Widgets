@@ -36,6 +36,7 @@ mod prompt;
 mod settings;
 mod shared;
 mod startup;
+mod updates;
 mod theme;
 mod tray;
 mod util;

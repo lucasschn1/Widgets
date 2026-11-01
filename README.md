@@ -27,7 +27,8 @@ Abra o **PowerShell** e cole:
 irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
 ```
 
-Pronto. Não precisa ter Python nem ser administrador. Se preferir o jeito tradicional, baixe o
+Pronto. Não precisa ser administrador, e o programa inteiro é um único `Widgets.exe` de 2,5 MB
+que abre na hora. Se preferir o jeito tradicional, baixe o
 **[Widgets-Setup.exe](https://github.com/lucasschn1/Widgets/releases/latest)** e siga o
 instalador.
 
@@ -109,47 +110,51 @@ Os dois atalhos de teclado podem ser trocados em Configurações → Atalhos e d
 
 ## Para quem quer mexer no código
 
-Precisa de um Python 3 recente (o desenvolvimento é feito no 3.14):
+O app é escrito em [Rust](https://www.rust-lang.org/) e conversa direto com o Windows: Direct2D
+e DirectWrite para desenhar, WinRT para saber o que está tocando. Para compilar, instale o Rust
+pelo [rustup](https://rustup.rs) (ele oferece as ferramentas de compilação do Visual Studio, se
+faltarem) e rode:
 
 ```powershell
-pip install -r requirements.txt
-pythonw widget.pyw
+cargo run            # versão de teste, com opções separadas em %APPDATA%\Widgets-dev
+cargo build --release
 ```
 
-Tudo é desenhado com o [Pillow](https://python-pillow.org/) e mostrado em janelas com
-transparência por pixel. As opções ficam em `%APPDATA%\Widgets`, tanto rodando pelo código
-quanto instalado.
+A versão de teste pode ficar aberta junto com a instalada: ela usa outra pasta de opções, outro
+ícone na bandeja e outra entrada em "iniciar com o Windows". A versão final guarda tudo em
+`%APPDATA%\Widgets`, no mesmo formato da versão 2 (em Python), então quem atualiza não perde
+nada.
 
 <details>
 <summary><b>Como o código está organizado</b></summary>
 
 ```
-widget.pyw                 só inicia o app
-install.ps1                instalador de uma linha (baixa o último Release)
-packaging/                 build do Widgets.exe (PyInstaller) e do instalador (Inno Setup)
-docs/make_images.py        gera as imagens deste README
-deskwidgets/
-  app.py                   cria os widgets e coordena menus, avisos, modos e atalhos
-  config.py                lê e grava as opções, com os valores padrão
-  paths.py                 onde ficam os arquivos
-  theme.py                 medidas, cores, fontes e ícones
-  util.py                  rede, datas em português, "há 5 min"
-  win32.py                 API do Windows (janelas transparentes, monitores)
-  backdrop.py              o vidro: o papel de parede desfocado atrás dos cartões
-  tray.py                  ícone na bandeja, notificações e atalhos globais
-  startup.py               iniciar com o Windows
-  updates.py               procurar e instalar versões novas
-  ui/
-    card.py                a base de todo widget (tamanhos, arraste, encaixe, edição)
-    panel.py               o motor das janelas desenhadas (controles e campos de texto)
-    settings.py            as configurações, uma página por método `page_*`
-    onboarding.py          as boas-vindas
-    prompt.py              as perguntas de vidro e as sugestões de cidade
-    toast.py               os avisos com "Desfazer" e a barra do modo edição
-    menu.py, overlay.py, drawing.py, gallery.py
+install.ps1           instalador de uma linha (baixa o último Release)
+packaging/            build.ps1 (Widgets.exe e .zip) e o instalador do Inno Setup
+res/                  ícone e manifesto embutidos no Widgets.exe (pelo build.rs)
+src/
+  main.rs             inicia o app e roda o laço de mensagens
+  app.rs              cria os widgets e coordena arraste, encaixe, menus, avisos, modos e atalhos
+  app_panels.rs       a parte do app que cuida das configurações, perguntas e boas-vindas
+  config.rs           lê e grava as opções (config.json e cache.json), com os valores padrão
+  shared.rs           o estado que todos os widgets consultam
+  card.rs             a base de todo widget (tamanhos, botão de tamanho, modo edição)
+  gfx.rs              desenho com Direct2D, DirectWrite e WIC
+  backdrop.rs         o vidro: o papel de parede desfocado atrás dos cartões
+  theme.rs            medidas, cores e ícones
+  events.rs           janelas do Windows e a fila de eventos
+  panel.rs            o motor das janelas desenhadas (controles e campos de texto)
+  settings.rs         as páginas das configurações
+  prompt.rs           as perguntas de vidro, as sugestões de cidade e as boas-vindas
+  popup.rs            o menu de vidro e os avisos com "Desfazer"
+  overlay.rs          guias de encaixe e dicas do mouse
+  tray.rs             ícone na bandeja, notificações e atalhos globais
+  updates.rs          procurar e instalar versões novas
+  startup.rs          iniciar com o Windows
+  win.rs, util.rs, imgops.rs, drawing.rs
   widgets/
-    __init__.py            a lista de widgets disponíveis
-    system.py, media.py, github.py, pomodoro.py
+    mod.rs            a lista de widgets e o trait `Kind`, que todo widget implementa
+    system.rs, media.rs, github.rs, pomodoro.rs
 ```
 
 </details>
@@ -157,29 +162,36 @@ deskwidgets/
 <details>
 <summary><b>Criando um widget novo</b></summary>
 
-1. Crie um arquivo em `deskwidgets/widgets/` com uma subclasse de `CardWidget`. Ela precisa de
-   `key`, `title`, `description`, `icon`, `layout(mode)`, `draw_shapes()`, `draw_content()` e
-   `load_sample()`, que dá os dados de exemplo para a miniatura da galeria.
-2. Coloque a classe em `WIDGET_TYPES`, no `deskwidgets/widgets/__init__.py`.
-3. Se quiser uma página própria nas configurações, crie `widget_<key>()` em `ui/settings.py`,
-   seguindo as que já existem.
+1. Crie um arquivo em `src/widgets/` com um tipo que implemente `Kind`. O essencial é `key`,
+   `title`, `layout(mode)` (o tamanho do cartão em cada modo) e `draw`, e os outros métodos
+   (`hit`, `act`, `tick`, `menu`, `tooltip`...) têm um padrão que não faz nada.
+2. Coloque a chave em `KEYS` e o widget em `create`, `title`, `description`, `icon_name` e
+   `sample` (os dados de exemplo da miniatura da galeria), todos em `src/widgets/mod.rs`.
+3. Se quiser uma página própria nas configurações, crie uma em `src/settings.rs`, seguindo as
+   que já existem.
 
-Uma opção nova vai em `SETTINGS` (`config.py`). Leia com `app.setting("nome")` e grave com
-`app.set_setting("nome", valor)`, que já aplica na hora.
+Uma opção geral nova vai em `config.rs`, com o valor padrão. As configurações não têm botão de
+salvar: `set_setting` grava e aplica na hora.
 
 </details>
 
 <details>
 <summary><b>Lançando uma versão</b></summary>
 
-1. Mude `__version__` em `deskwidgets/__init__.py` e faça o commit.
-2. Crie e envie a tag: `git tag v2.1.0` e depois `git push origin main v2.1.0`.
+1. Mude `version` no `Cargo.toml` e faça o commit.
+2. Crie e envie a tag: `git tag v3.1.0` e depois `git push origin main v3.1.0`.
 
-O GitHub Actions gera o `Widgets.exe`, o `.zip` e o instalador, e publica o Release. Quem já
-tem o app instalado recebe o aviso de atualização. Para gerar o executável na sua máquina, use
-`pip install -r packaging/requirements-build.txt` e depois `python packaging/build.py`.
+O GitHub Actions compila o `Widgets.exe`, gera o `.zip` e o instalador e publica o Release.
+Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua máquina,
+rode `packaging\build.ps1`.
 
-As imagens deste README saem do próprio código, com dados de exemplo. Se o visual mudar,
-rode `python docs/make_images.py`.
+</details>
+
+<details>
+<summary><b>A versão 2, em Python</b></summary>
+
+Até a versão 2.0 o app era em Python, com Pillow e Tkinter. O código continua no branch
+[`python`](https://github.com/lucasschn1/Widgets/tree/python). Com a reescrita em Rust, o
+download caiu de 22 MB para cerca de 1 MB, e o app passou a usar mais ou menos metade da memória.
 
 </details>

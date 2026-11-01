@@ -18,6 +18,7 @@ use crate::popup::{GlassBar, GlassMenu, Part, Place};
 mod panels;
 use panels::{EditWhat, Panel};
 use crate::prompt;
+use crate::updates;
 use crate::shared::Shared;
 use crate::theme::*;
 use crate::tray::{self, Tray, HOTKEY_PEEK, HOTKEY_POMODORO, NIN_BALLOONUSERCLICK};
@@ -70,7 +71,13 @@ enum Undo {
     AppSettings(Value),
     /// abre uma página das configurações (botão "Trocar" do aviso de atalho em uso)
     OpenSettings(&'static str),
+    /// instala a versão nova (botão "Atualizar" do aviso de atualização)
+    Update,
 }
+
+/// primeira busca por atualização logo depois de abrir, e depois a cada 6 horas
+const UPDATE_FIRST: Duration = Duration::from_secs(20);
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub struct App {
     sh: Shared,
@@ -110,6 +117,9 @@ pub struct App {
     hotkey_errors: HashMap<&'static str, String>,
     update_status: String,
     update_version: Option<String>,
+    next_update: Instant,
+    /// busca em andamento: a resposta e se foi pedida pelo botão
+    update_rx: Option<(std::sync::mpsc::Receiver<updates::Found>, bool)>,
     /// opção mexida por um slider, para aplicar no vidro daqui a pouco (sem pesar a cada pixel)
     pending_setting: Option<(Instant, &'static str)>,
     /// abrir as boas-vindas (primeira vez)
@@ -164,6 +174,8 @@ impl App {
             hotkey_errors: HashMap::new(),
             update_status: "Ainda não procurou".into(),
             update_version: None,
+            next_update: Instant::now() + UPDATE_FIRST,
+            update_rx: None,
             pending_setting: None,
             welcome_at: None,
             quit: false,
@@ -1046,6 +1058,7 @@ impl App {
                 self.apply_settings("*");
             }
             Undo::OpenSettings(page) => self.open_settings(page),
+            Undo::Update => self.install_update(),
             Undo::Layout { name, snapshot } => {
                 self.sh.cfg.obj_mut("app").entry("layouts").or_insert(json!({}));
                 if let Some(l) = self.sh.cfg["app"]["layouts"].as_object_mut() {
@@ -1519,7 +1532,7 @@ impl App {
         for (t, ..) in &self.later {
             next = next.min(*t);
         }
-        for t in [self.panels_due(), self.welcome_at].into_iter().flatten() {
+        for t in [self.panels_due(), self.welcome_at, Some(self.next_update)].into_iter().flatten() {
             next = next.min(t);
         }
         if let Some(Some(until)) = self.focus_until {
@@ -1549,6 +1562,10 @@ impl App {
             self.welcome_at = None;
             self.open_welcome();
         }
+        if now >= self.next_update {
+            self.check_updates(false);
+        }
+        self.poll_updates();
         self.toast.frame();
         self.edit_bar.frame();
         if self.toast_until.is_some_and(|t| now >= t) {
@@ -1644,14 +1661,65 @@ impl App {
 
     // ---------- atualizações ----------
 
+    /// Procura uma versão nova no GitHub (sozinho a cada 6 h, ou pelo botão em Sobre).
     fn check_updates(&mut self, manual: bool) {
-        self.update_status = "Procurar atualizações chega na próxima etapa".into();
-        if manual {
-            self.panels_changed();
+        if !manual {
+            self.next_update = Instant::now() + UPDATE_EVERY;
         }
+        if self.update_rx.as_ref().is_some_and(|(_, m)| *m || !manual) {
+            return; // já está procurando
+        }
+        self.update_rx = Some((updates::check_async(), manual));
+        self.update_status = "Procurando…".into();
+        self.panels_changed();
     }
 
-    fn install_update(&mut self) {}
+    fn poll_updates(&mut self) {
+        let Some((rx, manual)) = &self.update_rx else { return };
+        let manual = *manual;
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(_) => Err("a busca parou".into()),
+        };
+        self.update_rx = None;
+        let t = win::local_time();
+        let when = format!("{:02}:{:02}", t.hour, t.minute);
+        match found {
+            Err(_) => {
+                self.update_status = format!("Não deu para verificar ({when})");
+                if manual {
+                    self.toast("Não deu para procurar atualizações", Some("Verifique a conexão"), "close", WARNING, None);
+                }
+            }
+            Ok(Some(version)) => {
+                self.update_status = format!("Versão {version} disponível");
+                let notified = self.sh.cache["update_notified"].as_str() == Some(version.as_str());
+                if manual || !notified {
+                    self.sh.cache["update_notified"] = json!(version);
+                    self.sh.save_cache();
+                    let label = if updates::installed() { "Atualizar" } else { "Baixar" };
+                    self.toast(&format!("Versão {version} disponível"), None, "refresh", ACCENT, Some((label, Undo::Update)));
+                }
+                self.update_version = Some(version);
+            }
+            Ok(None) => {
+                self.update_version = None;
+                self.update_status = format!("Você tem a versão mais recente (verificado às {when})");
+                if manual {
+                    self.toast("Você já tem a versão mais recente", None, "check", ACCENT, None);
+                }
+            }
+        }
+        self.panels_changed();
+    }
+
+    fn install_update(&mut self) {
+        if updates::installed() {
+            self.toast("Atualizando…", Some("Os widgets fecham e abrem de novo sozinhos"), "refresh", ACCENT, None);
+        }
+        updates::install();
+    }
 
     pub fn exit(&mut self) {
         self.tray.remove();

@@ -15,7 +15,7 @@ pub const W: f32 = 900.0;
 pub const H: f32 = 640.0;
 pub const SIDEBAR: f32 = 240.0;
 pub const TOP: f32 = 78.0;
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub use crate::updates::VERSION;
 
 pub const NOTIFY: [(&str, &str, &str); 6] = [
     ("cpu", "CPU alta", "Quando a CPU passa de 90% por 3 minutos"),

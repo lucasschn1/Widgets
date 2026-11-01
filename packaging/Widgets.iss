@@ -1,5 +1,6 @@
-; Instalador (Widgets-Setup.exe), gerado pelo Inno Setup 6 a partir de dist\Widgets:
-;   ISCC.exe /DAppVersion=2.0.0 packaging\Widgets.iss
+; Instalador (Widgets-Setup.exe), gerado pelo Inno Setup 6 a partir de dist\Widgets
+; (que o packaginguild.ps1 cria):
+;   ISCC.exe /DAppVersion=3.0.0 packaging\Widgets.iss
 ; Instala para o usuário atual, sem pedir administrador, na mesma pasta que o install.ps1 usa.
 
 #ifndef AppVersion
@@ -22,7 +23,7 @@ DisableReadyPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=Widgets-Setup
-SetupIconFile=Widgets.ico
+SetupIconFile=..es\widgets.ico
 UninstallDisplayIcon={app}\Widgets.exe
 UninstallDisplayName=Widgets
 Compression=lzma2/max
@@ -41,7 +42,7 @@ Name: "startup"; Description: "Iniciar com o Windows"
 Name: "desktopicon"; Description: "Criar um atalho na área de trabalho"; Flags: unchecked
 
 [InstallDelete]
-; numa atualização, tira os arquivos da versão anterior antes de copiar os novos
+; numa atualização, tira os arquivos da versão anterior (a 2.x, em Python, tinha a pasta _internal)
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]

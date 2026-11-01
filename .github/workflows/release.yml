@@ -1,6 +1,6 @@
 # Gera o Widgets.exe, o .zip e o instalador numa máquina Windows do GitHub e publica no Release.
-# Para lançar uma versão: mude __version__ em deskwidgets/__init__.py, faça o commit e
-#   git tag v2.0.0 && git push origin v2.0.0
+# Para lançar uma versão: mude `version` no Cargo.toml, faça o commit e
+#   git tag v3.0.0 && git push origin v3.0.0
 # Também dá para rodar à mão (aba Actions > Release > Run workflow): gera os arquivos sem publicar.
 name: Release
 
@@ -18,38 +18,36 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-          cache: pip
-          cache-dependency-path: |
-            requirements.txt
-            packaging/requirements-build.txt
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
 
-      - name: Dependências
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r packaging/requirements-build.txt
+      - uses: Swatinem/rust-cache@v2
 
       - name: Versão
         id: version
         shell: pwsh
         run: |
-          $v = python -c "import deskwidgets; print(deskwidgets.__version__)"
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
           "version=$v" >> $env:GITHUB_OUTPUT
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and "v$v" -ne $env:GITHUB_REF_NAME) {
-            throw "A tag $env:GITHUB_REF_NAME não bate com __version__ = $v (deskwidgets/__init__.py)"
+            throw "A tag $env:GITHUB_REF_NAME não bate com version = $v (Cargo.toml)"
           }
 
+      - name: Testes
+        run: cargo test --release --locked
+
       - name: Widgets.exe e .zip
-        run: python packaging/build.py
+        shell: pwsh
+        run: ./packaging/build.ps1
 
       - name: Teste rápido do executável
         shell: pwsh
         run: |
           $exe = "dist\Widgets\Widgets.exe"
           if (-not (Test-Path $exe)) { throw "Widgets.exe não foi gerado" }
-          (Get-Item $exe).VersionInfo | Format-List ProductName, ProductVersion
+          $info = (Get-Item $exe).VersionInfo
+          $info | Format-List ProductName, ProductVersion
+          if ($info.ProductVersion -ne "${{ steps.version.outputs.version }}") { throw "Versão errada no Widgets.exe" }
 
       - name: Instalador (Inno Setup)
         shell: pwsh

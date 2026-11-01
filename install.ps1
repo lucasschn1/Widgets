@@ -1,4 +1,4 @@
-# Instala (ou atualiza) os Widgets, sem precisar de Python nem de administrador:
+# Instala (ou atualiza) os Widgets, sem precisar de administrador:
 #
 #   irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
 #
@@ -49,7 +49,8 @@ $tmp = Join-Path $env:TEMP ("Widgets-" + [guid]::NewGuid().ToString('N'))
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 $src = if (Test-Path (Join-Path $tmp 'Widgets\Widgets.exe')) { Join-Path $tmp 'Widgets' } else { $tmp }
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-foreach ($old in @('_internal', 'Widgets.exe')) {  # só o que é do programa (o desinstalador do Inno, se houver, fica)
+# só o que é do programa (o desinstalador do Inno, se houver, fica); _internal era da versão 2.x, em Python
+foreach ($old in @('_internal', 'Widgets.exe')) {
     $path = Join-Path $Dir $old
     if (Test-Path $path) { Remove-Item $path -Recurse -Force }
 }
