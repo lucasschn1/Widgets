@@ -23,7 +23,7 @@ DisableReadyPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
 OutputBaseFilename=Widgets-Setup
-SetupIconFile=..es\widgets.ico
+SetupIconFile=..\res\widgets.ico
 UninstallDisplayIcon={app}\Widgets.exe
 UninstallDisplayName=Widgets
 Compression=lzma2/max
