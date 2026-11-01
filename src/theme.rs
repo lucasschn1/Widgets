@@ -45,7 +45,6 @@ pub const SNAP_DIST: f32 = 12.0; // a que distância o encaixe "puxa" o widget
 pub const DRAG_START: f32 = 4.0; // quanto o mouse anda para um clique virar arraste
 pub const TIP_DELAY_MS: u64 = 450;
 pub const PEEK_IDLE_MS: u64 = 5000;
-pub const HOVER_EXPAND_MS: u64 = 650; // mouse parado sobre um widget pequeno: ele abre
 pub const HOVER_COLLAPSE_MS: u64 = 350; // e fecha pouco depois de o mouse sair
 pub const REORDER_MS: u64 = 180;
 

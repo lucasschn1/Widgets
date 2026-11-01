@@ -19,7 +19,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::*;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::*;
-use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+use windows::Win32::UI::Shell::{SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, DI_NORMAL, HICON};
 
 use crate::gfx::{wide, Image};
@@ -88,11 +89,46 @@ pub fn icon_image(icon: HICON, size: u32) -> Option<Image> {
     }
 }
 
-/// Ícone grande (32 px) de um arquivo ou unidade, como no Explorador.
+/// Lado em pixels dos ícones guardados (desenhados menores, ficam nítidos em qualquer escala).
+pub const ICON_PX: u32 = 64;
+
+/// Tamanho do desenho dentro do ícone: alguns apps só têm ícone pequeno, e o Windows o devolve
+/// num canto da imagem grande.
+fn drawn_size(img: &Image) -> u32 {
+    let (mut x1, mut y1) = (0, 0);
+    for y in 0..img.h {
+        for x in 0..img.w {
+            if img.px[((y * img.w + x) * 4 + 3) as usize] > 8 {
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    x1.max(y1)
+}
+
+/// Ícone de um arquivo ou unidade em alta definição, como no Explorador (lista "jumbo" de
+/// 256 px; sem ela, a de 48 px), reduzido com boa qualidade para ICON_PX.
 pub fn shell_icon(path: &str) -> Option<Image> {
     let w = wide(path);
     let mut info = SHFILEINFOW::default();
     unsafe {
+        let ok = SHGetFileInfoW(PCWSTR(w.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_SYSICONINDEX);
+        if ok != 0 {
+            for (list, size) in [(SHIL_JUMBO, 256u32), (SHIL_EXTRALARGE, 48)] {
+                let Ok(images) = SHGetImageList::<IImageList>(list as i32) else { continue };
+                let Ok(icon) = images.GetIcon(info.iIcon, ILD_TRANSPARENT.0) else { continue };
+                let img = icon_image(icon, size);
+                let _ = DestroyIcon(icon);
+                let Some(img) = img else { continue };
+                // o ícone de verdade tem que ocupar a imagem (senão era um pequeno num canto)
+                if drawn_size(&img) * 10 < size * 7 {
+                    continue;
+                }
+                return Some(crate::gfx::resize(&img, ICON_PX, ICON_PX));
+            }
+        }
+        // último recurso: o ícone de 32 px
         let ok = SHGetFileInfoW(PCWSTR(w.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_ICON | SHGFI_LARGEICON);
         if ok == 0 || info.hIcon.is_invalid() {
             return None;
@@ -128,7 +164,9 @@ fn file_description(path: &str) -> Option<String> {
             return None;
         }
         let text = std::slice::from_raw_parts(ptr as *const u16, len as usize);
-        let s = String::from_utf16_lossy(text).trim_end_matches('\0').trim().to_string();
+        // o texto termina no primeiro nulo (depois dele pode vir lixo da tabela)
+        let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+        let s = String::from_utf16_lossy(&text[..end]).trim().to_string();
         (!s.is_empty()).then_some(s)
     }
 }
@@ -400,5 +438,33 @@ mod tests {
         let (rx, tx) = net_bytes();
         println!("rede: {rx} / {tx} bytes; ligado há {}", fmt_uptime(uptime()));
         assert!(!apps.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod icon_sheet {
+    use super::*;
+
+    #[test]
+    #[ignore] // folha com os ícones dos apps abertos: cargo test -- --ignored
+    fn icons() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let s = Sampler::new();
+        s.set_active(true);
+        std::thread::sleep(Duration::from_millis(2500));
+        let mut apps = s.latest().unwrap_or_default();
+        apps.sort_by(|a, b| b.mem.cmp(&a.mem));
+        let apps: Vec<AppUse> = apps.into_iter().filter(|a| a.icon.is_some()).take(16).collect();
+        let mut c = crate::gfx::Canvas::new(16 * 44 + 8, 52, 1.0);
+        c.fill_round_rect(0.0, 0.0, 16.0 * 44.0 + 8.0, 52.0, 0.0, crate::theme::Rgba::rgb(40, 40, 50));
+        for (i, a) in apps.iter().enumerate() {
+            c.image_px(a.icon.as_ref().unwrap(), 10.0 + 44.0 * i as f32, 10.0, 32.0, 32.0, 1.0);
+            println!("{}", a.name);
+        }
+        let path = std::env::temp_dir().join("icones.png");
+        crate::gfx::save_png(&c.finish(), &path).unwrap();
+        println!("{}", path.display());
     }
 }

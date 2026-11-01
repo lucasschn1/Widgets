@@ -26,17 +26,16 @@ pub const NOTIFY: [(&str, &str, &str); 6] = [
     ("pomodoro", "Pomodoro", "No fim de cada foco e de cada pausa"),
 ];
 
-pub const TIPS: [(&str, &str); 6] = [
+pub const TIPS: [(&str, &str); 5] = [
     ("Mover", "Arraste de qualquer lugar. Os widgets se encaixam uns nos outros e nas bordas da tela; segure Alt para soltar livre."),
     ("Reordenar", "Arraste um widget para dentro de uma coluna: os outros abrem espaço."),
     ("Tamanho", "Botão no canto (aparece com o mouse) ou dois cliques: pequeno, médio e grande."),
-    ("Espiar", "Pare o mouse sobre um widget pequeno para abri-lo por um instante."),
     ("Roda do mouse", "Volume no Tocando agora; rola as atividades do GitHub; ±1 minuto no Pomodoro."),
     ("Menu", "Clique direito num widget ou no ícone da bandeja: layouts, modo foco, edição e mais."),
 ];
 
 pub const APPEARANCE_KEYS: [&str; 6] = ["desfoque", "escurecimento", "texto", "esmaecer", "opacidade_ociosa", "animacoes"];
-pub const BEHAVIOR_KEYS: [&str; 4] = ["expandir_hover", "atalhos_clique", "dicas", "economia_bateria"];
+pub const BEHAVIOR_KEYS: [&str; 3] = ["atalhos_clique", "dicas", "economia_bateria"];
 
 /// Faixas das durações do Pomodoro: (fase, rótulo, mínimo, máximo, passo).
 pub const PHASE_RANGES: [(&str, &str, f64, f64, f64); 3] =
@@ -338,7 +337,6 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     let y = rows(ui, x, y, w, vec![
         Row("Iniciar com o Windows".into(), Some("Abre os widgets quando você entra no Windows".into()), sw("iniciar", v.startup, A::Startup)),
         Row("Travar posições".into(), Some("Evita arrastar sem querer (o modo edição continua liberado)".into()), sw("travado", v.sh.locked(), A::Lock)),
-        Row("Abrir widget pequeno com o mouse".into(), Some("Parar o mouse sobre um widget pequeno o abre por um instante".into()), setting_switch(v, "expandir_hover")),
         Row("Cliques abrem programas e sites".into(), Some("Gerenciador de Tarefas, previsão do tempo, GitHub…".into()), setting_switch(v, "atalhos_clique")),
         Row("Dicas ao passar o mouse".into(), Some("Explicações curtas sobre o que está sob o mouse".into()), setting_switch(v, "dicas")),
         Row("Economizar energia na bateria".into(), Some("Atualiza menos e pausa as animações contínuas".into()), setting_switch(v, "economia_bateria")),

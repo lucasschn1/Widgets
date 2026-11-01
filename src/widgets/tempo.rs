@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Kind, Layout, MenuItem, Mode, NotifyAction, Status, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -17,7 +17,6 @@ use crate::win;
 const W: f32 = 320.0;
 const PAD: f32 = 16.0;
 const M_H: f32 = 150.0;
-const TOP_H: f32 = 78.0; // cidade, temperatura e condição
 const HOURS_Y: f32 = 80.0;
 const HOURS: usize = 6;
 const DAY_H: f32 = 30.0;
@@ -25,7 +24,6 @@ const G_LINE_Y: f32 = 150.0;
 const G_DAYS_Y: f32 = 186.0;
 const G_DAYS: usize = 5;
 const G_H: f32 = G_DAYS_Y + DAY_H * G_DAYS as f32 + 12.0;
-const M_DAYS: usize = 7;
 
 const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
 const WEATHER_RETRY: Duration = Duration::from_secs(2 * 60);
@@ -35,7 +33,6 @@ const RAIN_FPS: u32 = 30;
 const OPEN_FORECAST: u32 = 3;
 pub const UPDATE_WEATHER: u32 = 4;
 pub const ASK_CITY: u32 = 5;
-const TOGGLE_DAYS: u32 = 6;
 
 fn wmo(code: i64) -> &'static str {
     match code {
@@ -234,8 +231,6 @@ pub struct Tempo {
     pending: Option<Receiver<Fetch>>,
     poll_at: Instant,
     status: Status,
-    /// no médio: os próximos 7 dias abertos
-    days_open: bool,
     started: Instant,
 }
 
@@ -253,7 +248,6 @@ impl Tempo {
             pending: None,
             poll_at: Instant::now(),
             status: Status { updated, ..Default::default() },
-            days_open: false,
             started: Instant::now(),
         }
     }
@@ -407,7 +401,6 @@ impl Tempo {
     fn height(&self, mode: Mode) -> f32 {
         match mode {
             Mode::P => SMALL,
-            Mode::M if self.days_open => M_H + DAY_H * M_DAYS as f32 + 10.0,
             Mode::M => M_H,
             Mode::G => G_H,
         }
@@ -456,14 +449,9 @@ impl Tempo {
     }
 
     /// Cidade, temperatura grande e, à direita, ícone, condição e máxima/mínima.
-    fn draw_top(&self, c: &mut Canvas, env: &Env, chevron: bool) {
+    fn draw_top(&self, c: &mut Canvas, env: &Env) {
         let city = self.city(env);
-        let w = c.text(PAD, 13.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(170.0));
-        if chevron {
-            let (x, y) = (PAD + w + 7.0, 20.0);
-            let d = if self.days_open { -2.5 } else { 2.5 };
-            c.line(&[(x - 3.5, y - d / 2.0), (x, y + d / 2.0), (x + 3.5, y - d / 2.0)], FG.alpha(0.75), 1.6);
-        }
+        c.text(PAD, 13.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(170.0));
         c.text(PAD - 2.0, 30.0, &self.temp_text(), Face::Light, 40.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
@@ -591,14 +579,11 @@ impl Kind for Tempo {
         match mode {
             Mode::P => self.draw_compact(c, env),
             Mode::M => {
-                self.draw_top(c, env, self.weather.is_some());
+                self.draw_top(c, env);
                 self.draw_hours(c);
-                if self.days_open {
-                    self.draw_days(c, M_H, M_DAYS);
-                }
             }
             Mode::G => {
-                self.draw_top(c, env, false);
+                self.draw_top(c, env);
                 self.draw_hours(c);
                 let line = self.weather.as_ref().and_then(|w| w.str_of("rain_line").map(String::from).or(w.str_of("details").map(String::from)));
                 if let Some(text) = line {
@@ -657,15 +642,12 @@ impl Kind for Tempo {
         if self.weather.is_none() {
             return self.status.error.as_ref().map(|_| UPDATE_WEATHER);
         }
-        match mode {
-            Mode::M if y < TOP_H => Some(TOGGLE_DAYS),
-            _ => env.shortcuts().then_some(OPEN_FORECAST),
-        }
+        let _ = (y, mode);
+        env.shortcuts().then_some(OPEN_FORECAST)
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
-            TOGGLE_DAYS => self.days_open = !self.days_open,
             OPEN_FORECAST => {
                 let url = Self::forecast_url(&ctx.env());
                 ctx.open(url);
@@ -676,14 +658,6 @@ impl Kind for Tempo {
         }
     }
 
-    fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
-        let _ = x;
-        if mode == Mode::M && y < TOP_H && self.weather.is_some() {
-            return Some((6.0, 6.0, W - 6.0, TOP_H - 2.0, 16.0));
-        }
-        None
-    }
-
     fn tooltip(&self, _x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let Some(wx) = &self.weather else {
             return self.status.error.as_ref().map(|_| "Clique para tentar de novo".to_string());
@@ -692,9 +666,8 @@ impl Kind for Tempo {
         if let Some(t) = self.status.updated {
             lines.push(format!("Atualizado {}", util::time_ago(t)));
         }
-        if mode == Mode::M && y < TOP_H {
-            lines.push(if self.days_open { "Clique para fechar os próximos dias".into() } else { "Clique para ver os próximos 7 dias".into() });
-        } else if env.shortcuts() {
+        let _ = (y, mode);
+        if env.shortcuts() {
             lines.push("Clique para ver a previsão completa".into());
         }
         Some(lines.join("\n"))

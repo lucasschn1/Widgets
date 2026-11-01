@@ -205,7 +205,7 @@ fn step_personal(st: &WelcomeState, ui: &mut Ui, x: f32, y: f32, w: f32) {
 
 fn step_tips(ui: &mut Ui, x: f32, mut y: f32, w: f32, v: &View) {
     let _ = v;
-    let items: Vec<(String, String)> = [TIPS[0], TIPS[2], TIPS[3], TIPS[5]].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let items: Vec<(String, String)> = [TIPS[0], TIPS[2], TIPS[3], TIPS[4]].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     for (title, desc) in items {
         if title.contains('+') {
             ui.keycaps(x, y + 12.0, &title);

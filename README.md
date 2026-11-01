@@ -41,17 +41,17 @@ Quando sair uma versão nova, o próprio app avisa e atualiza com um clique. Par
 ## O que vem junto
 
 **Tempo** tem o céu de agora como fundo: azul de dia, escuro de noite, cinza quando fecha, com
-a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, com um clique, os próximos
-7 dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
+a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, no tamanho grande, os
+próximos dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
 
-**Sistema** mostra CPU, memória e disco em três anéis. Clique num anel e o widget cresce com os
-5 apps que mais usam aquele recurso, cada um com o seu ícone (no disco, as unidades). No tamanho
-grande, a lista fica sempre aberta, junto com a rede e há quanto tempo o PC está ligado.
+**Sistema** mostra CPU, memória e disco em três anéis. No tamanho grande, aparecem os 5 apps
+que mais usam o recurso escolhido, cada um com o seu ícone (no disco, as unidades), junto com
+a rede e há quanto tempo o PC está ligado.
 
 **Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
-outros). O fundo ganha as cores da capa e se mexe devagar enquanto a música toca. Clique na capa para abrir o player grande, com o
-volume do app, aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em
-cima dele muda o volume do app que está tocando.
+outros). O fundo ganha as cores da capa. No tamanho grande, há também o volume do app,
+aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em cima dele muda
+o volume do app que está tocando.
 
 **GitHub** traz o mapa de contribuições, a sequência de dias e as últimas atividades. Se você
 usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso
@@ -79,8 +79,7 @@ largura de um médio.
 </p>
 
 Para mover, é só arrastar: eles se encaixam uns nos outros e nas bordas da tela (segure `Alt`
-para soltar livre). Parou o mouse em cima de um widget pequeno? Ele abre por um instante e
-fecha quando você sai.
+para soltar livre).
 
 ## Configurações
 

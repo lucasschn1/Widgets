@@ -546,22 +546,6 @@ impl App {
         self.cards[i].present(&self.sh, false);
     }
 
-    fn schedule_expand(&mut self, i: usize) {
-        let c = &self.cards[i];
-        if c.mode != Mode::P
-            || c.temp
-            || c.animating()
-            || c.press.is_some()
-            || c.expand_at.is_some()
-            || self.sh.editing
-            || !config::setting_bool(&self.sh.cfg, "expandir_hover")
-            || c.kind.sizes().len() < 2
-        {
-            return;
-        }
-        self.cards[i].expand_at = Some(Instant::now() + Duration::from_millis(HOVER_EXPAND_MS));
-    }
-
     fn hover_expand(&mut self, i: usize) {
         self.cards[i].expand_at = None;
         let c = &self.cards[i];
@@ -605,7 +589,6 @@ impl App {
     fn on_motion(&mut self, i: usize, x: i32, y: i32) {
         if self.cards[i].hover_target == 0.0 {
             self.cards[i].set_hover(true);
-            self.schedule_expand(i);
         }
         if self.cards[i].drag.is_some() {
             return;
@@ -634,7 +617,6 @@ impl App {
         }
         let (sx, sy) = self.screen_xy(i, x, y);
         self.tooltip.request(tip, sx, sy);
-        self.schedule_expand(i);
     }
 
     fn on_leave(&mut self, i: usize) {

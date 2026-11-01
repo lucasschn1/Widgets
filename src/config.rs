@@ -103,7 +103,7 @@ pub fn default_setting(name: &str) -> Value {
         "desfoque" => json!(crate::theme::BLUR),
         "escurecimento" => json!(crate::theme::TINT_AMOUNT),
         "texto" => json!(0.0), // 0 = seguir o Windows
-        "esmaecer" | "expandir_hover" | "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
+        "esmaecer" | "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
         "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("auto"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true}),

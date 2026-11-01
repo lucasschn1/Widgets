@@ -17,7 +17,6 @@ const M_H: f32 = 150.0;
 const ROW_H: f32 = 38.0;
 const LIST_N: usize = 5;
 /// cabeçalho e link, quando a lista abre embaixo (pequeno e médio); as linhas somam a isso
-const DETAIL_H: f32 = 52.0 + 38.0;
 const SEG_Y: f32 = 150.0;
 const G_LIST_Y: f32 = 194.0;
 const G_FOOT_Y: f32 = G_LIST_Y + ROW_H * LIST_N as f32 + 6.0;
@@ -31,7 +30,6 @@ const BARS_MS: f32 = 650.0;
 const SELECT: u32 = 10; // + recurso (0 CPU, 1 memória, 2 disco)
 const OPEN_TASKMGR: u32 = 1;
 const OPEN_EXPLORER: u32 = 2;
-const CLOSE: u32 = 3;
 
 const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
 const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
@@ -176,11 +174,11 @@ impl System {
 
     /// A lista está na tela?
     fn list_visible(&self) -> bool {
-        self.mode_seen.get() == Mode::G || self.selected.is_some()
+        self.mode_seen.get() == Mode::G
     }
 
     fn current(&self, mode: Mode) -> Option<usize> {
-        if mode == Mode::G { Some(self.selected.unwrap_or(1)) } else { self.selected }
+        (mode == Mode::G).then(|| self.selected.unwrap_or(1))
     }
 
     fn base_h(mode: Mode) -> f32 {
@@ -190,9 +188,6 @@ impl System {
     fn height(&self, mode: Mode) -> f32 {
         match mode {
             Mode::G => G_H,
-            // o pequeno não cresce: ele "vira" e mostra os apps no mesmo quadrado
-            Mode::P => SMALL,
-            m if self.selected.is_some() => Self::base_h(m) + DETAIL_H + ROW_H * self.list_len() as f32,
             m => Self::base_h(m),
         }
     }
@@ -237,29 +232,6 @@ impl System {
         (x, SEG_Y + 3.0, x + w, SEG_Y + 31.0)
     }
 
-    fn list_top(&self, mode: Mode) -> f32 {
-        if mode == Mode::G { G_LIST_Y } else { Self::base_h(mode) + 52.0 }
-    }
-
-    fn link_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
-        if mode != Mode::M || self.selected.is_none() {
-            return None;
-        }
-        let y = self.list_top(mode) + ROW_H * self.list_len() as f32 + 4.0;
-        Some((PAD - 6.0, y, 230.0, y + 28.0))
-    }
-
-    fn close_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
-        if mode == Mode::G || self.selected.is_none() {
-            return None;
-        }
-        if mode == Mode::P {
-            return Some((SMALL - 36.0, 10.0, SMALL - 10.0, 36.0));
-        }
-        let y = Self::base_h(mode) + 8.0;
-        Some((W - PAD - 26.0, y, W - PAD, y + 26.0))
-    }
-
     fn rows(&self, which: usize) -> Vec<Row> {
         match which {
             2 => self
@@ -294,14 +266,6 @@ impl System {
                     })
                     .collect()
             }
-        }
-    }
-
-    /// Quantas linhas a lista aberta ocupa (no disco, uma por unidade).
-    fn list_len(&self) -> usize {
-        match self.selected {
-            Some(2) => self.drives.len().clamp(1, LIST_N),
-            _ => LIST_N,
         }
     }
 
@@ -417,64 +381,6 @@ impl System {
         let _ = mode;
     }
 
-    fn draw_detail(&self, c: &mut Canvas, mode: Mode, which: usize) {
-        let y = Self::base_h(mode);
-        c.hline_px(PAD, W - PAD, y, DIVIDER);
-        c.text(PAD, y + 13.0, TITLES[which], Face::Semibold, 14.0, FG, Anchor::LA, None);
-        c.text(PAD, y + 31.0, &self.details[which], Face::Regular, 11.5, MUTED, Anchor::LA, None);
-        if let Some((x0, y0, x1, y1)) = self.close_rect(mode) {
-            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            c.fill_circle(cx, cy, 13.0, WHITE.alpha(0.12));
-            c.line(&[(cx - 4.5, cy + 2.2), (cx, cy - 2.3), (cx + 4.5, cy + 2.2)], FG, 1.8);
-        }
-        self.draw_list(c, mode, which, self.list_top(mode));
-        if let Some((x0, y0, _, y1)) = self.link_rect(mode) {
-            let label = if which == 2 { "Abrir o Explorador de Arquivos" } else { "Abrir o Gerenciador de Tarefas" };
-            let tw = c.text(x0 + 6.0, (y0 + y1) / 2.0, label, Face::Semibold, 12.5, Rgba::rgb(90, 200, 250), Anchor::LM, None);
-            let (ax, ay) = (x0 + 6.0 + tw + 8.0, (y0 + y1) / 2.0);
-            c.line(&[(ax - 3.0, ay + 3.0), (ax + 3.0, ay - 3.0)], Rgba::rgb(90, 200, 250), 1.6);
-            c.line(&[(ax - 1.5, ay - 3.0), (ax + 3.0, ay - 3.0), (ax + 3.0, ay + 1.5)], Rgba::rgb(90, 200, 250), 1.6);
-        }
-    }
-
-    /// Pequeno "virado": o recurso escolhido e os 3 apps que mais usam (ou as unidades).
-    fn draw_back(&self, c: &mut Canvas, which: usize) {
-        let pct = format!("{}%", (self.target[which] * 100.0).round());
-        c.fill_circle(17.0, 22.0, 4.0, color(which));
-        let nw = c.text(26.0, 22.0, NAMES[which], Face::Semibold, 12.5, FG, Anchor::LM, None);
-        c.text(26.0 + nw + 6.0, 22.0, &pct, Face::Semibold, 12.5, color(which), Anchor::LM, None);
-        if let Some((x0, y0, x1, y1)) = self.close_rect(Mode::P) {
-            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            c.fill_circle(cx, cy, 12.0, WHITE.alpha(0.14));
-            c.line(&[(cx - 4.0, cy - 4.0), (cx + 4.0, cy + 4.0)], FG, 1.6);
-            c.line(&[(cx + 4.0, cy - 4.0), (cx - 4.0, cy + 4.0)], FG, 1.6);
-        }
-        let rows = self.rows(which);
-        if rows.is_empty() {
-            let msg = if which == 2 { "Nenhuma unidade" } else { "Lendo os apps…" };
-            c.text(SMALL / 2.0, 90.0, msg, Face::Regular, 11.5, MUTED, Anchor::MM, None);
-            return;
-        }
-        let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
-        for (n, row) in rows.iter().take(3).enumerate() {
-            // as linhas sobem e aparecem uma depois da outra
-            let t = ease_out((since - n as f32 * 60.0) / 380.0);
-            let y = 44.0 + 36.0 * n as f32 + (1.0 - t) * 8.0;
-            let icon = 22.0;
-            match &row.icon {
-                Some(img) => {
-                    let s = c.s;
-                    c.image_px(img, (12.0 * s).round(), ((y + 3.0) * s).round(), (icon * s).round(), (icon * s).round(), t);
-                }
-                None => c.fill_round_rect(12.0, y + 3.0, 12.0 + icon, y + 3.0 + icon, 6.0, WHITE.alpha(0.16 * t)),
-            }
-            let tx = 12.0 + icon + 8.0;
-            let w = SMALL - tx - 10.0;
-            c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(t), Anchor::LA, Some(w));
-            c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * t), Anchor::LA, Some(w));
-        }
-    }
-
     fn draw_seg(&self, c: &mut Canvas, which: usize) {
         c.fill_round_rect(PAD, SEG_Y, W - PAD, SEG_Y + 34.0, 10.0, WHITE.alpha(0.08));
         for i in 0..3 {
@@ -520,110 +426,73 @@ impl Kind for System {
             self.mode_seen.set(mode);
             self.sampler.set_active(self.list_visible());
         }
-        if mode == Mode::P {
-            if let Some(which) = self.selected {
-                self.draw_back(c, which);
-                return;
-            }
-        }
         self.draw_rings(c, mode);
         self.draw_metrics(c, mode);
-        match mode {
-            Mode::G => {
-                let which = self.current(mode).unwrap_or(1);
-                self.draw_seg(c, which);
-                self.draw_list(c, mode, which, G_LIST_Y);
-                self.draw_footer(c);
-            }
-            Mode::M => {
-                if let Some(which) = self.selected {
-                    self.draw_detail(c, mode, which);
-                }
-            }
-            Mode::P => {}
+        if mode == Mode::G {
+            let which = self.current(mode).unwrap_or(1);
+            self.draw_seg(c, which);
+            self.draw_list(c, mode, which, G_LIST_Y);
+            self.draw_footer(c);
         }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
-        let inside = |r: Option<(f32, f32, f32, f32)>| r.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
-        if inside(self.close_rect(mode)) {
-            return Some(CLOSE);
-        }
-        if inside(self.link_rect(mode)) {
-            return Some(if self.selected == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
-        }
-        if mode == Mode::P && self.selected.is_some() {
-            return env.shortcuts().then_some(if self.selected == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
-        }
+        let open = if self.current(mode) == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR };
         if mode == Mode::G {
-            if let Some(i) = (0..3).find(|&i| inside(Some(Self::seg_rect(i)))) {
+            let inside = |(x0, y0, x1, y1): (f32, f32, f32, f32)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y);
+            if let Some(i) = (0..3).find(|&i| inside(Self::seg_rect(i))) {
                 return Some(SELECT + i as u32);
             }
-            if y >= G_LIST_Y && y < G_FOOT_Y && env.shortcuts() {
-                return Some(if self.current(mode) == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
+            if y >= G_LIST_Y && y < G_FOOT_Y {
+                return env.shortcuts().then_some(open);
             }
         }
-        if y < Self::base_h(mode) {
-            if let Some(i) = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode)) {
-                return Some(SELECT + i as u32);
-            }
+        let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
+        if mode == Mode::G {
+            return Some(SELECT + i as u32);
         }
-        None
+        // no pequeno e no médio, o anel abre o Gerenciador de Tarefas (ou o Explorador, no disco)
+        env.shortcuts().then_some(if i == 2 { OPEN_EXPLORER } else { OPEN_TASKMGR })
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
             OPEN_TASKMGR => ctx.open("taskmgr.exe"),
             OPEN_EXPLORER => ctx.open("shell:MyComputerFolder"),
-            CLOSE => self.select(None),
-            a if (SELECT..SELECT + 3).contains(&a) => {
-                let i = (a - SELECT) as usize;
-                let mode = self.mode_seen.get();
-                // no pequeno e no médio, clicar de novo no mesmo anel fecha a lista
-                let next = if mode != Mode::G && self.selected == Some(i) { None } else { Some(i) };
-                self.select(next);
-            }
+            a if (SELECT..SELECT + 3).contains(&a) => self.select(Some((a - SELECT) as usize)),
             _ => {}
         }
     }
 
-    fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
-        let inside = |r: Option<(f32, f32, f32, f32)>| r.filter(|&(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
-        if let Some((x0, y0, x1, y1)) = inside(self.close_rect(mode)) {
-            return Some((x0, y0, x1, y1, 13.0));
-        }
-        if let Some((x0, y0, x1, y1)) = inside(self.link_rect(mode)) {
-            return Some((x0, y0, x1, y1, 10.0));
-        }
-        if mode == Mode::P && self.selected.is_some() {
+    fn hot_rect(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<Hot> {
+        if mode != Mode::G && !env.shortcuts() {
             return None;
         }
-        if y < Self::base_h(mode) {
-            if let Some(i) = self.ring_at(x, y, mode) {
-                let (cx, cy, d, ..) = Self::rings_geom(mode);
-                let _ = i;
-                let r = d / 2.0 + 4.0;
-                return Some((cx - r, cy - r, cx + r, cy + r, r));
-            }
-            if let Some(i) = Self::metric_at(x, y, mode) {
-                let (x0, y0, x1, y1) = Self::metric_rect(mode, i);
-                return Some((x0 - 4.0, y0, x1, y1, 10.0));
-            }
+        if mode == Mode::G && (y >= SEG_Y || y >= G_LIST_Y) {
+            return None;
+        }
+        if self.ring_at(x, y, mode).is_some() {
+            let (cx, cy, d, ..) = Self::rings_geom(mode);
+            let r = d / 2.0 + 4.0;
+            return Some((cx - r, cy - r, cx + r, cy + r, r));
+        }
+        if let Some(i) = Self::metric_at(x, y, mode) {
+            let (x0, y0, x1, y1) = Self::metric_rect(mode, i);
+            return Some((x0 - 4.0, y0, x1, y1, 10.0));
         }
         None
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
-        if y >= Self::base_h(mode) || (mode == Mode::P && self.selected.is_some()) {
+    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
+        if mode == Mode::G && y >= SEG_Y {
             return None;
         }
         let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
-        let action = if mode != Mode::G && self.selected == Some(i) {
-            "Clique para fechar a lista"
-        } else if i == 2 {
-            "Clique para ver as unidades"
-        } else {
-            "Clique para ver os apps que mais usam"
+        let action = match mode {
+            Mode::G if i == 2 => "Clique para ver as unidades".to_string(),
+            Mode::G => "Clique para ver os apps que mais usam".to_string(),
+            _ if env.shortcuts() => format!("Clique para abrir {}", if i == 2 { "o Explorador de Arquivos" } else { "o Gerenciador de Tarefas" }),
+            _ => "No tamanho grande, aparecem os apps que mais usam".to_string(),
         };
         Some(format!("{}  ·  {}%\n{}\n{action}", TITLES[i], (self.target[i] * 100.0).round(), self.details[i]))
     }
