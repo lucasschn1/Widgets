@@ -138,6 +138,20 @@ impl System {
         s
     }
 
+    /// Exemplo virado (pequeno ou médio) mostrando os apps de um recurso (imagens do README).
+    #[cfg(test)]
+    pub fn sample_flipped(which: Option<usize>, mode: Mode) -> System {
+        let s = System::sample();
+        s.mode_seen.set(mode);
+        s.flipped.set(which);
+        let mut s = s;
+        let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6)];
+        s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
+        s.bars_since = Instant::now() - Duration::from_secs(5);
+        s.rates = (1.8e6, 2.4e5);
+        s
+    }
+
     fn measure(&mut self) {
         let (idle, total) = win::cpu_times();
         let (last_idle, last_total) = self.last_cpu;

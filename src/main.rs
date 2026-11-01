@@ -33,6 +33,8 @@ mod overlay;
 mod panel;
 mod popup;
 mod prompt;
+#[cfg(test)]
+mod readme_images;
 mod settings;
 mod shared;
 mod startup;

@@ -478,7 +478,14 @@ impl GitHub {
             let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
             let days = (0..371).rev().map(|i| (today - i, if i % 4 == 0 { 0 } else { (i * 7 + i / 3) % 5 }, i % 6)).collect();
             let now = win::now();
-            let rows = [("commit", "Ajusta o layout do cartão", "meu-projeto", 1.0), ("pr_merged", "Adiciona modo escuro", "meu-projeto  ·  #42", 5.0)]
+            let rows = [
+                ("commit", "Ajusta o layout do cartão", "meu-projeto  ·  main", 0.2),
+                ("pr_merged", "Adiciona modo escuro", "meu-projeto  ·  #42", 1.5),
+                ("pr_open", "Lista de tarefas com arrastar e soltar", "meu-projeto  ·  #45", 4.0),
+                ("star", "Deu estrela", "rust-lang/rust", 20.0),
+                ("issue", "Erro ao abrir no segundo monitor", "meu-projeto  ·  #44", 30.0),
+                ("commit", "Corrige o encaixe entre monitores", "meu-projeto  ·  main", 50.0),
+            ]
                 .iter()
                 .map(|(icon, title, info, h)| Row { title: title.to_string(), info: info.to_string(), icon: icon.to_string(), when: now - h * 3600.0, url: String::new() })
                 .collect();

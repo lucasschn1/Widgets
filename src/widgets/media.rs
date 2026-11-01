@@ -503,6 +503,34 @@ impl Media {
         Media::with(tx, Arc::new(Mutex::new(None)), Arc::new(Mutex::new("auto".into())), Some(snap), 0, later)
     }
 
+    /// Exemplo com uma música e capa quaisquer (imagens do README).
+    #[cfg(test)]
+    pub fn sample_song(kind: &'static str, title: &str, artist: &str, art: Arc<Image>, key: &str, position: f64, duration: f64) -> Media {
+        let mut m = Media::sample();
+        if let Some(snap) = &mut m.media {
+            snap.kind = kind;
+            snap.title = title.into();
+            snap.artist = artist.into();
+            snap.art = Some(art);
+            snap.art_key = Some(key.into());
+            snap.position = position;
+            snap.duration = duration;
+            snap.updated = None;
+        }
+        m
+    }
+
+    /// Como logo depois de trocar de música: o fundo da música anterior (`old`) ainda sumindo,
+    /// `progress` (0 a 1) da troca já feita (imagens do README).
+    #[cfg(test)]
+    pub fn fading_from(mut self, old: &Media, mode: Mode, s: f32, progress: f32) -> Media {
+        if let Some(bg) = old.background(s, mode) {
+            let ago = Duration::from_millis((progress.clamp(0.0, 1.0) * FADE_MS) as u64);
+            self.fade = Some((bg, Instant::now() - ago));
+        }
+        self
+    }
+
     fn has_media(&self) -> bool {
         self.media.as_ref().is_some_and(|m| !m.empty)
     }

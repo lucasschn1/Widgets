@@ -72,6 +72,22 @@ impl Backdrop {
         }
     }
 
+    /// Vidro sobre uma imagem qualquer, como se fosse o papel de parede de um monitor só (para
+    /// gerar as imagens do README).
+    #[cfg(test)]
+    pub fn from_picture(picture: &Image, blur_px: f64, s: f32) -> Backdrop {
+        let (pw, ph) = (picture.w, picture.h);
+        let w = (pw as f32 / DOWN).ceil() as u32;
+        let h = (ph as f32 / DOWN).ceil() as u32;
+        let mut canvas = Rgb::from_image(&gfx::resize(picture, w, h));
+        canvas.saturate(SATURATION);
+        let sharp = canvas.extend_edges(PAD);
+        blur(&mut canvas.px, w, h, 3, blur_px as f32 * s / DOWN);
+        let image = canvas.extend_edges(PAD);
+        let gray = image.gray();
+        Backdrop { sig: None, version: 1, origin: (0, 0), s, screens: vec![((0, 0, pw as i32, ph as i32), s)], walls: win::Wallpapers::new(), image, sharp, gray }
+    }
+
     /// Refaz o fundo se o papel de parede, os monitores ou o desfoque mudaram; diz se refez.
     pub fn check(&mut self, blur_px: f64) -> bool {
         let sig = self.signature(blur_px);

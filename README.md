@@ -44,16 +44,34 @@ Quando sair uma versão nova, o próprio app avisa e atualiza com um clique. Par
 a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, no tamanho grande, os
 próximos dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
 
+Dá para navegar nele, como no Tempo do Mac: a faixa de horas rola (roda do mouse ou setinhas)
+pelas próximas 24 horas, com a chance de chuva de cada hora. Clicar no tempo de agora abre os
+detalhes (sensação, umidade, vento, índice UV, nascer e pôr do sol e chuva), em páginas com
+pontinhos. Clicar num dia ou numa hora abre aquele dia, com as horas dele e os detalhes, e as
+setas passam para o dia anterior ou o seguinte.
+
+<p align="center">
+  <img src="docs/images/tempo-navegavel.png" width="760" alt="Tempo: início, detalhes de agora e um dia da semana">
+</p>
+
 **Sistema** mostra CPU, memória e disco em três anéis, com a porcentagem e quanto está em uso
 agora (a velocidade da CPU em GHz, a memória e o disco em GB). Clique num anel e o widget vira
 para mostrar os 3 apps que mais usam aquele recurso (no disco, as unidades). No tamanho
 grande, aparecem os 5 primeiros, cada um com o seu ícone, junto com a rede e há quanto tempo o
 PC está ligado.
 
+<p align="center">
+  <img src="docs/images/sistema-processos.png" width="620" alt="Sistema: os anéis e os apps que mais usam a memória e a CPU">
+</p>
+
 **Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
-outros). O fundo ganha as cores da capa. No tamanho grande, há também o volume do app,
-aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em cima dele muda
-o volume do app que está tocando.
+outros). O fundo ganha as cores da capa e muda junto quando a música troca. No tamanho grande,
+há também o volume do app, aleatório e repetir; clique na barra de progresso para pular. A roda
+do mouse em cima dele muda o volume do app que está tocando.
+
+<p align="center">
+  <img src="docs/images/musica.gif" width="380" alt="Tocando agora mudando de cor conforme a música">
+</p>
 
 **GitHub** traz o mapa de contribuições, a sequência de dias e as últimas atividades. Se você
 usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso
@@ -150,7 +168,8 @@ nada.
 
 ```
 install.ps1           instalador de uma linha (baixa o último Release)
-packaging/            build.ps1 (Widgets.exe e .zip) e o instalador do Inno Setup
+packaging/            build.ps1 (Widgets.exe e .zip), o instalador do Inno Setup e
+                      readme_anim.py (junta os quadros das animações do README)
 res/                  ícone e manifesto embutidos no Widgets.exe (pelo build.rs)
 src/
   main.rs             inicia o app e roda o laço de mensagens
@@ -174,7 +193,9 @@ src/
   win.rs, util.rs, imgops.rs, drawing.rs
   widgets/
     mod.rs            a lista de widgets e o trait `Kind`, que todo widget implementa
-    system.rs, media.rs, github.rs, pomodoro.rs
+    tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs
+  app_screens.rs      vários monitores: o lugar dos widgets em cada combinação de telas
+  readme_images.rs    gera as imagens do README (cargo test readme -- --ignored)
 ```
 
 </details>
@@ -193,13 +214,17 @@ src/
 Uma opção geral nova vai em `config.rs`, com o valor padrão. As configurações não têm botão de
 salvar: `set_setting` grava e aplica na hora.
 
+As imagens do README são desenhadas pelo próprio código, com dados de exemplo:
+`cargo test readme -- --ignored` grava as imagens paradas em `docs/images`, e
+`python packaging/readme_anim.py` junta os quadros do GIF e da animação de tamanho.
+
 </details>
 
 <details>
 <summary><b>Lançando uma versão</b></summary>
 
 1. Mude `version` no `Cargo.toml` e faça o commit.
-2. Crie e envie a tag: `git tag v3.1.0` e depois `git push origin main v3.1.0`.
+2. Crie e envie a tag: `git tag v3.4.0` e depois `git push origin main v3.4.0`.
 
 O GitHub Actions compila o `Widgets.exe`, gera o `.zip` e o instalador e publica o Release.
 Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua máquina,

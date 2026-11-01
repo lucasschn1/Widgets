@@ -603,7 +603,8 @@ impl Canvas {
     /// Quebra o texto em até `max_lines` linhas de largura `max_w`; a última leva o resto
     /// (e é cortada com "…" ao escrever).
     pub fn wrap(&self, text: &str, face: Face, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
-        let words: Vec<&str> = text.split_whitespace().collect();
+        // o espaço que não quebra (\u{a0}) mantém as palavras juntas ("12 h")
+        let words: Vec<&str> = text.split(|c: char| c.is_whitespace() && c != '\u{a0}').filter(|w| !w.is_empty()).collect();
         let mut lines = Vec::new();
         let mut current = String::new();
         let mut i = 0;
