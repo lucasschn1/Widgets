@@ -179,6 +179,7 @@ impl App {
         }
         app.place_split_system();
         app.grow_old_small();
+        app.clear_small_overlaps();
         if app.cards.is_empty() && !app.tray.ok {
             app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
@@ -327,6 +328,46 @@ impl App {
                 let w = self.sh.cfg.obj_mut(key);
                 w.insert("x".into(), json!(x));
                 w.insert("y".into(), json!(y));
+            }
+        }
+    }
+
+    /// Depois do pequeno virar quadrado: se um widget que estava solto embaixo de um pequeno
+    /// (sem encaixar) ficou por baixo dele, desce o suficiente, levando junto os encaixados nele.
+    fn clear_small_overlaps(&mut self) {
+        if self.sh.cfg["app"].bool_of("pequeno_quadrado_v2").unwrap_or(false) {
+            return;
+        }
+        self.sh.cfg.obj_mut("app").insert("pequeno_quadrado_v2".into(), json!(true));
+        let mut small: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].mode == Mode::P).collect();
+        small.sort_by_key(|&i| self.cards[i].pos.1);
+        for i in small {
+            let r = self.cards[i].card_rect();
+            let gap = (WIDGET_GAP * self.cards[i].s).round() as i32;
+            let hit: Vec<usize> = (0..self.cards.len())
+                .filter(|&j| j != i)
+                .filter(|&j| {
+                    let o = self.cards[j].card_rect();
+                    let (w, h) = win::overlap(r, o);
+                    w > 0 && h > 0 && o.1 > r.1
+                })
+                .collect();
+            for j in hit {
+                let o = self.cards[j].card_rect();
+                let shift = r.3 + gap - o.1;
+                if shift <= 0 {
+                    continue;
+                }
+                let mut moving = vec![j];
+                moving.extend(self.stack_below(j, None).into_iter().filter(|&k| k != i && k != j));
+                for k in moving {
+                    self.cards[k].pos.1 += shift;
+                    self.cards[k].present(&self.sh, true);
+                    let (key, (x, y)) = (self.cards[k].key(), self.cards[k].pos);
+                    let w = self.sh.cfg.obj_mut(key);
+                    w.insert("x".into(), json!(x));
+                    w.insert("y".into(), json!(y));
+                }
             }
         }
     }
