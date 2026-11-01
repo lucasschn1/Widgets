@@ -21,7 +21,7 @@ use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
 use windows_future::IAsyncOperation;
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{self, Anchor, Canvas, Face, Image};
@@ -373,15 +373,14 @@ const CTRL_Y: f32 = 162.0;
 const PLAY_D: f32 = 44.0;
 const IDLE_BOX: (f32, f32, f32, f32) = (18.0, 110.0, W - 36.0, 70.0); // x, y, largura, altura do equalizador
 
-const COMPACT_H: f32 = 64.0;
-const COMPACT_RADIUS: f32 = 22.0;
-const C_ART: f32 = 40.0;
-const C_ART_RADIUS: f32 = 9.0;
-const C_ART_XY: (f32, f32) = (12.0, 12.0);
-const C_TEXT_X: f32 = 12.0 + 40.0 + 10.0;
-const C_TEXT_W: f32 = W - C_TEXT_X - 92.0;
-const C_PLAY_D: f32 = 32.0;
-const C_IDLE_BOX: (f32, f32, f32, f32) = (20.0, 20.0, 24.0, 24.0); // mini equalizador no lugar da capa
+// pequeno (quadrado): capa e tocar em cima, título e artista embaixo, barra fina no pé
+const C_ART: f32 = 64.0;
+const C_ART_RADIUS: f32 = 12.0;
+const C_ART_XY: (f32, f32) = (14.0, 14.0);
+const C_TEXT_W: f32 = SMALL - 28.0;
+const C_PLAY_D: f32 = 36.0;
+const C_BAR_Y: f32 = 138.0;
+const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
 // médio: capa, título e artista, controles e uma barra de progresso fina
 const MEDIUM_H: f32 = 102.0;
@@ -409,6 +408,10 @@ const B_VOL_X: (f32, f32) = (44.0, W - 44.0);
 const POLL: Duration = Duration::from_millis(250);
 const MESSAGE_EVERY: Duration = Duration::from_secs(12);
 const FADE_MS: f32 = 600.0;
+/// a capa viva se mexe devagar enquanto a música toca
+const LIVING_FPS: u32 = 10;
+/// o fundo é desenhado maior que o cartão, para ter espaço de se mexer
+const BG_ZOOM: f32 = 1.3;
 const HUD: Duration = Duration::from_millis(1100);
 
 // ações
@@ -440,8 +443,10 @@ pub struct Media {
     next_poll: Instant,
     next_message: Instant,
     art_cache: RefCell<Option<((String, u32), Image)>>,
-    /// fundo: a capa desfocada no tamanho do cartão
+    /// fundo: a capa desfocada, um pouco maior que o cartão
     bg_cache: RefCell<Option<((String, u32, u32), Image)>>,
+    /// tudo menos o fundo (texto, capa, botões), para a capa viva se mexer por baixo
+    fg_cache: RefCell<Option<Image>>,
     /// fundo da música anterior, sumindo aos poucos depois de trocar de música
     fade: Option<(Image, Instant)>,
     idle_cache: RefCell<HashMap<(Mode, String, u32), Vec<Image>>>,
@@ -481,6 +486,7 @@ impl Media {
             next_message: next + MESSAGE_EVERY,
             art_cache: RefCell::new(None),
             bg_cache: RefCell::new(None),
+            fg_cache: RefCell::new(None),
             fade: None,
             idle_cache: RefCell::new(HashMap::new()),
             started: Instant::now(),
@@ -584,7 +590,7 @@ impl Media {
             return Some((16.0, W - 16.0, B_BAR_Y, 5.0));
         }
         match mode {
-            Mode::P => None,
+            Mode::P => Some((14.0, SMALL - 14.0, C_BAR_Y, 3.0)),
             Mode::M => Some((M_TEXT_X, W - 16.0, M_BAR_Y, 3.0)),
             Mode::G => Some((18.0, W - 18.0, BAR_Y, 4.0)),
         }
@@ -604,8 +610,8 @@ impl Media {
         }
         match mode {
             Mode::P => {
-                let y = COMPACT_H / 2.0;
-                vec![(toggle, W - 60.0, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, W - 22.0, y, 12.0, m.can_next, false)]
+                let (x, y) = (SMALL - 14.0 - C_PLAY_D / 2.0, 14.0 + C_PLAY_D / 2.0);
+                vec![(toggle, x, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, x, y + 40.0, 13.0, m.can_next, false)]
             }
             Mode::M => {
                 let (x, y) = (M_TEXT_X, M_CTRL_Y);
@@ -699,29 +705,73 @@ impl Media {
         true
     }
 
-    /// Fundo "capa viva": a capa reduzida a poucos pixels, mais saturada, ampliada até o cartão
-    /// (a ampliação suave vira um degradê com as cores da capa) e escurecida para o texto aparecer.
-    fn background(&self, c: &Canvas, mode: Mode) -> Option<Image> {
+    /// Fundo "capa viva": a capa reduzida a 12×12, mais saturada e ampliada (a ampliação suave
+    /// vira manchas de cor no mesmo lugar em que estão na capa), misturada com uma versão ainda
+    /// mais borrada. Fica maior que o cartão para ter espaço de se mexer.
+    fn background(&self, s: f32, mode: Mode) -> Option<Image> {
         let m = self.media.as_ref().filter(|m| !m.empty)?;
         let (art, key) = (m.art.as_ref()?, m.art_key.as_ref()?);
-        let l = self.layout(mode);
-        let (w, h) = ((l.w * c.s).round() as u32, (l.h * c.s).round() as u32);
+        let l = self.layout_of(mode);
+        let (w, h) = ((l.w * s * BG_ZOOM).round() as u32, (l.h * s * BG_ZOOM).round() as u32);
         let cache_key = (key.clone(), w, h);
         let mut cache = self.bg_cache.borrow_mut();
         if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
-            let tiny = gfx::resize(&gfx::fit_square(art, 64), 6, 6);
+            let tiny = gfx::resize(&gfx::fit_square(art, 96), 12, 12);
             let mut rgb = Rgb::from_image(&tiny);
-            rgb.saturate(1.35);
-            let mut big = gfx::resize(&rgb.to_image(), w, h);
-            // escurece (45%) mantendo o alfa
-            for p in big.px.chunks_mut(4) {
-                for ch in &mut p[..3] {
-                    *ch = (*ch as f32 * 0.55) as u8;
+            rgb.saturate(1.5);
+            let tiny = rgb.to_image();
+            let mut big = gfx::resize(&tiny, w, h);
+            let soft = gfx::resize(&gfx::resize(&tiny, 4, 4), w, h);
+            for (p, q) in big.px.chunks_mut(4).zip(soft.px.chunks(4)) {
+                for ch in 0..3 {
+                    p[ch] = ((p[ch] as f32 * 0.55 + q[ch] as f32 * 0.45) * 0.85) as u8;
                 }
             }
             *cache = Some((cache_key, big));
         }
         cache.as_ref().map(|c| c.1.clone())
+    }
+
+    /// A capa viva está tocando (o fundo se mexe)?
+    fn living(&self) -> bool {
+        self.media.as_ref().is_some_and(|m| !m.empty && m.playing && m.art.is_some())
+    }
+
+    /// Pinta o fundo com o canto do cartão em (ox, oy), deslocado pelo tempo `t` (segundos).
+    fn paint_bg(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32, t: f32) -> bool {
+        let Some(bg) = self.background(c.s, mode) else { return false };
+        let l = self.layout_of(mode);
+        let s = c.s;
+        // passeio lento em "oito", sem nunca mostrar a borda da imagem
+        let room = (BG_ZOOM - 1.0) / 2.0;
+        let dx = (t * 0.23).sin() * room * 0.8 * l.w;
+        let dy = (t * 0.17).cos() * room * 0.8 * l.h;
+        let place = |c: &mut Canvas, img: &Image, opacity: f32| {
+            let (x, y) = (ox - room * l.w + dx, oy - room * l.h + dy);
+            c.image_px(img, (x * s).round(), (y * s).round(), (l.w * BG_ZOOM * s).round(), (l.h * BG_ZOOM * s).round(), opacity);
+        };
+        c.push_round_clip(ox, oy, ox + l.w, oy + l.h, l.radius);
+        place(c, &bg, 1.0);
+        if let Some((old, since)) = &self.fade {
+            let f = since.elapsed().as_secs_f32() * 1000.0 / FADE_MS;
+            if f < 1.0 && old.w == bg.w && old.h == bg.h {
+                place(c, old, 1.0 - f);
+            }
+        }
+        // mais escuro embaixo, onde ficam o texto e os botões
+        let k = |a: f32| Rgba(0, 0, 0, (255.0 * a) as u8);
+        c.gradient_round_rect(ox, oy, ox + l.w, oy + l.h, l.radius, &[(0.0, k(0.12)), (0.5, k(0.32)), (1.0, k(0.55))], oy, oy + l.h);
+        c.pop_clip();
+        true
+    }
+
+    /// Sombra suave embaixo da capa (dá profundidade sobre o fundo colorido).
+    fn art_shadow(&self, c: &mut Canvas, mode: Mode) {
+        let ((x, y), size, radius) = self.art_geom(mode);
+        for i in 1..=4 {
+            let g = i as f32 * 2.0;
+            c.fill_round_rect(x - g / 2.0, y + 3.0 + g / 2.0, x + size + g / 2.0, y + size + 3.0 + g, radius + g, Rgba(0, 0, 0, 16));
+        }
     }
 
     /// Nota musical no lugar da capa, quando há música mas não há imagem.
@@ -737,7 +787,7 @@ impl Media {
         if !self.idle_cache.borrow().contains_key(&key) {
             let (_, _, w, h) = Self::idle_box(mode);
             let bars = match mode {
-                Mode::P => 4,
+                Mode::P => 5,
                 Mode::M => 5,
                 Mode::G => 23,
             };
@@ -872,45 +922,26 @@ impl Media {
             }
         }
     }
-}
 
-impl Kind for Media {
-    fn key(&self) -> &'static str {
-        "midia"
-    }
-    fn title(&self) -> &'static str {
-        "Tocando agora"
-    }
-
-    fn layout(&self, mode: Mode) -> Layout {
+    fn layout_of(&self, mode: Mode) -> Layout {
         if self.is_big(mode) {
             return Layout { w: W, h: B_H, radius: RADIUS };
         }
         match mode {
-            Mode::P => Layout { w: W, h: COMPACT_H, radius: COMPACT_RADIUS },
+            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
             Mode::M => Layout { w: W, h: MEDIUM_H, radius: M_RADIUS },
             Mode::G => Layout { w: W, h: H, radius: RADIUS },
         }
     }
 
-    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+    /// Tudo o que fica por cima do fundo.
+    fn draw_fg(&self, c: &mut Canvas, mode: Mode, has_bg: bool) {
         let m = self.media.as_ref().filter(|m| !m.empty);
-        let l = self.layout(mode);
-        // fundo "capa viva" (com a capa anterior sumindo, logo depois de trocar de música)
-        if let Some(bg) = self.background(c, mode) {
-            c.push_round_clip(0.0, 0.0, l.w, l.h, l.radius);
-            c.image(&bg, 0.0, 0.0);
-            if let Some((old, since)) = &self.fade {
-                let t = since.elapsed().as_secs_f32() * 1000.0 / FADE_MS;
-                if t < 1.0 {
-                    c.image_px(old, 0.0, 0.0, (l.w * c.s).round(), (l.h * c.s).round(), 1.0 - t);
-                }
-            }
-            c.pop_clip();
-        }
         let ((ax, ay), art, radius) = self.art_geom(mode);
         if m.is_none_or(|m| m.art.is_none()) {
             c.fill_round_rect(ax, ay, ax + art, ay + art, radius, WHITE.alpha(0.12));
+        } else if has_bg {
+            self.art_shadow(c, mode);
         }
         self.draw_controls(c, mode);
         self.draw_bar(c, mode);
@@ -929,17 +960,18 @@ impl Kind for Media {
         }
         match mode {
             Mode::P => {
-                let x = C_TEXT_X;
+                let x = 14.0;
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
-                        self.note(c, mode, 18.0);
+                        self.note(c, mode, 26.0);
                     }
-                    c.text(x, 14.0, &m.title, Face::Semibold, 12.0, FG, Anchor::LA, Some(C_TEXT_W));
-                    c.text(x, 33.0, &m.artist, Face::Regular, 10.5, MUTED, Anchor::LA, Some(C_TEXT_W));
+                    c.text(x, 90.0, &m.title, Face::Semibold, 12.5, FG, Anchor::LA, Some(C_TEXT_W));
+                    c.text(x, 108.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
                 } else {
-                    let w = W - x - 18.0;
-                    c.text(x, 14.0, &funny_title, Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
-                    c.text(x, 33.0, &funny_sub, Face::Regular, 10.5, MUTED, Anchor::LA, Some(w));
+                    c.text(x, 92.0, &funny_title, Face::Semibold, 12.5, FG, Anchor::LA, Some(C_TEXT_W));
+                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.0, C_TEXT_W, 2).iter().enumerate() {
+                        c.text(x, 110.0 + 15.0 * i as f32, line, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
+                    }
                 }
             }
             Mode::M => {
@@ -981,14 +1013,14 @@ impl Kind for Media {
         }
     }
 
-    /// O equalizador "cochilando" quando nada está tocando, e o aviso de volume da roda do mouse.
-    fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+    fn overlay_rest(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        let lw = self.layout_of(mode).w;
         if let Some(until) = self.hud_until.filter(|t| Instant::now() < *t) {
             let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
             let alpha = (left / 0.25).min(1.0);
             let level = self.volume().unwrap_or(0.0);
-            let (w, h) = (150.0, 28.0);
-            let (x, y) = (ox + (W - w) / 2.0, oy + 8.0);
+            let (w, h) = (130.0f32.min(lw - 16.0), 28.0);
+            let (x, y) = (ox + (lw - w) / 2.0, oy + 8.0);
             c.fill_round_rect(x, y, x + w, y + h, h / 2.0, Rgba(0, 0, 0, (150.0 * alpha) as u8));
             c.text(x + 18.0, y + h / 2.0, "\u{e995}", Face::Icons, 12.0, WHITE.alpha(alpha), Anchor::MM, None);
             let (bx0, bx1) = (x + 34.0, x + w - 14.0);
@@ -1005,9 +1037,49 @@ impl Kind for Media {
         c.image(&frames[index], ox + x, oy + y);
     }
 
+}
+
+impl Kind for Media {
+    fn key(&self) -> &'static str {
+        "midia"
+    }
+    fn title(&self) -> &'static str {
+        "Tocando agora"
+    }
+
+    fn layout(&self, mode: Mode) -> Layout {
+        self.layout_of(mode)
+    }
+
+    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+        // fundo "capa viva" (com a capa anterior sumindo, logo depois de trocar de música); o
+        // resto vai numa camada à parte, que a animação do fundo reaproveita a cada quadro
+        let has_bg = self.paint_bg(c, mode, 0.0, 0.0, self.started.elapsed().as_secs_f32());
+        let mut fg = Canvas::new(c.w, c.h, c.s);
+        fg.text_scale = c.text_scale;
+        self.draw_fg(&mut fg, mode, has_bg);
+        let fg = fg.finish();
+        c.image(&fg, 0.0, 0.0);
+        *self.fg_cache.borrow_mut() = Some(fg);
+    }
+
+    /// A capa viva se mexendo por baixo, o equalizador "cochilando" e o aviso de volume.
+    fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        if self.living() {
+            if let Some(fg) = self.fg_cache.borrow().as_ref() {
+                if self.paint_bg(c, mode, ox, oy, self.started.elapsed().as_secs_f32()) {
+                    c.image(fg, ox, oy);
+                }
+            }
+        }
+        self.overlay_rest(c, mode, ox, oy);
+    }
+
     fn overlay_fps(&self) -> u32 {
         if self.hud_until.is_some_and(|t| Instant::now() < t) {
             30
+        } else if self.living() {
+            LIVING_FPS
         } else if self.has_media() {
             0
         } else {
@@ -1163,7 +1235,7 @@ impl Kind for Media {
         }
         let text_area = match mode {
             _ if self.is_big(mode) => (B_TITLE_Y..B_TITLE_Y + 36.0).contains(&y),
-            Mode::P => (C_TEXT_X..=C_TEXT_X + C_TEXT_W).contains(&x),
+            Mode::P => (86.0..=128.0).contains(&y),
             Mode::M => x >= M_TEXT_X && y < M_CTRL_Y - 18.0,
             Mode::G => x >= TEXT_X && y < BAR_Y - 6.0,
         };
@@ -1242,5 +1314,48 @@ impl Kind for Media {
             changed |= !self.has_media();
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // desenha num PNG: cargo test -- --ignored
+    fn draw_living_cover() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        // uma "capa" de exemplo: laranja, rosa e roxo
+        let mut art = Canvas::new(300, 300, 1.0);
+        art.fill_round_rect(0.0, 0.0, 300.0, 300.0, 0.0, Rgba::rgb(106, 43, 184));
+        art.fill_circle(80.0, 80.0, 90.0, Rgba::rgb(255, 122, 89));
+        art.fill_circle(230.0, 220.0, 110.0, Rgba::rgb(194, 54, 122));
+        art.fill_circle(90.0, 90.0, 30.0, Rgba::rgb(255, 214, 160));
+        let art = Arc::new(art.finish());
+        let cfg = json!({"midia": {}, "app": {}});
+        for (mode, big, name) in [(Mode::P, false, "p"), (Mode::M, false, "m"), (Mode::G, false, "g"), (Mode::G, true, "big")] {
+            let mut m = Media::sample();
+            if let Some(snap) = &mut m.media {
+                snap.title = "Céu de Vidro".into();
+                snap.artist = "Aurora Lima".into();
+                snap.art = Some(art.clone());
+                snap.art_key = Some("exemplo".into());
+                snap.volume = Some(0.6);
+                snap.shuffle = Some(false);
+                snap.repeat = Some(2);
+                snap.can_shuffle = true;
+                snap.can_repeat = true;
+            }
+            m.big = big;
+            let l = m.layout_of(mode);
+            let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
+            c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
+            Kind::draw(&m, &mut c, mode, &Env { cfg: &cfg, key: "midia" });
+            let path = std::env::temp_dir().join(format!("capa_{name}.png"));
+            crate::gfx::save_png(&c.finish(), &path).unwrap();
+            println!("{}", path.display());
+        }
     }
 }

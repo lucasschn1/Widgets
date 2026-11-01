@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -79,8 +79,7 @@ const EVERY: u32 = 900; // + n
 
 const W: f32 = 320.0;
 const PAD: f32 = 20.0;
-const COMPACT_H: f32 = 64.0;
-const C_RING: (f32, f32, f32, f32) = (34.0, 32.0, 40.0, 5.0); // cx, cy, diâmetro, espessura
+const C_RING: (f32, f32, f32, f32) = (SMALL / 2.0, 62.0, 104.0, 9.0); // cx, cy, diâmetro, espessura
 const MEDIUM_H: f32 = 150.0;
 const M_RING: (f32, f32, f32, f32) = (75.0, 75.0, 110.0, 8.0);
 const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
@@ -330,16 +329,13 @@ impl Pomodoro {
     }
 
     fn on_ring(x: f32, y: f32, mode: Mode) -> bool {
-        if mode == Mode::P {
-            return (6.0..=168.0).contains(&x) && (6.0..=COMPACT_H - 6.0).contains(&y);
-        }
         let (cx, cy, d, _) = Self::ring(mode);
         ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() <= d / 2.0 + 2.0
     }
 
     fn clock_rect(mode: Mode) -> (f32, f32, f32, f32) {
         match mode {
-            Mode::P => (W - 108.0, 8.0, W - 8.0, COMPACT_H - 8.0),
+            Mode::P => (6.0, 120.0, SMALL - 6.0, SMALL - 6.0),
             Mode::M => (M_COL_X - 6.0, 8.0, W - 8.0, 72.0),
             Mode::G => (PAD - 6.0, 30.0, 150.0, 86.0),
         }
@@ -348,14 +344,6 @@ impl Pomodoro {
     fn on_clock(x: f32, y: f32, mode: Mode) -> bool {
         let (x0, y0, x1, y1) = Self::clock_rect(mode);
         (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
-    }
-
-    fn status_text(&self) -> String {
-        if self.started() && !self.running() {
-            format!("{} · pausado", self.phase.label())
-        } else {
-            self.phase.label().to_string()
-        }
     }
 }
 
@@ -400,7 +388,7 @@ impl Kind for Pomodoro {
 
     fn layout(&self, mode: Mode) -> Layout {
         match mode {
-            Mode::P => Layout { w: W, h: COMPACT_H, radius: 22.0 },
+            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
             Mode::M => Layout { w: W, h: MEDIUM_H, radius: 24.0 },
             Mode::G => Layout { w: W, h: HEIGHT, radius: 26.0 },
         }
@@ -418,19 +406,23 @@ impl Kind for Pomodoro {
         let every = Self::every(wcfg);
 
         if mode == Mode::P {
+            // quadrado: o anel com o tempo no meio; embaixo, o relógio e a fase
+            let paused = self.started() && !self.running();
             if self.running() {
-                drawing::pause(c, cx, cy, 11.0, FG);
+                drawing::pause(c, cx, cy - 22.0, 8.0, MUTED);
             } else {
-                drawing::play(c, cx, cy, 11.0, FG);
+                drawing::play(c, cx, cy - 22.0, 8.0, MUTED);
             }
-            c.text(64.0, cy, &timer, Face::Light, 26.0, FG, Anchor::LM, None);
-            let right = W - 16.0;
-            c.text(right, 13.0, &clock, Face::Semibold, 15.0, FG, Anchor::RA, None);
-            let mut status = self.status_text();
+            c.text(cx, cy + 4.0, &timer, Face::Light, 24.0, if paused { MUTED } else { FG }, Anchor::MM, None);
+            c.text(14.0, 136.0, &clock, Face::Semibold, 12.5, FG, Anchor::LM, None);
+            let mut status = self.phase.label().to_string();
             if self.phase == Phase::Foco {
                 status += &format!(" · {}/{}", (self.cycle + 1).min(every), every);
             }
-            c.text(right, 36.0, &status, Face::Regular, 10.5, MUTED, Anchor::RA, Some(104.0));
+            if paused {
+                status = "Pausado".into();
+            }
+            c.text(SMALL - 14.0, 136.0, &status, Face::Regular, 11.0, MUTED, Anchor::RM, Some(80.0));
             return;
         }
 
@@ -544,9 +536,6 @@ impl Kind for Pomodoro {
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
         if Self::on_ring(x, y, mode) {
-            if mode == Mode::P {
-                return Some((6.0, 6.0, 168.0, COMPACT_H - 6.0, 14.0));
-            }
             let (cx, cy, d, _) = Self::ring(mode);
             let r = d / 2.0 + 5.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));

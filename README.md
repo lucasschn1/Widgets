@@ -49,7 +49,7 @@ a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, com um cliqu
 grande, a lista fica sempre aberta, junto com a rede e há quanto tempo o PC está ligado.
 
 **Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
-outros). O fundo ganha as cores da capa. Clique na capa para abrir o player grande, com o
+outros). O fundo ganha as cores da capa e se mexe devagar enquanto a música toca. Clique na capa para abrir o player grande, com o
 volume do app, aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em
 cima dele muda o volume do app que está tocando.
 
@@ -67,7 +67,8 @@ soma quanto você focou no dia, e começa ou pausa com um clique (ou pelo clique
 ## Do tamanho que você quiser
 
 Cada widget tem três tamanhos. Clique no botão que aparece no canto, ou dê dois cliques no
-widget. Os vizinhos se ajeitam sozinhos.
+widget. Os vizinhos se ajeitam sozinhos. O pequeno é um quadrado: dois lado a lado ocupam a
+largura de um médio.
 
 <p align="center">
   <img src="docs/images/tamanhos.webp" width="340" alt="Mudando de tamanho">

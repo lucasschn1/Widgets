@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Request, Status};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Request, Status, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::*;
@@ -398,13 +398,14 @@ const H: f32 = LIST_Y + ROW_H * ROWS as f32 + 8.0;
 const MAX_ROWS: usize = 20; // carregadas; a roda do mouse rola a lista
 const ICON_D: f32 = 26.0;
 // pequeno, com a mesma largura dos outros: os últimos 6 meses, e a altura que der
-const COMPACT_RADIUS: f32 = 22.0;
 const WEEKS: i64 = 26;
 const GAP: f32 = 2.0;
 const C_PAD: f32 = 14.0;
 const STEP: f32 = (W - 2.0 * C_PAD + GAP) / WEEKS as f32;
-const CELL: f32 = STEP - GAP;
 const GRID_X: f32 = C_PAD;
+// pequeno (quadrado): as últimas 10 semanas e a sequência de dias
+const P_WEEKS: i64 = 10;
+const P_STEP: f32 = (SMALL - 24.0 + GAP) / P_WEEKS as f32;
 // médio: o mapa e as 3 últimas atividades
 const M_ROWS: usize = 3;
 
@@ -591,11 +592,19 @@ impl GitHub {
         self.data.is_none() && self.status.error.is_some() && (8.0..=W - 8.0).contains(&x)
     }
 
+    /// (semanas, x, y, passo) do mapa de contribuições no tamanho dado.
+    fn grid(mode: Mode) -> (i64, f32, f32, f32) {
+        if mode == Mode::P { (P_WEEKS, 12.0, 14.0, P_STEP) } else { (WEEKS, GRID_X, grid_y(), STEP) }
+    }
+
     /// Primeiro dia do mapa: colunas são semanas de domingo a sábado; a última é a atual.
-    fn grid_start(&self) -> i64 {
-        let last = self.data.as_ref().and_then(|d| d.days.last()).map(|d| d.0).unwrap_or(0);
+    fn grid_start(&self, weeks: i64) -> i64 {
+        // a última coluna é a semana de hoje (os dados podem vir só até ontem, ou até amanhã em UTC)
+        let t = win::local_time();
+        let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
+        let last = today;
         let weekday = (last + 3).rem_euclid(7); // 0 = segunda (1970-01-01 foi quinta)
-        last - ((weekday + 1) % 7 + 7 * (WEEKS - 1))
+        last - ((weekday + 1) % 7 + 7 * (weeks - 1))
     }
 
     fn day_at(&self, x: f32, y: f32, mode: Mode) -> Option<(i64, i64)> {
@@ -603,13 +612,15 @@ impl GitHub {
             return None;
         }
         let d = self.data.as_ref()?;
-        let col = ((x - GRID_X) / STEP).floor();
-        let row = ((y - grid_y()) / STEP).floor();
-        let inside = x - GRID_X - col * STEP <= CELL && y - grid_y() - row * STEP <= CELL;
-        if !(0.0..WEEKS as f32).contains(&col) || !(0.0..7.0).contains(&row) || !inside {
+        let (weeks, gx, gy, step) = Self::grid(mode);
+        let cell = step - GAP;
+        let col = ((x - gx) / step).floor();
+        let row = ((y - gy) / step).floor();
+        let inside = x - gx - col * step <= cell && y - gy - row * step <= cell;
+        if !(0.0..weeks as f32).contains(&col) || !(0.0..7.0).contains(&row) || !inside {
             return None;
         }
-        let day = self.grid_start() + col as i64 * 7 + row as i64;
+        let day = self.grid_start(weeks) + col as i64 * 7 + row as i64;
         d.days.iter().find(|x| x.0 == day).map(|x| (day, x.2))
     }
 
@@ -630,21 +641,23 @@ impl GitHub {
         (streak, counts.get(&today).copied().unwrap_or(0))
     }
 
-    fn heatmap(&self, c: &mut Canvas) {
+    fn heatmap(&self, c: &mut Canvas, mode: Mode) {
         let Some(d) = &self.data else { return };
-        let start = self.grid_start();
+        let (weeks, gx, gy, step) = Self::grid(mode);
+        let cell = step - GAP;
+        let start = self.grid_start(weeks);
         let t = win::local_time();
         let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
         for &(day, level, _) in &d.days {
             let offset = day - start;
-            if offset < 0 {
+            if offset < 0 || offset >= weeks * 7 {
                 continue;
             }
-            let x = GRID_X + (offset / 7) as f32 * STEP;
-            let y = grid_y() + (offset % 7) as f32 * STEP;
-            c.fill_round_rect(x, y, x + CELL, y + CELL, CELL * 0.25, HEAT[level.clamp(0, 4) as usize]);
+            let x = gx + (offset / 7) as f32 * step;
+            let y = gy + (offset % 7) as f32 * step;
+            c.fill_round_rect(x, y, x + cell, y + cell, cell * 0.25, HEAT[level.clamp(0, 4) as usize]);
             if day == today {
-                c.stroke_round_rect(x, y, x + CELL, y + CELL, CELL * 0.25, Rgba(255, 255, 255, 220), 1.2);
+                c.stroke_round_rect(x, y, x + cell, y + cell, cell * 0.25, Rgba(255, 255, 255, 220), 1.2);
             }
         }
     }
@@ -778,7 +791,7 @@ impl Kind for GitHub {
 
     fn layout(&self, mode: Mode) -> Layout {
         match mode {
-            Mode::P => Layout { w: W, h: compact_h(), radius: COMPACT_RADIUS },
+            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
             Mode::M => Layout { w: W, h: medium_h(), radius: RADIUS },
             Mode::G => Layout { w: W, h: H, radius: RADIUS },
         }
@@ -790,13 +803,31 @@ impl Kind for GitHub {
             if mode == Mode::G {
                 c.text(PAD, 19.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
+            } else if mode == Mode::P {
+                c.text(14.0, 16.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+                for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 28.0, 4).iter().enumerate() {
+                    c.text(14.0, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 28.0));
+                }
             } else {
                 c.text(W / 2.0, h / 2.0, &self.msg, Face::Semibold, 12.0, FG, Anchor::MM, Some(W - 2.0 * C_PAD));
             }
             return;
         };
+        if mode == Mode::P {
+            self.heatmap(c, mode);
+            let (streak, today) = self.streak();
+            let days = if streak == 1 { "dia seguido" } else { "dias seguidos" };
+            c.text(14.0, 118.0, &format!("{streak} {days}"), Face::Semibold, 13.0, FG, Anchor::LM, Some(SMALL - 28.0));
+            let today = match today {
+                0 => "Nada hoje ainda".to_string(),
+                1 => "1 contribuição hoje".to_string(),
+                n => format!("{n} contribuições hoje"),
+            };
+            c.text(14.0, 136.0, &today, Face::Regular, 11.0, MUTED, Anchor::LM, Some(SMALL - 28.0));
+            return;
+        }
         if mode != Mode::G {
-            self.heatmap(c);
+            self.heatmap(c, mode);
             if mode == Mode::M {
                 c.hline_px(PAD, W - PAD, m_list_y() - 6.0, DIVIDER);
                 self.rows(c, mode);
@@ -869,7 +900,8 @@ impl Kind for GitHub {
             return Some((PAD - 6.0, 10.0, W - PAD + 6.0, 30.0, 8.0));
         }
         if self.on_message(x) {
-            return Some((8.0, 8.0, W - 8.0, self.layout(mode).h - 8.0, 14.0));
+            let l = self.layout(mode);
+            return Some((8.0, 8.0, l.w - 8.0, l.h - 8.0, 14.0));
         }
         None
     }

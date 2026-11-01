@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, SMALL, SMALL_RADIUS};
 use crate::config::Get;
 use crate::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -16,7 +16,6 @@ use crate::win;
 
 const W: f32 = 320.0;
 const PAD: f32 = 16.0;
-const P_H: f32 = 64.0;
 const M_H: f32 = 150.0;
 const TOP_H: f32 = 78.0; // cidade, temperatura e condição
 const HOURS_Y: f32 = 80.0;
@@ -401,9 +400,13 @@ impl Tempo {
         }
     }
 
+    fn width(mode: Mode) -> f32 {
+        if mode == Mode::P { SMALL } else { W }
+    }
+
     fn height(&self, mode: Mode) -> f32 {
         match mode {
-            Mode::P => P_H,
+            Mode::P => SMALL,
             Mode::M if self.days_open => M_H + DAY_H * M_DAYS as f32 + 10.0,
             Mode::M => M_H,
             Mode::G => G_H,
@@ -412,7 +415,7 @@ impl Tempo {
 
     fn radius(mode: Mode) -> f32 {
         match mode {
-            Mode::P => 22.0,
+            Mode::P => SMALL_RADIUS,
             Mode::M => 24.0,
             Mode::G => 26.0,
         }
@@ -436,17 +439,17 @@ impl Tempo {
 
     /// Fundo: o céu, com estrelas nas noites limpas.
     fn draw_sky(&self, c: &mut Canvas, mode: Mode) {
-        let h = self.height(mode);
+        let (w, h) = (Self::width(mode), self.height(mode));
         let (top, bottom) = sky(self.code(), self.is_day());
-        c.gradient_round_rect(0.0, 0.0, W, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h.min(G_H));
+        c.gradient_round_rect(0.0, 0.0, w, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h.min(G_H));
         if !self.is_day() && self.code() <= 2 {
             let mut seed: u32 = 7;
             let mut rnd = || {
                 seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
                 (seed >> 8) as f32 / (1u32 << 24) as f32
             };
-            for _ in 0..(W * h.min(160.0) / 900.0) as usize {
-                let (x, y, r, a) = (rnd() * W, rnd() * h.min(160.0) * 0.9, 0.4 + rnd() * 0.8, 0.25 + rnd() * 0.5);
+            for _ in 0..(w * h.min(160.0) / 900.0) as usize {
+                let (x, y, r, a) = (rnd() * w, rnd() * h.min(160.0) * 0.9, 0.4 + rnd() * 0.8, 0.25 + rnd() * 0.5);
                 c.fill_circle(x, y, r, WHITE.alpha(a));
             }
         }
@@ -528,25 +531,28 @@ impl Tempo {
         }
     }
 
+    /// Pequeno (quadrado): cidade, temperatura grande e, embaixo, ícone, condição e máx./mín.
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
-        let cy = P_H / 2.0;
-        let mut x = PAD - 2.0;
-        if let Some(wx) = &self.weather {
-            let size = 32.0;
-            c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), x, cy - size / 2.0);
-            x += size + 6.0;
+        let (x, w) = (14.0, SMALL - 28.0);
+        let city = self.city(env);
+        let city = city.split(',').next().unwrap_or(&city).to_string();
+        c.text(x, 14.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(w));
+        c.text(x - 2.0, 30.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
+        match &self.weather {
+            Some(wx) => {
+                let size = 24.0;
+                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), x - 2.0, 88.0);
+                c.text(x, 115.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
+                if let (Some(max), Some(min)) = (wx.i64_of("max"), wx.i64_of("min")) {
+                    c.text(x, 132.0, &format!("Máx. {max}°  Mín. {min}°"), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
+                }
+            }
+            None => {
+                for (i, line) in c.wrap(&self.weather_msg, Face::Regular, 11.5, w, 3).iter().enumerate() {
+                    c.text(x, 96.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
+                }
+            }
         }
-        let tw = c.text(x, cy, &self.temp_text(), Face::Light, 28.0, FG, Anchor::LM, None);
-        let tx = x + tw.max(44.0) + 12.0;
-        let right = self.weather.as_ref().map(|w| (w.i64_of("max"), w.i64_of("min")));
-        let mut text_w = W - tx - PAD;
-        if let Some((Some(max), Some(min))) = right {
-            let mm = format!("{max}° / {min}°");
-            text_w -= c.text(W - PAD, cy, &mm, Face::Semibold, 12.0, FG, Anchor::RM, None) + 10.0;
-        }
-        c.text(tx, 15.0, &self.city(env), Face::Semibold, 12.0, FG, Anchor::LA, Some(text_w));
-        let desc = self.weather.as_ref().and_then(|w| w.str_of("desc")).map(String::from).unwrap_or_else(|| self.weather_msg.clone());
-        c.text(tx, 33.0, &desc, Face::Regular, 11.0, MUTED, Anchor::LA, Some(text_w));
     }
 
     fn forecast_url(env: &Env) -> String {
@@ -577,7 +583,7 @@ impl Kind for Tempo {
     }
 
     fn layout(&self, mode: Mode) -> Layout {
-        Layout { w: W, h: self.height(mode), radius: Self::radius(mode) }
+        Layout { w: Self::width(mode), h: self.height(mode), radius: Self::radius(mode) }
     }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
@@ -609,13 +615,13 @@ impl Kind for Tempo {
         if self.falling() == 0 {
             return;
         }
-        let h = self.height(mode);
+        let (w, h) = (Self::width(mode), self.height(mode));
         let code = self.code();
         let snow = is_snow(code);
         let light = (51..=55).contains(&code) || code == 61 || code == 80;
         let t = self.started.elapsed().as_secs_f32();
-        let count = ((W * h / if light { 1600.0 } else { 900.0 }) as usize).max(12);
-        c.push_round_clip(ox, oy, ox + W, oy + h, Self::radius(mode));
+        let count = ((w * h / if light { 1600.0 } else { 900.0 }) as usize).max(12);
+        c.push_round_clip(ox, oy, ox + w, oy + h, Self::radius(mode));
         let mut seed: u32 = 99;
         let mut rnd = || {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -626,13 +632,13 @@ impl Kind for Tempo {
             if snow {
                 let v = 14.0 + speed * 16.0;
                 let y = (y0 * (h + 10.0) + t * v) % (h + 10.0) - 5.0;
-                let x = (x0 * W + (t * 0.8 + x0 * 9.0).sin() * 6.0).rem_euclid(W);
+                let x = (x0 * w + (t * 0.8 + x0 * 9.0).sin() * 6.0).rem_euclid(w);
                 c.fill_circle(ox + x, oy + y, 1.2 + len * 1.3, WHITE.alpha(0.55));
             } else {
                 let v = 180.0 + speed * 120.0;
                 let l = 7.0 + len * 9.0;
                 let y = (y0 * (h + l) + t * v) % (h + l) - l;
-                let x = (x0 * (W + 40.0) - t * v * 0.18).rem_euclid(W + 40.0) - 20.0;
+                let x = (x0 * (w + 40.0) - t * v * 0.18).rem_euclid(w + 40.0) - 20.0;
                 c.line(&[(ox + x, oy + y), (ox + x - l * 0.18, oy + y + l)], Rgba(205, 222, 255, if light { 60 } else { 85 }), 1.2);
             }
         }

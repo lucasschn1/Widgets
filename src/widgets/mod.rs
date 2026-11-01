@@ -17,6 +17,13 @@ use serde_json::Value;
 use crate::config::{self, Get};
 use crate::gfx::Canvas;
 
+/// Lado do tamanho pequeno: um quadrado. Dois lado a lado (com o espaço do encaixe entre eles)
+/// ocupam a largura de um widget médio.
+pub const SMALL: f32 = 154.0;
+pub const SMALL_RADIUS: f32 = 24.0;
+/// Altura da antiga "pílula" pequena (até a versão 3.1), para acertar os layouts.
+pub const OLD_SMALL_H: f32 = 64.0;
+
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
 pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro"];
 

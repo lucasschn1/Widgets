@@ -178,6 +178,7 @@ impl App {
             app.create_card(key, true);
         }
         app.place_split_system();
+        app.grow_old_small();
         if app.cards.is_empty() && !app.tray.ok {
             app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
@@ -300,6 +301,33 @@ impl App {
             let w = self.sh.cfg.obj_mut(key);
             w.insert("x".into(), json!(x));
             w.insert("y".into(), json!(y));
+        }
+    }
+
+    /// Versão 3.2: o tamanho pequeno virou um quadrado, mais alto que a pílula de antes. Os
+    /// widgets que estavam encaixados embaixo de um pequeno descem para não ficar por baixo dele.
+    fn grow_old_small(&mut self) {
+        if self.sh.cfg["app"].bool_of("pequeno_quadrado").unwrap_or(false) {
+            return;
+        }
+        self.sh.cfg.obj_mut("app").insert("pequeno_quadrado".into(), json!(true));
+        let small: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].mode == Mode::P).collect();
+        for i in small {
+            let s = self.cards[i].s;
+            let old = ((320.0 * s).round() as i32, (widgets::OLD_SMALL_H * s).round() as i32);
+            let rect = self.cards[i].card_rect_at(self.cards[i].pos, Some(old));
+            let delta = self.cards[i].card_size().1 - old.1;
+            for j in self.stack_below(i, Some(rect)) {
+                if j == i {
+                    continue;
+                }
+                self.cards[j].pos.1 += delta;
+                self.cards[j].present(&self.sh, true);
+                let (key, (x, y)) = (self.cards[j].key(), self.cards[j].pos);
+                let w = self.sh.cfg.obj_mut(key);
+                w.insert("x".into(), json!(x));
+                w.insert("y".into(), json!(y));
+            }
         }
     }
 

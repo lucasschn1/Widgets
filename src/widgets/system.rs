@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, Status};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, Status, SMALL, SMALL_RADIUS};
 use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::sysinfo::{self, AppUse, Drive, Sampler};
 use crate::theme::*;
@@ -13,7 +13,6 @@ use crate::win;
 
 const W: f32 = 320.0;
 const PAD: f32 = 16.0;
-const P_H: f32 = 64.0;
 const M_H: f32 = 150.0;
 const ROW_H: f32 = 38.0;
 const LIST_N: usize = 5;
@@ -185,12 +184,14 @@ impl System {
     }
 
     fn base_h(mode: Mode) -> f32 {
-        if mode == Mode::P { P_H } else { M_H }
+        if mode == Mode::P { SMALL } else { M_H }
     }
 
     fn height(&self, mode: Mode) -> f32 {
         match mode {
             Mode::G => G_H,
+            // o pequeno não cresce: ele "vira" e mostra os apps no mesmo quadrado
+            Mode::P => SMALL,
             m if self.selected.is_some() => Self::base_h(m) + DETAIL_H + ROW_H * self.list_len() as f32,
             m => Self::base_h(m),
         }
@@ -198,7 +199,7 @@ impl System {
 
     /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
     fn rings_geom(mode: Mode) -> (f32, f32, f32, f32, f32) {
-        if mode == Mode::P { (14.0 + 23.0, P_H / 2.0, 46.0, 5.0, 12.0) } else { (PAD + 60.0, 75.0, 120.0, 11.0, 28.0) }
+        if mode == Mode::P { (SMALL / 2.0, 62.0, 100.0, 9.0, 22.0) } else { (PAD + 60.0, 75.0, 120.0, 11.0, 28.0) }
     }
 
     fn ring_at(&self, x: f32, y: f32, mode: Mode) -> Option<usize> {
@@ -215,9 +216,8 @@ impl System {
     /// Retângulo da linha (médio/grande) ou coluna (pequeno) de cada recurso.
     fn metric_rect(mode: Mode, i: usize) -> (f32, f32, f32, f32) {
         if mode == Mode::P {
-            let x0 = 74.0;
-            let col = (W - x0 - 10.0) / 3.0;
-            (x0 + col * i as f32, 8.0, x0 + col * (i + 1) as f32, P_H - 8.0)
+            let col = (SMALL - 16.0) / 3.0;
+            (8.0 + col * i as f32, 118.0, 8.0 + col * (i + 1) as f32, SMALL - 6.0)
         } else {
             let y = 22.0 + 36.0 * i as f32;
             (148.0, y - 6.0, W - 10.0, y + 30.0)
@@ -242,7 +242,7 @@ impl System {
     }
 
     fn link_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
-        if mode == Mode::G || self.selected.is_none() {
+        if mode != Mode::M || self.selected.is_none() {
             return None;
         }
         let y = self.list_top(mode) + ROW_H * self.list_len() as f32 + 4.0;
@@ -252,6 +252,9 @@ impl System {
     fn close_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
         if mode == Mode::G || self.selected.is_none() {
             return None;
+        }
+        if mode == Mode::P {
+            return Some((SMALL - 36.0, 10.0, SMALL - 10.0, 36.0));
         }
         let y = Self::base_h(mode) + 8.0;
         Some((W - PAD - 26.0, y, W - PAD, y + 26.0))
@@ -356,9 +359,11 @@ impl System {
             let dim = sel.is_some_and(|s| s != i) && mode != Mode::G;
             let text = if dim { MUTED } else { FG };
             if mode == Mode::P {
-                c.fill_circle(x0 + 8.0, y0 + 13.0, 3.5, color(i));
-                c.text(x0 + 15.0, y0 + 13.0, NAMES[i], Face::Regular, 11.0, MUTED, Anchor::LM, None);
-                c.text(x0 + 4.0, y0 + 34.0, &pct, Face::Semibold, 16.0, text, Anchor::LM, None);
+                let cx = (x0 + x1) / 2.0;
+                let _ = text;
+                c.text(cx, y0 + 8.0, &pct, Face::Semibold, 13.5, color(i), Anchor::MM, None);
+                let label = if i == 1 { "RAM" } else { NAMES[i] };
+                c.text(cx, y0 + 23.0, label, Face::Regular, 10.0, MUTED, Anchor::MM, None);
             } else {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
@@ -432,6 +437,44 @@ impl System {
         }
     }
 
+    /// Pequeno "virado": o recurso escolhido e os 3 apps que mais usam (ou as unidades).
+    fn draw_back(&self, c: &mut Canvas, which: usize) {
+        let pct = format!("{}%", (self.target[which] * 100.0).round());
+        c.fill_circle(17.0, 22.0, 4.0, color(which));
+        let nw = c.text(26.0, 22.0, NAMES[which], Face::Semibold, 12.5, FG, Anchor::LM, None);
+        c.text(26.0 + nw + 6.0, 22.0, &pct, Face::Semibold, 12.5, color(which), Anchor::LM, None);
+        if let Some((x0, y0, x1, y1)) = self.close_rect(Mode::P) {
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            c.fill_circle(cx, cy, 12.0, WHITE.alpha(0.14));
+            c.line(&[(cx - 4.0, cy - 4.0), (cx + 4.0, cy + 4.0)], FG, 1.6);
+            c.line(&[(cx + 4.0, cy - 4.0), (cx - 4.0, cy + 4.0)], FG, 1.6);
+        }
+        let rows = self.rows(which);
+        if rows.is_empty() {
+            let msg = if which == 2 { "Nenhuma unidade" } else { "Lendo os apps…" };
+            c.text(SMALL / 2.0, 90.0, msg, Face::Regular, 11.5, MUTED, Anchor::MM, None);
+            return;
+        }
+        let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
+        for (n, row) in rows.iter().take(3).enumerate() {
+            // as linhas sobem e aparecem uma depois da outra
+            let t = ease_out((since - n as f32 * 60.0) / 380.0);
+            let y = 44.0 + 36.0 * n as f32 + (1.0 - t) * 8.0;
+            let icon = 22.0;
+            match &row.icon {
+                Some(img) => {
+                    let s = c.s;
+                    c.image_px(img, (12.0 * s).round(), ((y + 3.0) * s).round(), (icon * s).round(), (icon * s).round(), t);
+                }
+                None => c.fill_round_rect(12.0, y + 3.0, 12.0 + icon, y + 3.0 + icon, 6.0, WHITE.alpha(0.16 * t)),
+            }
+            let tx = 12.0 + icon + 8.0;
+            let w = SMALL - tx - 10.0;
+            c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(t), Anchor::LA, Some(w));
+            c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * t), Anchor::LA, Some(w));
+        }
+    }
+
     fn draw_seg(&self, c: &mut Canvas, which: usize) {
         c.fill_round_rect(PAD, SEG_Y, W - PAD, SEG_Y + 34.0, 10.0, WHITE.alpha(0.08));
         for i in 0..3 {
@@ -465,17 +508,23 @@ impl Kind for System {
 
     fn layout(&self, mode: Mode) -> Layout {
         let radius = match mode {
-            Mode::P => 22.0,
+            Mode::P => SMALL_RADIUS,
             Mode::M => 24.0,
             Mode::G => 26.0,
         };
-        Layout { w: W, h: self.height(mode), radius }
+        Layout { w: if mode == Mode::P { SMALL } else { W }, h: self.height(mode), radius }
     }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         if self.mode_seen.get() != mode {
             self.mode_seen.set(mode);
             self.sampler.set_active(self.list_visible());
+        }
+        if mode == Mode::P {
+            if let Some(which) = self.selected {
+                self.draw_back(c, which);
+                return;
+            }
         }
         self.draw_rings(c, mode);
         self.draw_metrics(c, mode);
@@ -486,11 +535,12 @@ impl Kind for System {
                 self.draw_list(c, mode, which, G_LIST_Y);
                 self.draw_footer(c);
             }
-            _ => {
+            Mode::M => {
                 if let Some(which) = self.selected {
                     self.draw_detail(c, mode, which);
                 }
             }
+            Mode::P => {}
         }
     }
 
@@ -501,6 +551,9 @@ impl Kind for System {
         }
         if inside(self.link_rect(mode)) {
             return Some(if self.selected == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
+        }
+        if mode == Mode::P && self.selected.is_some() {
+            return env.shortcuts().then_some(if self.selected == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
         }
         if mode == Mode::G {
             if let Some(i) = (0..3).find(|&i| inside(Some(Self::seg_rect(i)))) {
@@ -542,6 +595,9 @@ impl Kind for System {
         if let Some((x0, y0, x1, y1)) = inside(self.link_rect(mode)) {
             return Some((x0, y0, x1, y1, 10.0));
         }
+        if mode == Mode::P && self.selected.is_some() {
+            return None;
+        }
         if y < Self::base_h(mode) {
             if let Some(i) = self.ring_at(x, y, mode) {
                 let (cx, cy, d, ..) = Self::rings_geom(mode);
@@ -558,7 +614,7 @@ impl Kind for System {
     }
 
     fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
-        if y >= Self::base_h(mode) {
+        if y >= Self::base_h(mode) || (mode == Mode::P && self.selected.is_some()) {
             return None;
         }
         let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
