@@ -1,192 +1,132 @@
-//! Widget de clima e sistema (CPU, memória e disco).
+//! Widget Sistema: três anéis (CPU, memória e disco) no estilo dos anéis de atividade. Clicar num
+//! anel abre a lista dos apps que mais usam aquele recurso (no disco, as unidades).
 
-use std::sync::mpsc::{channel, Receiver};
+use std::cell::Cell;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
-
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status};
-use crate::config::Get;
-use crate::drawing::{self, weather_art};
-use crate::gfx::{Anchor, Canvas, Face};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, Status};
+use crate::gfx::{Anchor, Canvas, Face, Image};
+use crate::sysinfo::{self, AppUse, Drive, Sampler};
 use crate::theme::*;
-use crate::util;
 use crate::win;
 
-const WIDTH: f32 = 320.0;
-const HEIGHT: f32 = 318.0;
-const PAD: f32 = 20.0;
-const RADIUS: f32 = 26.0;
-const RING_D: f32 = 72.0;
-const RING_W: f32 = 8.0;
-const ICON: f32 = 54.0;
-const COMPACT_ICON: f32 = 34.0;
-const COMPACT_H: f32 = 64.0;
-const COMPACT_RADIUS: f32 = 22.0;
-const MEDIUM_H: f32 = 150.0; // pequeno + as próximas horas
-const HOURS: usize = 6;
-const C_DIVIDER_X: f32 = 136.0; // entre o tempo e os anéis
-const COMPACT_RING_D: f32 = 40.0;
-const COMPACT_RING_W: f32 = 5.0;
-const RING_FULL: Rgba = Rgba::rgb(255, 69, 58);
+const W: f32 = 320.0;
+const PAD: f32 = 16.0;
+const P_H: f32 = 64.0;
+const M_H: f32 = 150.0;
+const ROW_H: f32 = 38.0;
+const LIST_N: usize = 5;
+/// cabeçalho e link, quando a lista abre embaixo (pequeno e médio); as linhas somam a isso
+const DETAIL_H: f32 = 52.0 + 38.0;
+const SEG_Y: f32 = 150.0;
+const G_LIST_Y: f32 = 194.0;
+const G_FOOT_Y: f32 = G_LIST_Y + ROW_H * LIST_N as f32 + 6.0;
+const G_H: f32 = G_FOOT_Y + 34.0;
 
-const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
-const WEATHER_RETRY: Duration = Duration::from_secs(2 * 60);
-const SYSTEM_EVERY: Duration = Duration::from_secs(2);
+const EVERY: Duration = Duration::from_secs(2);
+const RING_MS: f32 = 550.0;
+const BARS_MS: f32 = 650.0;
 
 // ações
+const SELECT: u32 = 10; // + recurso (0 CPU, 1 memória, 2 disco)
 const OPEN_TASKMGR: u32 = 1;
-const OPEN_STORAGE: u32 = 2;
-const OPEN_FORECAST: u32 = 3;
-pub const UPDATE_WEATHER: u32 = 4;
-pub const ASK_CITY: u32 = 5;
+const OPEN_EXPLORER: u32 = 2;
+const CLOSE: u32 = 3;
 
-fn ring_color(name: &str) -> Rgba {
-    match name {
-        "CPU" => Rgba::rgb(10, 132, 255),
-        "RAM" => Rgba::rgb(191, 90, 242),
-        _ => Rgba::rgb(48, 209, 88),
+const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
+const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
+
+fn color(i: usize) -> Rgba {
+    match i {
+        0 => Rgba::rgb(255, 55, 95),
+        1 => Rgba::rgb(48, 209, 88),
+        _ => Rgba::rgb(100, 210, 255),
     }
 }
 
-fn wmo(code: i64) -> &'static str {
-    match code {
-        0 => "Céu limpo",
-        1 => "Predominantemente limpo",
-        2 => "Parcialmente nublado",
-        3 => "Nublado",
-        45 => "Neblina",
-        48 => "Neblina com geada",
-        51 => "Garoa fraca",
-        53 => "Garoa",
-        55 => "Garoa forte",
-        56 | 57 => "Garoa congelante",
-        61 => "Chuva fraca",
-        63 => "Chuva",
-        65 => "Chuva forte",
-        66 | 67 => "Chuva congelante",
-        71 => "Neve fraca",
-        73 => "Neve",
-        75 => "Neve forte",
-        77 => "Grãos de neve",
-        80 | 81 => "Pancadas de chuva",
-        82 => "Pancadas fortes",
-        85 | 86 => "Pancadas de neve",
-        95 => "Trovoada",
-        96 | 99 => "Trovoada com granizo",
-        _ => "—",
-    }
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-/// Nome do ícone (ver weather_art) para um código de tempo da Open-Meteo.
-pub fn weather_icon(code: i64, is_day: bool) -> &'static str {
-    match code {
-        0 | 1 => if is_day { "sun" } else { "moon" },
-        2 => if is_day { "partly_day" } else { "partly_night" },
-        3 => "clouds",
-        45 | 48 => "fog",
-        51..=57 => "drizzle",
-        61..=67 | 80..=82 => "rain",
-        71..=77 | 85 | 86 => "snow",
-        c if c >= 95 => "thunder",
-        _ => "clouds",
-    }
+fn br(v: f64, digits: usize) -> String {
+    format!("{v:.digits$}").replace('.', ",")
 }
 
-fn is_rain(code: i64) -> bool {
-    (51..68).contains(&code) || (80..83).contains(&code) || matches!(code, 95 | 96 | 99)
-}
-
-/// Cidades que combinam com o texto: [{"name", "detail", "label", "lat", "lon"}].
-pub fn search_cities(query: &str, count: u32) -> Result<Vec<Value>, String> {
-    let name = query.split(',').next().unwrap_or("").trim();
-    if name.chars().count() < 2 {
-        return Ok(Vec::new());
-    }
-    let url = format!(
-        "https://geocoding-api.open-meteo.com/v1/search?name={}&count={count}&language=pt&format=json",
-        util::urlencode(name)
-    );
-    let data = util::fetch_json(&url)?;
-    let mut out = Vec::new();
-    for place in data["results"].as_array().cloned().unwrap_or_default() {
-        let pname = place.str_of("name").unwrap_or_default().to_string();
-        let admin = place.str_of("admin1").unwrap_or_default();
-        let country = place.str_of("country").unwrap_or_default();
-        let label = if admin.is_empty() { pname.clone() } else { format!("{pname}, {admin}") };
-        let detail = [admin, country].iter().filter(|p| !p.is_empty()).cloned().collect::<Vec<_>>().join(", ");
-        out.push(json!({"name": pname, "detail": detail, "label": label, "lat": place["latitude"], "lon": place["longitude"]}));
-    }
-    Ok(out)
-}
-
-enum Fetch {
-    /// (cidade, lat, lon, lugar), dados da previsão
-    Ok((String, f64, f64, String), Value),
-    NotFound(String),
-    Offline(String),
-}
-
-fn fetch_weather(city: String, lat: Option<f64>, lon: Option<f64>, place: Option<String>) -> Fetch {
-    let (lat, lon, place) = match (lat, lon) {
-        (Some(lat), Some(lon)) => (lat, lon, place.unwrap_or_else(|| city.clone())),
-        _ => match search_cities(&city, 1) {
-            Ok(found) if !found.is_empty() => {
-                let p = &found[0];
-                (p["lat"].as_f64().unwrap_or(0.0), p["lon"].as_f64().unwrap_or(0.0), p.str_of("label").unwrap_or(&city).to_string())
-            }
-            Ok(_) => return Fetch::NotFound(format!("Cidade não encontrada: {}", city.split(',').next().unwrap_or("").trim())),
-            Err(e) => return Fetch::Offline(e),
-        },
-    };
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}\
-         &current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,is_day,precipitation\
-         &hourly=temperature_2m,weather_code,is_day&forecast_hours=8&minutely_15=precipitation&forecast_minutely_15=6\
-         &daily=temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=1"
-    );
-    match util::fetch_json(&url) {
-        Ok(data) => Fetch::Ok((city, lat, lon, place), data),
-        Err(e) => Fetch::Offline(e),
-    }
+/// Uma linha da lista: nome, valor, fração da barra, ícone.
+struct Row {
+    name: String,
+    value: String,
+    frac: f32,
+    icon: Option<Arc<Image>>,
 }
 
 pub struct System {
-    weather: Option<Value>,
-    weather_msg: String,
-    metrics: Vec<(&'static str, f32, String)>,
+    /// valores de agora (0 a 1): CPU, memória, disco
+    target: [f32; 3],
+    /// valores desenhados (andam até `target` com animação)
+    from: [f32; 3],
+    ring_since: Instant,
+    details: [String; 3],
     last_cpu: (u64, u64),
-    next_system: Instant,
-    next_weather: Option<Instant>,
-    pending: Option<Receiver<Fetch>>,
-    /// quando olhar de novo se a busca do clima terminou
-    poll_at: Instant,
+    last_net: (u64, u64, Instant),
+    rates: (f64, f64),
+    next: Instant,
+    sampler: Sampler,
+    apps: Vec<AppUse>,
+    drives: Vec<Drive>,
+    drives_at: Option<Instant>,
+    /// recurso aberto na lista (no grande, sempre um)
+    selected: Option<usize>,
+    bars_since: Instant,
+    /// o último tamanho desenhado (para saber se a lista está na tela)
+    mode_seen: Cell<Mode>,
     status: Status,
+    /// quando chamar `tick` de novo (um prazo fixo: "agora + x" nunca venceria)
+    due: Instant,
 }
 
 impl System {
-    pub fn new(cfg: &Value, cache: &Value) -> System {
-        let wcfg = &cfg["sistema"];
-        let place = wcfg.str_of("place").or(wcfg.str_of("city"));
-        // abre com o último clima guardado, enquanto busca o atual
-        let cached = cache.get("weather").filter(|w| place.is_some() && w.str_of("place") == place).cloned();
-        let updated = if cached.is_some() { cache.f64_of("weather_time") } else { None };
+    pub fn new() -> System {
+        System::with(Sampler::new())
+    }
+
+    fn with(sampler: Sampler) -> System {
         let mut s = System {
-            weather: cached,
-            weather_msg: "Carregando…".into(),
-            metrics: Vec::new(),
+            target: [0.0; 3],
+            from: [0.0; 3],
+            ring_since: Instant::now(),
+            details: Default::default(),
             last_cpu: win::cpu_times(),
-            next_system: Instant::now(),
-            next_weather: None,
-            pending: None,
-            poll_at: Instant::now(),
-            status: Status { updated, ..Default::default() },
+            last_net: (0, 0, Instant::now()),
+            rates: (0.0, 0.0),
+            next: Instant::now(),
+            sampler,
+            apps: Vec::new(),
+            drives: Vec::new(),
+            drives_at: None,
+            selected: None,
+            bars_since: Instant::now(),
+            mode_seen: Cell::new(Mode::M),
+            status: Status::default(),
+            due: Instant::now(),
         };
-        s.update_system();
+        let (rx, tx) = sysinfo::net_bytes();
+        s.last_net = (rx, tx, Instant::now());
+        s.measure();
         s
     }
 
-    fn update_system(&mut self) {
+    /// Exemplo para a galeria (sem ler o sistema de verdade).
+    pub fn sample() -> System {
+        let mut s = System::with(Sampler::idle());
+        s.target = [0.24, 0.68, 0.54];
+        s.from = s.target;
+        s.ring_since = Instant::now() - Duration::from_secs(5);
+        s
+    }
+
+    fn measure(&mut self) {
         let (idle, total) = win::cpu_times();
         let (last_idle, last_total) = self.last_cpu;
         self.last_cpu = (idle, total);
@@ -196,283 +136,320 @@ impl System {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let (used, total_mem) = win::memory();
         let (dused, dtotal, _) = win::disk_usage("C:\\");
-        self.metrics = vec![
-            ("CPU", cpu as f32, format!("{} / {cores} núcleos", br(cpu * cores as f64, 1))),
-            ("RAM", (used as f64 / total_mem as f64) as f32, format!("{} / {:.0} GB", br(win::gb(used), 1), win::gb(total_mem))),
-            ("Disco", (dused as f64 / dtotal as f64) as f32, format!("{:.0} / {:.0} GB", win::gb(dused), win::gb(dtotal))),
+        let values = [cpu as f32, (used as f64 / total_mem as f64) as f32, (dused as f64 / dtotal.max(1) as f64) as f32];
+        self.details = [
+            format!("{}% em uso · {cores} núcleos", (cpu * 100.0).round()),
+            format!("{} de {:.0} GB em uso", br(win::gb(used), 1), win::gb(total_mem)),
+            format!("C: {:.0} de {:.0} GB em uso", win::gb(dused), win::gb(dtotal)),
         ];
-        self.next_system = Instant::now() + SYSTEM_EVERY;
-    }
-
-    pub fn update_weather(&mut self, ctx: &mut Ctx) {
-        let w = ctx.cfg[ctx.key].clone();
-        let Some(city) = w.str_of("city").filter(|c| !c.is_empty()).map(String::from) else {
-            self.weather_msg = "Clique para escolher a cidade".into();
-            self.next_weather = None;
-            return;
-        };
-        if self.pending.is_some() {
-            return;
+        // os anéis partem de onde estão agora (mudança pequena: sem animação, para poupar a CPU)
+        let shown = self.shown();
+        let moved = (0..3).any(|i| (values[i] - shown[i]).abs() > 0.008);
+        self.from = if moved { shown } else { values };
+        self.target = values;
+        if moved {
+            self.ring_since = Instant::now();
         }
-        let (lat, lon, place) = (w.f64_of("lat"), w.f64_of("lon"), w.str_of("place").map(String::from));
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(fetch_weather(city, lat, lon, place));
-            crate::events::wake();
-        });
-        self.pending = Some(rx);
-        self.poll_at = Instant::now() + Duration::from_millis(200);
-        self.status.loading = true;
-        self.next_weather = None;
+        let (rx, tx) = sysinfo::net_bytes();
+        let secs = self.last_net.2.elapsed().as_secs_f64().max(0.1);
+        self.rates = (rx.saturating_sub(self.last_net.0) as f64 / secs, tx.saturating_sub(self.last_net.1) as f64 / secs);
+        self.last_net = (rx, tx, Instant::now());
+        self.next = Instant::now() + EVERY;
     }
 
-    /// Troca a cidade; com `place` (escolhida na lista de sugestões) não precisa procurar de novo.
-    pub fn set_city(&mut self, city: &str, place: Option<&Value>, ctx: &mut Ctx) {
-        let w = ctx.wcfg();
-        match place {
-            Some(p) => {
-                let label = p.str_of("label").unwrap_or(city).to_string();
-                w.insert("city".into(), json!(label));
-                w.insert("lat".into(), p["lat"].clone());
-                w.insert("lon".into(), p["lon"].clone());
-                w.insert("place".into(), json!(label));
-            }
-            None => {
-                w.insert("city".into(), json!(city));
-                for k in ["lat", "lon", "place"] {
-                    w.insert(k.into(), Value::Null);
-                }
-            }
+    fn shown(&self) -> [f32; 3] {
+        let t = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS);
+        let mut out = [0.0; 3];
+        for i in 0..3 {
+            out[i] = self.from[i] + (self.target[i] - self.from[i]) * t;
         }
-        ctx.save();
-        self.weather = None;
-        self.weather_msg = "Atualizando…".into();
-        self.pending = None;
-        self.update_weather(ctx);
+        out
     }
 
-    fn receive(&mut self, result: Fetch, ctx: &mut Ctx) {
-        self.status.loading = false;
-        match result {
-            Fetch::NotFound(msg) => {
-                self.weather = None;
-                self.weather_msg = msg;
-                self.status.error = None;
-                self.next_weather = Some(Instant::now() + WEATHER_EVERY);
-            }
-            Fetch::Offline(_) => {
-                // sem conexão: mantém o último clima na tela, com o aviso no canto
-                self.weather_msg = "Sem conexão. Clique para tentar de novo".into();
-                self.status.error = Some("Sem conexão com o serviço do clima".into());
-                self.next_weather = Some(Instant::now() + WEATHER_RETRY);
-            }
-            Fetch::Ok((city, lat, lon, place), data) => {
-                let w = ctx.wcfg();
-                w.insert("city".into(), json!(city));
-                w.insert("lat".into(), json!(lat));
-                w.insert("lon".into(), json!(lon));
-                w.insert("place".into(), json!(place));
-                ctx.save();
-                let cur = &data["current"];
-                let daily = &data["daily"];
-                let code = cur.i64_of("weather_code").unwrap_or(0);
-                let r = |v: &Value| v.as_f64().unwrap_or(0.0).round() as i64;
-                let weather = json!({
-                    "place": place,
-                    "temp": format!("{}°", r(&cur["temperature_2m"])),
-                    "icon": weather_icon(code, cur.i64_of("is_day").unwrap_or(1) != 0),
-                    "desc": wmo(code),
-                    "minmax": format!("Máx. {}°   Mín. {}°", r(&daily["temperature_2m_max"][0]), r(&daily["temperature_2m_min"][0])),
-                    "details": format!("Sensação {}°  ·  Umidade {}%  ·  Vento {} km/h",
-                        r(&cur["apparent_temperature"]), r(&cur["relative_humidity_2m"]), r(&cur["wind_speed_10m"])),
-                    "hours": hours(&data),
-                });
-                self.status.error = None;
-                self.status.updated = Some(win::now());
-                ctx.cache["weather"] = weather.clone();
-                ctx.cache["weather_time"] = json!(self.status.updated);
-                ctx.out.push(super::Request::SaveCache);
-                self.weather = Some(weather);
-                self.check_rain(&data, ctx);
-                self.next_weather = Some(Instant::now() + WEATHER_EVERY);
-            }
+    /// A lista de apps está na tela, mas a primeira leitura ainda não chegou.
+    fn waiting_apps(&self) -> bool {
+        self.list_visible() && self.apps.is_empty() && self.current(self.mode_seen.get()) != Some(2)
+    }
+
+    fn animating(&self) -> bool {
+        self.ring_since.elapsed().as_secs_f32() * 1000.0 < RING_MS || self.bars_since.elapsed().as_secs_f32() * 1000.0 < BARS_MS + 300.0
+    }
+
+    /// A lista está na tela?
+    fn list_visible(&self) -> bool {
+        self.mode_seen.get() == Mode::G || self.selected.is_some()
+    }
+
+    fn current(&self, mode: Mode) -> Option<usize> {
+        if mode == Mode::G { Some(self.selected.unwrap_or(1)) } else { self.selected }
+    }
+
+    fn base_h(mode: Mode) -> f32 {
+        if mode == Mode::P { P_H } else { M_H }
+    }
+
+    fn height(&self, mode: Mode) -> f32 {
+        match mode {
+            Mode::G => G_H,
+            m if self.selected.is_some() => Self::base_h(m) + DETAIL_H + ROW_H * self.list_len() as f32,
+            m => Self::base_h(m),
         }
     }
 
-    /// Avisa quando vai começar a chover na próxima hora (e ainda não está chovendo).
-    fn check_rain(&self, data: &Value, ctx: &mut Ctx) {
-        let cur = &data["current"];
-        if is_rain(cur.i64_of("weather_code").unwrap_or(0)) || cur.f64_of("precipitation").unwrap_or(0.0) > 0.0 {
-            return;
+    /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
+    fn rings_geom(mode: Mode) -> (f32, f32, f32, f32, f32) {
+        if mode == Mode::P { (14.0 + 23.0, P_H / 2.0, 46.0, 5.0, 12.0) } else { (PAD + 60.0, 75.0, 120.0, 11.0, 28.0) }
+    }
+
+    fn ring_at(&self, x: f32, y: f32, mode: Mode) -> Option<usize> {
+        let (cx, cy, d, wd, step) = Self::rings_geom(mode);
+        let r = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        if r > d / 2.0 + 3.0 {
+            return None;
         }
-        let now = cur.str_of("time").and_then(local_minutes);
-        let steps = &data["minutely_15"];
-        let (Some(times), Some(amounts), Some(now)) = (steps["time"].as_array(), steps["precipitation"].as_array(), now) else { return };
-        for (stamp, amount) in times.iter().zip(amounts) {
-            let Some(t) = stamp.as_str().and_then(local_minutes) else { continue };
-            let minutes = t - now;
-            if minutes > 0.0 && minutes <= 60.0 && amount.as_f64().unwrap_or(0.0) >= 0.2 {
-                let place = self.weather.as_ref().and_then(|w| w.str_of("place")).unwrap_or("").split(',').next().unwrap_or("").to_string();
-                let query = format!("https://www.google.com/search?q={}", util::urlencode(&format!("previsão do tempo {place}")));
-                ctx.notify(
-                    "chuva",
-                    "Chuva chegando",
-                    format!("Deve começar a chover em cerca de {} min em {place}.", minutes.round()),
-                    Some(NotifyAction::Open(query)),
-                );
-                return;
-            }
+        // anel 0 por fora; cada anel tem "step/2" de raio
+        let i = ((d / 2.0 - r + (step / 2.0 - wd) / 2.0) / (step / 2.0)).floor().max(0.0) as usize;
+        Some(i.min(2))
+    }
+
+    /// Retângulo da linha (médio/grande) ou coluna (pequeno) de cada recurso.
+    fn metric_rect(mode: Mode, i: usize) -> (f32, f32, f32, f32) {
+        if mode == Mode::P {
+            let x0 = 74.0;
+            let col = (W - x0 - 10.0) / 3.0;
+            (x0 + col * i as f32, 8.0, x0 + col * (i + 1) as f32, P_H - 8.0)
+        } else {
+            let y = 22.0 + 36.0 * i as f32;
+            (148.0, y - 6.0, W - 10.0, y + 30.0)
         }
     }
 
-    fn lay(mode: Mode) -> (f32, f32, f32, f32, f32, Vec<(f32, f32)>) {
-        // (w, h, raio, diâmetro do anel, espessura, centros dos anéis)
-        if mode != Mode::G {
-            let h = if mode == Mode::P { COMPACT_H } else { MEDIUM_H };
-            // anéis encostados na direita, com a mesma margem do cartão
-            let rings = (0..3).map(|i| (WIDTH - 36.0 - 54.0 * (2 - i) as f32, COMPACT_H / 2.0)).collect();
-            return (WIDTH, h, COMPACT_RADIUS, COMPACT_RING_D, COMPACT_RING_W, rings);
-        }
-        let col = (WIDTH - 2.0 * PAD) / 3.0;
-        let rings = (0..3).map(|i| (PAD + col * (i as f32 + 0.5), 188.0 + RING_D / 2.0)).collect();
-        (WIDTH, HEIGHT, RADIUS, RING_D, RING_W, rings)
-    }
-
-    fn ring_at(&self, x: f32, y: f32, mode: Mode) -> Option<(f32, f32, f32, usize)> {
-        let (.., d, _, rings) = Self::lay(mode);
-        rings.iter().enumerate().take(self.metrics.len()).find_map(|(i, &(cx, cy))| {
-            (((x - cx).powi(2) + (y - cy).powi(2)).sqrt() <= d / 2.0 + 2.0).then_some((cx, cy, d / 2.0, i))
+    fn metric_at(x: f32, y: f32, mode: Mode) -> Option<usize> {
+        (0..3).find(|&i| {
+            let (x0, y0, x1, y1) = Self::metric_rect(mode, i);
+            (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
         })
     }
 
-    fn weather_rect(mode: Mode) -> (f32, f32, f32, f32) {
-        if mode != Mode::G {
-            (8.0, 8.0, C_DIVIDER_X - 6.0, COMPACT_H - 8.0)
+    fn seg_rect(i: usize) -> (f32, f32, f32, f32) {
+        let w = (W - 2.0 * PAD - 6.0) / 3.0;
+        let x = PAD + 3.0 + w * i as f32;
+        (x, SEG_Y + 3.0, x + w, SEG_Y + 31.0)
+    }
+
+    fn list_top(&self, mode: Mode) -> f32 {
+        if mode == Mode::G { G_LIST_Y } else { Self::base_h(mode) + 52.0 }
+    }
+
+    fn link_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
+        if mode == Mode::G || self.selected.is_none() {
+            return None;
+        }
+        let y = self.list_top(mode) + ROW_H * self.list_len() as f32 + 4.0;
+        Some((PAD - 6.0, y, 230.0, y + 28.0))
+    }
+
+    fn close_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
+        if mode == Mode::G || self.selected.is_none() {
+            return None;
+        }
+        let y = Self::base_h(mode) + 8.0;
+        Some((W - PAD - 26.0, y, W - PAD, y + 26.0))
+    }
+
+    fn rows(&self, which: usize) -> Vec<Row> {
+        match which {
+            2 => self
+                .drives
+                .iter()
+                .take(LIST_N)
+                .map(|d| Row {
+                    name: d.label.clone(),
+                    value: format!("{:.0} de {:.0} GB", win::gb(d.used), win::gb(d.total)),
+                    frac: d.used as f32 / d.total.max(1) as f32,
+                    icon: d.icon.clone(),
+                })
+                .collect(),
+            _ => {
+                let mut apps: Vec<&AppUse> = self.apps.iter().collect();
+                if which == 0 {
+                    apps.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
+                } else {
+                    apps.sort_by(|a, b| b.mem.cmp(&a.mem));
+                }
+                let apps: Vec<&AppUse> = apps.into_iter().take(LIST_N).collect();
+                let max = apps.first().map(|a| if which == 0 { a.cpu as f64 } else { a.mem as f64 }).unwrap_or(1.0).max(1e-6);
+                apps.into_iter()
+                    .map(|a| {
+                        let v = if which == 0 { a.cpu as f64 } else { a.mem as f64 };
+                        Row {
+                            name: a.name.clone(),
+                            value: if which == 0 { format!("{}%", br(a.cpu as f64, 1)) } else { sysinfo::fmt_bytes(a.mem) },
+                            frac: (v / max) as f32,
+                            icon: a.icon.clone(),
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Quantas linhas a lista aberta ocupa (no disco, uma por unidade).
+    fn list_len(&self) -> usize {
+        match self.selected {
+            Some(2) => self.drives.len().clamp(1, LIST_N),
+            _ => LIST_N,
+        }
+    }
+
+    fn select(&mut self, i: Option<usize>) {
+        self.selected = i;
+        self.bars_since = Instant::now();
+        if i == Some(2) || self.drives_at.is_none() {
+            self.drives = sysinfo::drives();
+            self.drives_at = Some(Instant::now());
+        }
+        self.sampler.set_active(self.list_visible());
+        if let Some(apps) = self.sampler.latest() {
+            self.apps = apps;
+        }
+        // a leitura guardada pode ser antiga: a próxima vem logo
+        self.next = self.next.min(Instant::now() + Duration::from_millis(900));
+        self.due = Instant::now();
+    }
+
+    fn plan(&mut self) {
+        let now = Instant::now();
+        self.due = if self.animating() {
+            now + Duration::from_millis(33)
+        } else if self.waiting_apps() {
+            now + Duration::from_millis(200)
         } else {
-            (PAD - 6.0, 34.0, PAD + 112.0, 94.0)
+            self.next
+        };
+    }
+
+    // ---------- desenho ----------
+
+    fn draw_rings(&self, c: &mut Canvas, mode: Mode) {
+        let (cx, cy, d, wd, step) = Self::rings_geom(mode);
+        let shown = self.shown();
+        let sel = self.current(mode);
+        for (i, v) in shown.iter().enumerate() {
+            let dim = sel.is_some_and(|s| s != i);
+            let col = if dim { color(i).alpha(0.32) } else { color(i) };
+            let di = d - step * i as f32;
+            let rc = di / 2.0 - wd / 2.0;
+            c.stroke_circle(cx, cy, rc, color(i).alpha(if dim { 0.1 } else { 0.22 }), wd);
+            if *v > 0.003 {
+                c.arc(cx, cy, rc, -90.0, -90.0 + 360.0 * v.min(0.999), col, wd);
+            }
         }
     }
 
-    fn on_weather(x: f32, y: f32, mode: Mode) -> bool {
-        let (x0, y0, x1, y1) = Self::weather_rect(mode);
-        let on_icon = mode == Mode::G && (WIDTH - PAD - ICON..=WIDTH - PAD + 4.0).contains(&x) && (12.0..=12.0 + ICON).contains(&y);
-        ((x0..=x1).contains(&x) && (y0..=y1).contains(&y)) || on_icon
-    }
-
-    fn on_hours(x: f32, y: f32, mode: Mode) -> bool {
-        mode == Mode::M && (COMPACT_H + 4.0..=MEDIUM_H - 4.0).contains(&y) && (8.0..=WIDTH - 8.0).contains(&x)
-    }
-
-    fn draw_compact(&self, c: &mut Canvas, mode: Mode) {
-        let cy = COMPACT_H / 2.0;
-        let mut x = 16.0;
-        if let Some(wx) = &self.weather {
-            let size = COMPACT_ICON;
-            c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), 14.0, cy - size / 2.0);
-            x = 14.0 + size + 6.0;
-        }
-        let temp = self.weather.as_ref().and_then(|w| w.str_of("temp")).unwrap_or("--°");
-        c.text(x, cy, temp, Face::Light, 26.0, FG, Anchor::LM, None);
-        c.vline_px(C_DIVIDER_X, 18.0, COMPACT_H - 18.0, DIVIDER);
-        let (.., d, wd, rings) = Self::lay(mode);
-        for (&(rx, ry), (name, frac, _)) in rings.iter().zip(&self.metrics) {
-            let color = if *frac >= 0.9 { RING_FULL } else { ring_color(name) };
-            drawing::ring(c, rx, ry, d, wd, *frac, color);
-            c.text(rx, ry, &format!("{}%", (frac * 100.0).round()), Face::Semibold, 10.0, FG, Anchor::MM, None);
-        }
-        if mode == Mode::M {
-            self.draw_hours(c);
+    fn draw_metrics(&self, c: &mut Canvas, mode: Mode) {
+        let shown = self.shown();
+        let sel = self.current(mode);
+        for i in 0..3 {
+            let (x0, y0, x1, _) = Self::metric_rect(mode, i);
+            let pct = format!("{}%", (self.target[i] * 100.0).round());
+            let dim = sel.is_some_and(|s| s != i) && mode != Mode::G;
+            let text = if dim { MUTED } else { FG };
+            if mode == Mode::P {
+                c.fill_circle(x0 + 8.0, y0 + 13.0, 3.5, color(i));
+                c.text(x0 + 15.0, y0 + 13.0, NAMES[i], Face::Regular, 11.0, MUTED, Anchor::LM, None);
+                c.text(x0 + 4.0, y0 + 34.0, &pct, Face::Semibold, 16.0, text, Anchor::LM, None);
+            } else {
+                let y = y0 + 6.0;
+                c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
+                c.text(x0 + 13.0, y + 7.0, NAMES[i], Face::Regular, 12.0, MUTED, Anchor::LM, None);
+                c.text(x1 - 6.0, y + 7.0, &pct, Face::Semibold, 13.5, text, Anchor::RM, None);
+                let (bx0, bx1, by) = (x0, x1 - 6.0, y + 19.0);
+                c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.12));
+                let w = (bx1 - bx0) * shown[i].clamp(0.0, 1.0);
+                if w > 1.0 {
+                    c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(i));
+                }
+            }
         }
     }
 
-    fn hour_columns() -> Vec<f32> {
-        let col = (WIDTH - 32.0) / HOURS as f32;
-        (0..HOURS).map(|i| 16.0 + col * (i as f32 + 0.5)).collect()
-    }
-
-    /// Faixa com a previsão das próximas horas (tamanho médio).
-    fn draw_hours(&self, c: &mut Canvas) {
-        c.hline_px(PAD, WIDTH - PAD, COMPACT_H, DIVIDER);
-        let hours = self.weather.as_ref().and_then(|w| w["hours"].as_array().cloned()).unwrap_or_default();
-        if hours.is_empty() {
-            let msg = if self.weather.is_none() { self.weather_msg.as_str() } else { "Previsão por hora indisponível" };
-            c.text(WIDTH / 2.0, (COMPACT_H + MEDIUM_H) / 2.0, msg, Face::Regular, 12.0, MUTED, Anchor::MM, Some(WIDTH - 40.0));
+    fn draw_list(&self, c: &mut Canvas, mode: Mode, which: usize, y0: f32) {
+        let rows = self.rows(which);
+        if rows.is_empty() {
+            let msg = if which == 2 { "Nenhuma unidade encontrada" } else { "Lendo os apps…" };
+            c.text(W / 2.0, y0 + 40.0, msg, Face::Regular, 12.0, MUTED, Anchor::MM, None);
             return;
         }
-        let icon = 28.0;
-        for (cx, hour) in Self::hour_columns().into_iter().zip(hours) {
-            let (label, name, temp) = (hour[0].as_str().unwrap_or(""), hour[1].as_str().unwrap_or("clouds"), hour[2].as_str().unwrap_or(""));
-            c.text(cx, COMPACT_H + 10.0, label, Face::Regular, 10.5, MUTED, Anchor::MA, None);
-            c.image(&weather_art(name, (icon * c.s).round() as u32), cx - icon / 2.0, COMPACT_H + 30.0);
-            c.text(cx, COMPACT_H + 64.0, temp, Face::Semibold, 12.0, FG, Anchor::MA, None);
+        let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
+        for (n, row) in rows.iter().enumerate() {
+            let y = y0 + ROW_H * n as f32;
+            let icon = 26.0;
+            let ix = PAD;
+            match &row.icon {
+                Some(img) => {
+                    let s = c.s;
+                    c.image_px(img, (ix * s).round(), ((y + 5.0) * s).round(), (icon * s).round(), (icon * s).round(), 1.0);
+                }
+                None => {
+                    c.fill_round_rect(ix, y + 5.0, ix + icon, y + 5.0 + icon, 7.0, WHITE.alpha(0.16));
+                    let letter: String = row.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                    c.text(ix + icon / 2.0, y + 5.0 + icon / 2.0, &letter, Face::Semibold, 12.0, FG, Anchor::MM, None);
+                }
+            }
+            let tx = ix + icon + 10.0;
+            let vw = c.text(W - PAD, y + 12.0, &row.value, Face::Regular, 12.0, MUTED, Anchor::RM, None);
+            c.text(tx, y + 12.0, &row.name, Face::Regular, 12.5, FG, Anchor::LM, Some(W - PAD - tx - vw - 10.0));
+            let (bx0, bx1, by) = (tx, W - PAD, y + 24.0);
+            c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.1));
+            // as barras enchem uma depois da outra
+            let t = ease_out((since - n as f32 * 55.0) / BARS_MS);
+            let w = (bx1 - bx0) * row.frac.clamp(0.0, 1.0) * t;
+            if w > 1.0 {
+                c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(which));
+            }
+        }
+        let _ = mode;
+    }
+
+    fn draw_detail(&self, c: &mut Canvas, mode: Mode, which: usize) {
+        let y = Self::base_h(mode);
+        c.hline_px(PAD, W - PAD, y, DIVIDER);
+        c.text(PAD, y + 13.0, TITLES[which], Face::Semibold, 14.0, FG, Anchor::LA, None);
+        c.text(PAD, y + 31.0, &self.details[which], Face::Regular, 11.5, MUTED, Anchor::LA, None);
+        if let Some((x0, y0, x1, y1)) = self.close_rect(mode) {
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            c.fill_circle(cx, cy, 13.0, WHITE.alpha(0.12));
+            c.line(&[(cx - 4.5, cy + 2.2), (cx, cy - 2.3), (cx + 4.5, cy + 2.2)], FG, 1.8);
+        }
+        self.draw_list(c, mode, which, self.list_top(mode));
+        if let Some((x0, y0, _, y1)) = self.link_rect(mode) {
+            let label = if which == 2 { "Abrir o Explorador de Arquivos" } else { "Abrir o Gerenciador de Tarefas" };
+            let tw = c.text(x0 + 6.0, (y0 + y1) / 2.0, label, Face::Semibold, 12.5, Rgba::rgb(90, 200, 250), Anchor::LM, None);
+            let (ax, ay) = (x0 + 6.0 + tw + 8.0, (y0 + y1) / 2.0);
+            c.line(&[(ax - 3.0, ay + 3.0), (ax + 3.0, ay - 3.0)], Rgba::rgb(90, 200, 250), 1.6);
+            c.line(&[(ax - 1.5, ay - 3.0), (ax + 3.0, ay - 3.0), (ax + 3.0, ay + 1.5)], Rgba::rgb(90, 200, 250), 1.6);
         }
     }
 
-    fn draw_full(&self, c: &mut Canvas, env: &Env) {
-        let inner = WIDTH - 2.0 * PAD;
-        let wcfg = env.wcfg();
-        let city = self
-            .weather
-            .as_ref()
-            .and_then(|w| w.str_of("place"))
-            .or(wcfg.str_of("place"))
-            .or(wcfg.str_of("city"))
-            .unwrap_or("Clima")
-            .to_string();
-        c.text(PAD, 18.0, &city, Face::Semibold, 14.0, FG, Anchor::LA, Some(inner - ICON - 4.0));
-        let temp = self.weather.as_ref().and_then(|w| w.str_of("temp")).unwrap_or("--°");
-        c.text(PAD - 2.0, 34.0, temp, Face::Light, 48.0, FG, Anchor::LA, None);
-        if let Some(wx) = &self.weather {
-            let size = ICON;
-            c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), WIDTH - PAD - size + 4.0, 12.0);
-            c.text(PAD, 100.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 13.0, FG, Anchor::LA, Some(inner));
-            c.text(PAD, 120.0, wx.str_of("minmax").unwrap_or(""), Face::Regular, 12.0, MUTED, Anchor::LA, None);
-            c.text(PAD, 145.0, wx.str_of("details").unwrap_or(""), Face::Regular, 11.0, MUTED, Anchor::LA, Some(inner));
-        } else {
-            c.text(PAD, 100.0, &self.weather_msg, Face::Semibold, 13.0, FG, Anchor::LA, Some(inner));
-        }
-        c.hline_px(PAD, WIDTH - PAD, 172.0, DIVIDER);
-        let (.., d, wd, rings) = Self::lay(Mode::G);
-        for (&(cx, cy), (name, frac, detail)) in rings.iter().zip(&self.metrics) {
-            let color = if *frac >= 0.9 { RING_FULL } else { ring_color(name) };
-            drawing::ring(c, cx, cy, d, wd, *frac, color);
-            c.text(cx, cy, &format!("{}%", (frac * 100.0).round()), Face::Semibold, 15.0, FG, Anchor::MM, None);
-            c.text(cx, cy + RING_D / 2.0 + 10.0, name, Face::Semibold, 12.0, FG, Anchor::MA, None);
-            c.text(cx, cy + RING_D / 2.0 + 27.0, detail, Face::Regular, 11.0, MUTED, Anchor::MA, None);
+    fn draw_seg(&self, c: &mut Canvas, which: usize) {
+        c.fill_round_rect(PAD, SEG_Y, W - PAD, SEG_Y + 34.0, 10.0, WHITE.alpha(0.08));
+        for i in 0..3 {
+            let (x0, y0, x1, y1) = Self::seg_rect(i);
+            if i == which {
+                c.fill_round_rect(x0, y0, x1, y1, 8.0, WHITE.alpha(0.18));
+            }
+            c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, NAMES[i], if i == which { Face::Semibold } else { Face::Regular }, 12.0, if i == which { FG } else { MUTED }, Anchor::MM, None);
         }
     }
 
-    fn forecast_url(env: &Env) -> String {
-        let w = env.wcfg();
-        let place = w.str_of("place").or(w.str_of("city")).unwrap_or("");
-        format!("https://www.google.com/search?q={}", util::urlencode(&format!("previsão do tempo {place}")))
+    fn draw_footer(&self, c: &mut Canvas) {
+        let y = G_FOOT_Y;
+        c.hline_px(PAD, W - PAD, y, DIVIDER);
+        let net = format!("↓ {}   ↑ {}", sysinfo::fmt_rate(self.rates.0), sysinfo::fmt_rate(self.rates.1));
+        c.text(PAD, y + 17.0, &net, Face::Regular, 11.5, MUTED, Anchor::LM, None);
+        c.text(W - PAD, y + 17.0, &format!("Ligado há {}", sysinfo::fmt_uptime(sysinfo::uptime())), Face::Regular, 11.5, MUTED, Anchor::RM, None);
     }
-}
-
-/// Minutos desde a meia-noite de "2026-10-31T14:15" (o horário local que a Open-Meteo devolve).
-fn local_minutes(stamp: &str) -> Option<f64> {
-    let days = util::parse_date(stamp)? as f64;
-    let h: f64 = stamp.get(11..13)?.parse().ok()?;
-    let m: f64 = stamp.get(14..16)?.parse().ok()?;
-    Some(days * 1440.0 + h * 60.0 + m)
-}
-
-fn hours(data: &Value) -> Value {
-    let hourly = &data["hourly"];
-    let empty = Vec::new();
-    let times = hourly["time"].as_array().unwrap_or(&empty);
-    let temps = hourly["temperature_2m"].as_array().unwrap_or(&empty);
-    let codes = hourly["weather_code"].as_array().unwrap_or(&empty);
-    let days = hourly["is_day"].as_array().unwrap_or(&empty);
-    let mut out = Vec::new();
-    for i in 0..HOURS.min(times.len()).min(temps.len()).min(codes.len()) {
-        let stamp = times[i].as_str().unwrap_or("");
-        let label = if i == 0 { "Agora".to_string() } else { format!("{}h", stamp.get(11..13).and_then(|h| h.parse::<i32>().ok()).unwrap_or(0)) };
-        let code = codes[i].as_i64().unwrap_or(0);
-        let is_day = days.get(i).and_then(Value::as_i64).unwrap_or(1) != 0;
-        out.push(json!([label, weather_icon(code, is_day), format!("{}°", temps[i].as_f64().unwrap_or(0.0).round() as i64)]));
-    }
-    Value::Array(out)
 }
 
 impl Kind for System {
@@ -480,37 +457,63 @@ impl Kind for System {
         "sistema"
     }
     fn title(&self) -> &'static str {
-        "Clima e Sistema"
+        "Sistema"
+    }
+    fn default_mode(&self) -> Mode {
+        Mode::M
     }
 
     fn layout(&self, mode: Mode) -> Layout {
-        let (w, h, radius, ..) = Self::lay(mode);
-        Layout { w, h, radius }
+        let radius = match mode {
+            Mode::P => 22.0,
+            Mode::M => 24.0,
+            Mode::G => 26.0,
+        };
+        Layout { w: W, h: self.height(mode), radius }
     }
 
-    fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
-        if mode == Mode::G {
-            self.draw_full(c, env);
-        } else {
-            self.draw_compact(c, mode);
+    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+        if self.mode_seen.get() != mode {
+            self.mode_seen.set(mode);
+            self.sampler.set_active(self.list_visible());
+        }
+        self.draw_rings(c, mode);
+        self.draw_metrics(c, mode);
+        match mode {
+            Mode::G => {
+                let which = self.current(mode).unwrap_or(1);
+                self.draw_seg(c, which);
+                self.draw_list(c, mode, which, G_LIST_Y);
+                self.draw_footer(c);
+            }
+            _ => {
+                if let Some(which) = self.selected {
+                    self.draw_detail(c, mode, which);
+                }
+            }
         }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
-        let shortcuts = env.shortcuts();
-        if let Some((.., i)) = self.ring_at(x, y, mode) {
-            if shortcuts {
-                return Some(if self.metrics[i].0 == "Disco" { OPEN_STORAGE } else { OPEN_TASKMGR });
+        let inside = |r: Option<(f32, f32, f32, f32)>| r.is_some_and(|(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+        if inside(self.close_rect(mode)) {
+            return Some(CLOSE);
+        }
+        if inside(self.link_rect(mode)) {
+            return Some(if self.selected == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
+        }
+        if mode == Mode::G {
+            if let Some(i) = (0..3).find(|&i| inside(Some(Self::seg_rect(i)))) {
+                return Some(SELECT + i as u32);
+            }
+            if y >= G_LIST_Y && y < G_FOOT_Y && env.shortcuts() {
+                return Some(if self.current(mode) == Some(2) { OPEN_EXPLORER } else { OPEN_TASKMGR });
             }
         }
-        if Self::on_weather(x, y, mode) || Self::on_hours(x, y, mode) {
-            if env.wcfg().str_of("city").is_none_or(str::is_empty) {
-                return Some(ASK_CITY);
+        if y < Self::base_h(mode) {
+            if let Some(i) = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode)) {
+                return Some(SELECT + i as u32);
             }
-            if self.weather.is_none() {
-                return self.status.error.as_ref().map(|_| UPDATE_WEATHER);
-            }
-            return shortcuts.then_some(OPEN_FORECAST);
         }
         None
     }
@@ -518,130 +521,124 @@ impl Kind for System {
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
             OPEN_TASKMGR => ctx.open("taskmgr.exe"),
-            OPEN_STORAGE => ctx.open("ms-settings:storagesense"),
-            OPEN_FORECAST => {
-                let url = Self::forecast_url(&ctx.env());
-                ctx.open(url);
+            OPEN_EXPLORER => ctx.open("shell:MyComputerFolder"),
+            CLOSE => self.select(None),
+            a if (SELECT..SELECT + 3).contains(&a) => {
+                let i = (a - SELECT) as usize;
+                let mode = self.mode_seen.get();
+                // no pequeno e no médio, clicar de novo no mesmo anel fecha a lista
+                let next = if mode != Mode::G && self.selected == Some(i) { None } else { Some(i) };
+                self.select(next);
             }
-            UPDATE_WEATHER => self.update_weather(ctx),
-            ASK_CITY => ctx.out.push(super::Request::Ask("city")),
             _ => {}
         }
     }
 
     fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
-        if let Some((cx, cy, r, _)) = self.ring_at(x, y, mode) {
-            return Some((cx - r - 4.0, cy - r - 4.0, cx + r + 4.0, cy + r + 4.0, r + 4.0));
+        let inside = |r: Option<(f32, f32, f32, f32)>| r.filter(|&(x0, y0, x1, y1)| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+        if let Some((x0, y0, x1, y1)) = inside(self.close_rect(mode)) {
+            return Some((x0, y0, x1, y1, 13.0));
         }
-        if Self::on_hours(x, y, mode) {
-            return Some((8.0, COMPACT_H + 4.0, WIDTH - 8.0, MEDIUM_H - 6.0, 14.0));
+        if let Some((x0, y0, x1, y1)) = inside(self.link_rect(mode)) {
+            return Some((x0, y0, x1, y1, 10.0));
         }
-        if Self::on_weather(x, y, mode) {
-            if mode == Mode::G && x > PAD + 112.0 {
-                return Some((WIDTH - PAD - ICON, 10.0, WIDTH - PAD + 4.0, 14.0 + ICON, 14.0));
+        if y < Self::base_h(mode) {
+            if let Some(i) = self.ring_at(x, y, mode) {
+                let (cx, cy, d, ..) = Self::rings_geom(mode);
+                let _ = i;
+                let r = d / 2.0 + 4.0;
+                return Some((cx - r, cy - r, cx + r, cy + r, r));
             }
-            let (x0, y0, x1, y1) = Self::weather_rect(mode);
-            return Some((x0, y0, x1, y1, 12.0));
+            if let Some(i) = Self::metric_at(x, y, mode) {
+                let (x0, y0, x1, y1) = Self::metric_rect(mode, i);
+                return Some((x0 - 4.0, y0, x1, y1, 10.0));
+            }
         }
         None
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
-        if let Some((.., i)) = self.ring_at(x, y, mode) {
-            let (name, frac, detail) = &self.metrics[i];
-            let action = if *name == "Disco" { "as configurações de armazenamento" } else { "o Gerenciador de Tarefas" };
-            let mut lines = vec![format!("{name}  ·  {}%", (frac * 100.0).round()), detail.clone()];
-            if env.shortcuts() {
-                lines.push(format!("Clique para abrir {action}"));
-            }
-            return Some(lines.join("\n"));
+    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
+        if y >= Self::base_h(mode) {
+            return None;
         }
-        let wx = self.weather.as_ref();
-        if Self::on_hours(x, y, mode) {
-            return wx.map(|_| "Próximas horas\nClique para ver a previsão completa".to_string());
-        }
-        if Self::on_weather(x, y, mode) {
-            let Some(wx) = wx else {
-                return self.status.error.as_ref().map(|_| "Clique para tentar de novo".to_string());
-            };
-            let mut lines = vec![
-                format!("{}  ·  {}", wx.str_of("desc").unwrap_or(""), wx.str_of("temp").unwrap_or("")),
-                wx.str_of("minmax").unwrap_or("").to_string(),
-            ];
-            if mode != Mode::G {
-                lines.push(wx.str_of("details").unwrap_or("").to_string());
-            }
-            if let Some(t) = self.status.updated {
-                lines.push(format!("Atualizado {}", util::time_ago(t)));
-            }
-            if env.shortcuts() {
-                lines.push("Clique para ver a previsão".into());
-            }
-            return Some(lines.join("\n"));
-        }
-        None
+        let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
+        let action = if mode != Mode::G && self.selected == Some(i) {
+            "Clique para fechar a lista"
+        } else if i == 2 {
+            "Clique para ver as unidades"
+        } else {
+            "Clique para ver os apps que mais usam"
+        };
+        Some(format!("{}  ·  {}%\n{}\n{action}", TITLES[i], (self.target[i] * 100.0).round(), self.details[i]))
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
-        vec![MenuItem::Cmd("Atualizar clima".into(), UPDATE_WEATHER), MenuItem::Cmd("Mudar cidade…".into(), ASK_CITY)]
+        vec![MenuItem::Cmd("Abrir o Gerenciador de Tarefas".into(), OPEN_TASKMGR)]
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        let mut next = self.next_system;
-        if let Some(w) = self.next_weather {
-            next = next.min(w);
-        }
-        if self.pending.is_some() {
-            next = next.min(self.poll_at);
-        }
-        Some(next)
+        Some(self.due)
     }
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
-        let now = Instant::now();
-        let mut changed = false;
-        if let Some(rx) = &self.pending {
-            match rx.try_recv() {
-                Ok(result) => {
-                    self.pending = None;
-                    self.receive(result, ctx);
-                    changed = true;
-                }
-                // a thread morreu sem responder: trata como "sem conexão" (não fica carregando para sempre)
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.pending = None;
-                    self.receive(Fetch::Offline("falha inesperada".into()), ctx);
-                    changed = true;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => self.poll_at = now + Duration::from_millis(200),
-            }
-        }
-        if self.next_weather.is_some_and(|t| now >= t) {
-            self.update_weather(ctx);
-            changed = true;
-        }
-        if now >= self.next_system {
-            self.update_system();
-            changed = true;
-        }
+        let changed = self.step(ctx);
+        self.plan();
         changed
     }
 
     fn status(&self) -> Status {
         self.status.clone()
     }
+}
 
-    fn retry(&mut self, ctx: &mut Ctx) {
-        self.update_weather(ctx);
-    }
-
-    fn input(&mut self, field: &str, value: &str, extra: Option<&Value>, ctx: &mut Ctx) {
-        if field == "city" {
-            self.set_city(value, extra, ctx);
+impl System {
+    fn step(&mut self, _ctx: &mut Ctx) -> bool {
+        let now = Instant::now();
+        // a primeira leitura dos apps chegou: as barras enchem a partir de agora
+        if self.waiting_apps() {
+            if let Some(apps) = self.sampler.latest() {
+                self.apps = apps;
+                self.bars_since = now;
+                return true;
+            }
         }
+        if now >= self.next {
+            self.measure();
+            if self.list_visible() {
+                if let Some(apps) = self.sampler.latest() {
+                    self.apps = apps;
+                }
+                if self.current(self.mode_seen.get()) == Some(2) && self.drives_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                    self.drives = sysinfo::drives();
+                    self.drives_at = Some(now);
+                }
+            }
+            return true;
+        }
+        self.animating()
     }
+}
 
-    fn start(&mut self, ctx: &mut Ctx) {
-        self.update_weather(ctx);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // desenha num PNG: cargo test -- --ignored
+    fn draw_sizes() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let cfg = serde_json::json!({"sistema": {}, "app": {}});
+        for (mode, name) in [(Mode::M, "m"), (Mode::G, "g"), (Mode::P, "p")] {
+            let s = System::sample();
+            let l = s.layout(mode);
+            let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
+            c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
+            s.draw(&mut c, mode, &Env { cfg: &cfg, key: "sistema" });
+            let path = std::env::temp_dir().join(format!("sistema_{name}.png"));
+            crate::gfx::save_png(&c.finish(), &path).unwrap();
+            println!("{}", path.display());
+        }
     }
 }

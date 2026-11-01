@@ -413,7 +413,7 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
     let (pw, ph) = ((w * s).round() as u32, (h * s).round() as u32);
     let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version);
     if st.preview.as_ref().map(|p| p.0) != Some(key) {
-        let which = ["pomodoro", "sistema", "midia", "github"].into_iter().find(|k| v.visible.contains(k)).unwrap_or("sistema");
+        let which = ["pomodoro", "tempo", "sistema", "midia", "github"].into_iter().find(|k| v.visible.contains(k)).unwrap_or("tempo");
         if let Some((content, radius)) = (v.render)(which, Mode::P, s) {
             let mut stage = v.sh.backdrop.region(sx, sy, pw, ph, true).to_image();
             let cx = (pw as i32 - content.w as i32) / 2;
@@ -511,6 +511,20 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
     let notify = |kind: &'static str| sw(notify_id(kind), config::notify_enabled(&v.sh.cfg, kind), A::Notify(kind));
     match key {
         "sistema" => {
+            let y = section(ui, x, y, "Ao clicar nos anéis");
+            let y = rows(ui, x, y, w, vec![Row(
+                "Apps que mais usam".into(),
+                Some("CPU e memória mostram os 5 apps que mais usam; o disco mostra as unidades".into()),
+                Control::None,
+            )]);
+            let y = section(ui, x, y, "Avisos");
+            rows(ui, x, y, w, vec![
+                Row(NOTIFY[0].1.into(), Some(NOTIFY[0].2.into()), notify("cpu")),
+                Row(NOTIFY[1].1.into(), Some(NOTIFY[1].2.into()), notify("ram")),
+                Row(NOTIFY[2].1.into(), Some(NOTIFY[2].2.into()), notify("disco")),
+            ])
+        }
+        "tempo" => {
             let place = wcfg.str_of("place").or(wcfg.str_of("city")).unwrap_or("");
             let y = section(ui, x, y, "Clima");
             let entry_top = y;
@@ -518,7 +532,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Cidade".into(), Some(if place.is_empty() { "Nenhuma cidade escolhida".into() } else { format!("Agora: {place}") }),
                     Control::Entry("cidade", place.into(), "Digite e escolha na lista".into(), 300.0)),
                 Row("Atualizar agora".into(), Some("O clima atualiza sozinho a cada 15 minutos".into()),
-                    if visible { Control::Button("atualizar_clima", "Atualizar".into(), A::Widget("sistema", widgets::system::UPDATE_WEATHER), "secondary", Some("refresh")) } else { Control::None }),
+                    if visible { Control::Button("atualizar_clima", "Atualizar".into(), A::Widget("tempo", widgets::tempo::UPDATE_WEATHER), "secondary", Some("refresh")) } else { Control::None }),
                 Row("Avisar quando for chover".into(), Some(NOTIFY[3].2.into()), notify("chuva")),
             ]);
             // sugestões por cima do resto da página (a primeira linha tem 66 de altura)
@@ -531,7 +545,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
             rows(ui, x, y, w, vec![
                 Row("Mostrar".into(), Some("Qual player o widget acompanha quando há mais de um tocando".into()),
                     Control::Seg("fonte", options, wcfg.str_of("fonte").unwrap_or("auto").into())),
-                Row("Roda do mouse".into(), Some("Sobre o widget, ajusta o volume do Windows".into()), Control::None),
+                Row("Roda do mouse".into(), Some("Sobre o widget, ajusta o volume do app que está tocando (ou o do Windows)".into()), Control::None),
             ])
         }
         "github" => {
@@ -578,6 +592,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
 
 pub fn size_id(key: &str) -> &'static str {
     match key {
+        "tempo" => "tamanho:tempo",
         "sistema" => "tamanho:sistema",
         "midia" => "tamanho:midia",
         "github" => "tamanho:github",

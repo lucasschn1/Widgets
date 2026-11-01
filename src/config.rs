@@ -34,6 +34,7 @@ pub fn load_config(widget_keys: &[&str]) -> Value {
     }
     let mut cfg = read_json(&dir.join("config.json"));
     let map = cfg.as_object_mut().unwrap();
+    split_weather(map);
     for key in widget_keys {
         if !map.get(*key).is_some_and(Value::is_object) {
             map.insert(key.to_string(), json!({}));
@@ -43,6 +44,40 @@ pub fn load_config(widget_keys: &[&str]) -> Value {
         map.insert("app".into(), json!({}));
     }
     cfg
+}
+
+/// Versão 3.1: o "Clima e Sistema" virou dois widgets. O Tempo fica no lugar dele, com a cidade;
+/// o Sistema vai para logo abaixo (o App acerta a posição ao abrir, pela marca "sistema_abaixo").
+fn split_weather(map: &mut Map<String, Value>) {
+    if map.contains_key("tempo") {
+        return;
+    }
+    let Some(old) = map.get("sistema").and_then(Value::as_object).cloned() else { return };
+    let mut tempo = Map::new();
+    for k in ["city", "lat", "lon", "place", "x", "y", "tamanho", "visible"] {
+        if let Some(v) = old.get(k) {
+            tempo.insert(k.into(), v.clone());
+        }
+    }
+    let mut system = Map::new();
+    for k in ["tamanho", "visible"] {
+        if let Some(v) = old.get(k) {
+            system.insert(k.into(), v.clone());
+        }
+    }
+    if old.contains_key("x") {
+        system.insert("sistema_abaixo".into(), json!(true));
+    }
+    map.insert("tempo".into(), Value::Object(tempo));
+    map.insert("sistema".into(), Value::Object(system));
+    // layouts salvos: o Tempo fica onde o widget antigo estava
+    if let Some(layouts) = map.get_mut("app").and_then(|a| a.get_mut("layouts")).and_then(Value::as_object_mut) {
+        for layout in layouts.values_mut().filter_map(Value::as_object_mut) {
+            if let Some(entry) = layout.remove("sistema") {
+                layout.insert("tempo".into(), entry);
+            }
+        }
+    }
 }
 
 pub fn save_config(cfg: &Value) {

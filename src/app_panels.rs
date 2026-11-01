@@ -76,7 +76,7 @@ impl App {
             Purpose::City => (
                 "Cidade do clima",
                 "Digite o nome da cidade e escolha na lista.",
-                self.sh.cfg["sistema"].str_of("city").unwrap_or("").into(),
+                self.sh.cfg["tempo"].str_of("city").unwrap_or("").into(),
                 "Ex.: São Paulo",
             ),
             Purpose::GitHubUser => (
@@ -635,13 +635,13 @@ impl App {
     }
 
     pub(super) fn apply_city(&mut self, text: &str, place: Option<Value>) {
-        match self.find("sistema") {
+        match self.find("tempo") {
             Some(j) => {
                 self.with_kind(j, |k, ctx| k.input("city", text, place.as_ref(), ctx));
                 self.cards[j].refresh(&self.sh);
             }
             None => {
-                let w = self.sh.cfg.obj_mut("sistema");
+                let w = self.sh.cfg.obj_mut("tempo");
                 match &place {
                     Some(p) => {
                         w.insert("city".into(), p["label"].clone());
@@ -727,7 +727,7 @@ impl App {
                 self.set_visible(key, on);
             }
         }
-        let system = &self.sh.cfg["sistema"];
+        let system = &self.sh.cfg["tempo"];
         if !city.is_empty() && Some(city.as_str()) != system.str_of("place").or(system.str_of("city")) {
             self.apply_city(&city, place);
         }

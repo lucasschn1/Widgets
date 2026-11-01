@@ -473,6 +473,19 @@ impl Canvas {
         }
     }
 
+    /// Retângulo (arredondado) com degradê horizontal; as posições das cores vão de gx0 a gx1.
+    pub fn gradient_h(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, stops: &[(f32, Rgba)], gx0: f32, gx1: f32) {
+        let s = self.s;
+        unsafe {
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(p, c)| D2D1_GRADIENT_STOP { position: p, color: color(c) }).collect();
+            let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(gx0 * s, 0.0), endPoint: v2(gx1 * s, 0.0) };
+            let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
+            let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
+            self.rt.FillRoundedRectangle(&rr, &brush);
+        }
+    }
+
     /// Contorno arredondado com degradê vertical (a borda clara do vidro).
     pub fn gradient_stroke_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, top: Rgba, bottom: Rgba, width: f32) {
         let s = self.s;

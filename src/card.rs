@@ -87,6 +87,9 @@ pub struct Card {
     pub status: Status,
     /// quadros por segundo da camada animada do widget (0: parada)
     pub fps: u32,
+    /// cresceu ou encolheu sem mudar de tamanho (abriu detalhes): (altura antiga, diferença), em
+    /// pixels, para o App levar junto os widgets de baixo
+    pub grew: Option<(i32, i32)>,
     loading_since: Instant,
     last_frame: Instant,
 }
@@ -118,6 +121,7 @@ impl Card {
             close_hot: false,
             status: Status::default(),
             fps: 0,
+            grew: None,
             loading_since: Instant::now(),
             last_frame: Instant::now(),
         }
@@ -222,11 +226,44 @@ impl Card {
             return;
         }
         self.stale = false;
+        if self.regrow(sh) {
+            return;
+        }
         self.content = Some(self.render(self.mode, sh));
         self.composed = None; // o vidro guardado tinha o conteúdo antigo dentro
         if self.anim.is_none() {
             self.present(sh, false);
         }
+    }
+
+    /// O widget mudou de altura no mesmo tamanho (ex.: abriu os detalhes de um anel): em vez de
+    /// pular, anima do desenho antigo para o novo. Devolve true se começou a animar.
+    fn regrow(&mut self, sh: &Shared) -> bool {
+        let Some(old) = &self.content else { return false };
+        let (w, h) = self.card_size();
+        if self.anim.is_some() || (old.w as i32, old.h as i32) == (w, h) || old.w as i32 != w {
+            return false;
+        }
+        let old = self.content.take().unwrap();
+        let old_h = old.h as i32;
+        let new = self.render(self.mode, sh);
+        let r = self.radius_px(self.mode);
+        self.anim = Some(ResizeAnim {
+            old,
+            new,
+            r0: r,
+            r1: r,
+            x: self.pos.0,
+            y: self.pos.1,
+            start: Instant::now(),
+            dur: Duration::from_millis(if sh.animations { GROW_MS } else { 0 }),
+            save: false,
+            right: false,
+        });
+        self.hot = None;
+        self.composed = None;
+        self.grew = Some((old_h, h - old_h));
+        true
     }
 
     /// Opacidade da janela: os widgets esmaecem quando o mouse não está em cima.

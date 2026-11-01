@@ -92,7 +92,7 @@ impl WelcomeState {
         if !chosen.values().any(|v| *v) {
             chosen.values_mut().for_each(|v| *v = true);
         }
-        let system = &cfg["sistema"];
+        let system = &cfg["tempo"];
         WelcomeState {
             step: 0,
             chosen,
@@ -197,7 +197,7 @@ fn step_personal(st: &WelcomeState, ui: &mut Ui, x: f32, y: f32, w: f32) {
     ui.text(x, y + 11.0, "Iniciar com o Windows", 13.0, FG, Face::Semibold, Anchor::LM, None);
     ui.text(x, y + 31.0, "Os widgets abrem sozinhos quando você entra", 11.0, MUTED, Face::Regular, Anchor::LM, None);
     ui.switch("iniciar", fx, y, st.startup, A::Toggle("welcome_startup"), None);
-    if !st.chosen.get("sistema").copied().unwrap_or(false) {
+    if !st.chosen.get("tempo").copied().unwrap_or(false) {
         ui.text(fx, y + 60.0, "O widget de clima não foi escolhido; a cidade fica guardada para depois.", 11.0, FAINT, Face::Regular, Anchor::LA, None);
     }
     st.city.draw(ui, fx, sug_y, fw);

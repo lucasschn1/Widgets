@@ -177,8 +177,9 @@ impl App {
         for key in visible {
             app.create_card(key, true);
         }
+        app.place_split_system();
         if app.cards.is_empty() && !app.tray.ok {
-            app.create_card("sistema", true); // sem bandeja, não pode ficar sem nada na tela
+            app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
         app.sh.save();
         if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
@@ -275,6 +276,31 @@ impl App {
             win::set_z(hwnd, Z::Topmost);
         }
         Some(i)
+    }
+
+    /// Depois de separar o "Clima e Sistema": o Sistema entra logo abaixo do Tempo, e os widgets
+    /// que estavam embaixo descem para abrir espaço.
+    fn place_split_system(&mut self) {
+        if !self.sh.cfg["sistema"].bool_of("sistema_abaixo").unwrap_or(false) {
+            return;
+        }
+        self.sh.cfg.obj_mut("sistema").remove("sistema_abaixo");
+        let (Some(t), Some(s)) = (self.find("tempo"), self.find("sistema")) else { return };
+        let below: Vec<usize> = self.stack_below(t, None).into_iter().filter(|&j| j != s).collect();
+        let pos = self.cards[s].below(&self.cards[t]);
+        let shift = self.cards[s].card_size().1 + (WIDGET_GAP * self.cards[s].s).round() as i32;
+        self.cards[s].pos = pos;
+        self.cards[s].present(&self.sh, true);
+        for j in below.into_iter().chain([s]) {
+            if j != s {
+                self.cards[j].pos.1 += shift;
+                self.cards[j].present(&self.sh, true);
+            }
+            let (key, (x, y)) = (self.cards[j].key(), self.cards[j].pos);
+            let w = self.sh.cfg.obj_mut(key);
+            w.insert("x".into(), json!(x));
+            w.insert("y".into(), json!(y));
+        }
     }
 
     /// Onde um widget novo aparece: embaixo do mais baixo, ou numa coluna nova à esquerda.
@@ -1570,6 +1596,15 @@ impl App {
             }
             if self.cards[i].expand_at.is_some_and(|t| now >= t) {
                 self.hover_expand(i);
+            }
+            // abriu ou fechou detalhes: os widgets empilhados embaixo acompanham
+            if let Some((old_h, delta)) = self.cards[i].grew.take() {
+                let w = self.cards[i].card_size().0;
+                let rect = self.cards[i].card_rect_at(self.cards[i].pos, Some((w, old_h)));
+                for j in self.stack_below(i, Some(rect)) {
+                    let to = (self.cards[j].pos.0, self.cards[j].pos.1 + delta);
+                    self.cards[j].slide_to(to, GROW_MS, &self.sh);
+                }
             }
         }
         if now >= self.next_watch {

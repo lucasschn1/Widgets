@@ -36,6 +36,7 @@ pub const DARK_GLYPH: Rgba = Rgba(28, 28, 30, 255);
 pub const MARGIN: f32 = 8.0; // área transparente em volta do cartão, para o botão sobressair
 pub const BADGE_D: f32 = 20.0;
 pub const ANIM_MS: u64 = 300;
+pub const GROW_MS: u64 = 420; // widget abrindo ou fechando detalhes
 pub const BADGE_FADE_MS: u64 = 120;
 pub const FRAME_MS: u64 = 16;
 pub const WIDGET_GAP: f32 = 12.0; // espaço entre widgets encaixados
@@ -81,6 +82,7 @@ pub fn icon(name: &str) -> &'static str {
         "aparencia" => "\u{e790}",
         "widgets" => "\u{eca5}",
         "clima" => "\u{e753}",
+        "sistema" => "\u{e9d9}",
         "midia" => "\u{e8d6}",
         "github" => "\u{e943}",
         "pomodoro" => "\u{e916}",

@@ -1,5 +1,6 @@
-//! Widget "Tocando agora": a mídia em reprodução no Windows (Spotify, YouTube no navegador...),
-//! com capa, barra de progresso e controles.
+//! Widget "Tocando agora" ("capa viva"): a mídia em reprodução no Windows (Spotify, YouTube no
+//! navegador...). O fundo é a própria capa, desfocada; clicar na capa abre o player grande, com
+//! volume do app, aleatório e repetir. A barra de progresso aceita clique para pular.
 //!
 //! A central de mídia do Windows (a mesma do controle de volume) é lida numa thread própria; o
 //! resultado fica num "retrato" que a interface consulta 4 vezes por segundo.
@@ -12,17 +13,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use windows::core::Interface;
-use windows_future::IAsyncOperation;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 };
+use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
+use windows_future::IAsyncOperation;
 
 use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{self, Anchor, Canvas, Face, Image};
+use crate::imgops::Rgb;
 use crate::theme::*;
 use crate::win;
 
@@ -48,6 +51,14 @@ fn source_label(kind: &str) -> &'static str {
         "spotify" => "SPOTIFY",
         "youtube" => "YOUTUBE",
         _ => "MÍDIA",
+    }
+}
+
+fn source_name(kind: &str) -> &'static str {
+    match kind {
+        "spotify" => "Spotify",
+        "youtube" => "o navegador",
+        _ => "o player",
     }
 }
 
@@ -109,6 +120,15 @@ pub struct Snapshot {
     pub can_toggle: bool,
     pub can_prev: bool,
     pub can_next: bool,
+    pub can_seek: bool,
+    /// aleatório ligado (None: o player não informa)
+    pub shuffle: Option<bool>,
+    /// 0 sem repetir, 1 a música, 2 a lista (None: o player não informa)
+    pub repeat: Option<i32>,
+    pub can_shuffle: bool,
+    pub can_repeat: bool,
+    /// volume do app no mixer do Windows (None: não achou a sessão de áudio dele)
+    pub volume: Option<f32>,
     pub art: Option<Arc<Image>>,
     pub art_key: Option<String>,
     pub error: Option<String>,
@@ -119,6 +139,78 @@ enum Cmd {
     Next,
     Prev,
     Wake,
+    Seek(f64),
+    Shuffle(bool),
+    Repeat(i32),
+    /// volume do app, de 0 a 1
+    Volume(f32),
+}
+
+// ---------- volume do app (mixer do Windows) ----------
+
+mod mixer {
+    use windows::core::{Interface, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Media::Audio::*;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    fn exe_stem(pid: u32) -> Option<String> {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+            let _ = CloseHandle(h);
+            if !ok {
+                return None;
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+            let file = path.rsplit('\\').next()?.to_string();
+            Some(file.trim_end_matches(".exe").to_string())
+        }
+    }
+
+    /// Controles de volume das sessões de áudio do app (ex.: "Spotify.exe", "Chrome", "MSEdge").
+    pub fn sessions(app_id: &str) -> Vec<ISimpleAudioVolume> {
+        let id = app_id.to_lowercase();
+        let mut out = Vec::new();
+        unsafe {
+            let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return out };
+            let Ok(dev) = en.GetDefaultAudioEndpoint(eRender, eMultimedia) else { return out };
+            let Ok(mgr) = dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { return out };
+            let Ok(list) = mgr.GetSessionEnumerator() else { return out };
+            for i in 0..list.GetCount().unwrap_or(0) {
+                let Ok(ctl) = list.GetSession(i) else { continue };
+                let Ok(ctl2) = ctl.cast::<IAudioSessionControl2>() else { continue };
+                let pid = ctl2.GetProcessId().unwrap_or(0);
+                if pid == 0 {
+                    continue;
+                }
+                let Some(stem) = exe_stem(pid) else { continue };
+                if stem.len() >= 3 && id.contains(&stem) {
+                    if let Ok(v) = ctl.cast::<ISimpleAudioVolume>() {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn get(app_id: &str) -> Option<f32> {
+        sessions(app_id).first().and_then(|v| unsafe { v.GetMasterVolume().ok() })
+    }
+
+    pub fn set(app_id: &str, level: f32) -> bool {
+        let list = sessions(app_id);
+        for v in &list {
+            unsafe {
+                let _ = v.SetMasterVolume(level.clamp(0.0, 1.0), std::ptr::null());
+            }
+        }
+        !list.is_empty()
+    }
 }
 
 // ---------- thread da central de mídia ----------
@@ -201,6 +293,12 @@ impl Reader {
             can_toggle: controls.IsPlayPauseToggleEnabled()?,
             can_prev: controls.IsPreviousEnabled()?,
             can_next: controls.IsNextEnabled()?,
+            can_seek: controls.IsPlaybackPositionEnabled().unwrap_or(false),
+            shuffle: info.IsShuffleActive().and_then(|v| v.Value()).ok(),
+            repeat: info.AutoRepeatMode().and_then(|v| v.Value()).ok().map(|m| m.0),
+            can_shuffle: controls.IsShuffleEnabled().unwrap_or(false),
+            can_repeat: controls.IsRepeatEnabled().unwrap_or(false),
+            volume: mixer::get(&app_id),
             art: self.art.clone(),
             art_key: self.art.as_ref().map(|_| key),
             error: None,
@@ -230,6 +328,7 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
             Snapshot { empty: true, pref: p.clone(), ..Default::default() }
         });
         *snapshot.lock().unwrap() = Some(snap);
+        crate::events::wake();
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Cmd::Wake) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -238,7 +337,16 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
                     let op = match cmd {
                         Cmd::Toggle => s.TryTogglePlayPauseAsync(),
                         Cmd::Next => s.TrySkipNextAsync(),
-                        _ => s.TrySkipPreviousAsync(),
+                        Cmd::Prev => s.TrySkipPreviousAsync(),
+                        Cmd::Seek(secs) => s.TryChangePlaybackPositionAsync((secs * 10_000_000.0) as i64),
+                        Cmd::Shuffle(on) => s.TryChangeShuffleActiveAsync(on),
+                        Cmd::Repeat(mode) => s.TryChangeAutoRepeatModeAsync(MediaPlaybackAutoRepeatMode(mode)),
+                        Cmd::Volume(level) => {
+                            let id = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
+                            mixer::set(&id, level);
+                            continue; // relê na hora, sem esperar
+                        }
+                        Cmd::Wake => continue,
                     };
                     if let Ok(op) = op {
                         let _ = op.join();
@@ -288,15 +396,32 @@ const M_PLAY_D: f32 = 32.0;
 const M_BAR_Y: f32 = 92.0;
 const M_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 17.0, 14.0 + 17.0, 40.0, 40.0);
 
+// player grande (clicou na capa): a capa ocupa a largura e embaixo vêm os controles
+const B_ART: f32 = W - 32.0;
+const B_TITLE_Y: f32 = 16.0 + B_ART + 16.0;
+const B_BAR_Y: f32 = B_TITLE_Y + 52.0;
+const B_CTRL_Y: f32 = B_BAR_Y + 50.0;
+const B_VOL_Y: f32 = B_CTRL_Y + 46.0;
+const B_TOG_Y: f32 = B_VOL_Y + 40.0;
+const B_H: f32 = B_TOG_Y + 30.0;
+const B_VOL_X: (f32, f32) = (44.0, W - 44.0);
+
 const POLL: Duration = Duration::from_millis(250);
 const MESSAGE_EVERY: Duration = Duration::from_secs(12);
+const FADE_MS: f32 = 600.0;
+const HUD: Duration = Duration::from_millis(1100);
 
 // ações
 const TOGGLE: u32 = 1;
 const NEXT: u32 = 2;
 const PREV: u32 = 3;
 const OPEN_PLAYER: u32 = 4;
+const BIG: u32 = 5;
+const SHUFFLE: u32 = 6;
+const REPEAT: u32 = 7;
 const SOURCE: u32 = 10; // + índice em SOURCES
+const SEEK: u32 = 1000; // + milésimos da música (0 a 1000)
+const VOLUME: u32 = 3000; // + volume (0 a 100)
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -315,8 +440,20 @@ pub struct Media {
     next_poll: Instant,
     next_message: Instant,
     art_cache: RefCell<Option<((String, u32), Image)>>,
+    /// fundo: a capa desfocada no tamanho do cartão
+    bg_cache: RefCell<Option<((String, u32, u32), Image)>>,
+    /// fundo da música anterior, sumindo aos poucos depois de trocar de música
+    fade: Option<(Image, Instant)>,
     idle_cache: RefCell<HashMap<(Mode, String, u32), Vec<Image>>>,
     started: Instant,
+    /// player grande aberto (médio e grande)
+    big: bool,
+    /// aviso de volume no topo (roda do mouse)
+    hud_until: Option<Instant>,
+    /// volume pedido agora há pouco (mostrado até o mixer confirmar)
+    volume_wanted: Option<(f32, Instant)>,
+    /// próximo quadro da troca de fundo (um prazo fixo)
+    frame_at: Instant,
 }
 
 impl Media {
@@ -329,18 +466,28 @@ impl Media {
             std::thread::spawn(move || watch(rx, shared, pref));
         }
         let seed = (win::now() * 1000.0) as usize;
+        Media::with(tx, shared, pref, None, seed % FUNNY.len(), Instant::now())
+    }
+
+    fn with(tx: Sender<Cmd>, shared: Arc<Mutex<Option<Snapshot>>>, pref: Arc<Mutex<String>>, media: Option<Snapshot>, msg: usize, next: Instant) -> Media {
         Media {
             tx,
             shared,
             pref,
-            media: None,
+            media,
             sig: None,
-            msg: seed % FUNNY.len(),
-            next_poll: Instant::now(),
-            next_message: Instant::now() + MESSAGE_EVERY,
+            msg,
+            next_poll: next,
+            next_message: next + MESSAGE_EVERY,
             art_cache: RefCell::new(None),
+            bg_cache: RefCell::new(None),
+            fade: None,
             idle_cache: RefCell::new(HashMap::new()),
             started: Instant::now(),
+            big: false,
+            hud_until: None,
+            volume_wanted: None,
+            frame_at: next,
         }
     }
 
@@ -361,19 +508,8 @@ impl Media {
             can_next: true,
             ..Default::default()
         };
-        Media {
-            tx,
-            shared: Arc::new(Mutex::new(None)),
-            pref: Arc::new(Mutex::new("auto".into())),
-            media: Some(snap),
-            sig: None,
-            msg: 0,
-            next_poll: Instant::now() + Duration::from_secs(3600),
-            next_message: Instant::now() + Duration::from_secs(3600),
-            art_cache: RefCell::new(None),
-            idle_cache: RefCell::new(HashMap::new()),
-            started: Instant::now(),
-        }
+        let later = Instant::now() + Duration::from_secs(3600);
+        Media::with(tx, Arc::new(Mutex::new(None)), Arc::new(Mutex::new("auto".into())), Some(snap), 0, later)
     }
 
     fn has_media(&self) -> bool {
@@ -395,21 +531,38 @@ impl Media {
         if m.duration > 0.0 { pos.clamp(0.0, m.duration) } else { pos }
     }
 
+    fn volume(&self) -> Option<f32> {
+        if let Some((v, at)) = self.volume_wanted {
+            if at.elapsed() < Duration::from_millis(1500) {
+                return Some(v);
+            }
+        }
+        self.media.as_ref().and_then(|m| m.volume)
+    }
+
     fn signature(&self) -> String {
         match &self.media {
             Some(m) if !m.empty => {
                 let second = if m.playing && m.duration > 0.0 { self.position() as i64 } else { -1 };
                 format!(
-                    "{}|{}|{}|{}|{:?}|{}{}{}|{}|{second}",
-                    m.kind, m.title, m.artist, m.playing, m.art_key, m.can_toggle, m.can_prev, m.can_next, m.position
+                    "{}|{}|{}|{}|{:?}|{}{}{}|{}|{second}|{:?}|{:?}|{:?}",
+                    m.kind, m.title, m.artist, m.playing, m.art_key, m.can_toggle, m.can_prev, m.can_next, m.position, m.shuffle, m.repeat,
+                    m.volume.map(|v| (v * 100.0).round() as i32)
                 )
             }
             m => format!("vazio|{}|{:?}", self.pref(), m.as_ref().and_then(|m| m.error.clone())),
         }
     }
 
+    fn is_big(&self, mode: Mode) -> bool {
+        self.big && mode != Mode::P && self.has_media()
+    }
+
     /// ((x, y), lado, raio) da capa no tamanho dado.
-    fn art_geom(mode: Mode) -> ((f32, f32), f32, f32) {
+    fn art_geom(&self, mode: Mode) -> ((f32, f32), f32, f32) {
+        if self.is_big(mode) {
+            return ((16.0, 16.0), B_ART, 16.0);
+        }
         match mode {
             Mode::P => (C_ART_XY, C_ART, C_ART_RADIUS),
             Mode::M => (M_ART_XY, M_ART, M_ART_RADIUS),
@@ -425,10 +578,30 @@ impl Media {
         }
     }
 
+    /// (x0, x1, y, espessura) da barra de progresso.
+    fn bar_geom(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
+        if self.is_big(mode) {
+            return Some((16.0, W - 16.0, B_BAR_Y, 5.0));
+        }
+        match mode {
+            Mode::P => None,
+            Mode::M => Some((M_TEXT_X, W - 16.0, M_BAR_Y, 3.0)),
+            Mode::G => Some((18.0, W - 18.0, BAR_Y, 4.0)),
+        }
+    }
+
     /// (controle, x, y, tamanho, habilitado, em círculo) de cada botão.
     fn controls(&self, mode: Mode) -> Vec<(Ctl, f32, f32, f32, bool, bool)> {
         let Some(m) = self.media.as_ref().filter(|m| !m.empty) else { return Vec::new() };
         let toggle = Ctl::Toggle(m.playing);
+        if self.is_big(mode) {
+            let (cx, y) = (W / 2.0, B_CTRL_Y);
+            return vec![
+                (Ctl::Prev, cx - 80.0, y, 20.0, m.can_prev, false),
+                (toggle, cx, y, 50.0, m.can_toggle, true),
+                (Ctl::Next, cx + 80.0, y, 20.0, m.can_next, false),
+            ];
+        }
         match mode {
             Mode::P => {
                 let y = COMPACT_H / 2.0;
@@ -464,25 +637,56 @@ impl Media {
     }
 
     fn on_art(&self, x: f32, y: f32, mode: Mode) -> bool {
-        let ((ax, ay), art, _) = Self::art_geom(mode);
+        let ((ax, ay), art, _) = self.art_geom(mode);
         self.has_media() && (ax..=ax + art).contains(&x) && (ay..=ay + art).contains(&y)
     }
 
-    fn on_bar(&self, x: f32, y: f32, mode: Mode) -> bool {
-        let Some(m) = self.media.as_ref().filter(|m| !m.empty && m.duration > 0.0) else { return false };
-        let _ = m;
-        match mode {
-            Mode::P => false,
-            Mode::M => x >= M_TEXT_X - 4.0 && (M_BAR_Y - 8.0..=MEDIUM_H).contains(&y),
-            Mode::G => (BAR_Y - 8.0..=BAR_Y + 26.0).contains(&y),
+    /// Fração (0 a 1) da música no ponto x, se (x, y) está sobre a barra de progresso.
+    fn bar_at(&self, x: f32, y: f32, mode: Mode) -> Option<f32> {
+        let m = self.media.as_ref().filter(|m| !m.empty && m.duration > 0.0)?;
+        let (x0, x1, by, _) = self.bar_geom(mode)?;
+        let reach_down = if mode == Mode::M && !self.is_big(mode) { 10.0 } else { 14.0 };
+        if !(by - 8.0..=by + reach_down).contains(&y) || x < x0 - 6.0 || x > x1 + 6.0 {
+            return None;
         }
+        let _ = m;
+        Some(((x - x0) / (x1 - x0)).clamp(0.0, 1.0))
+    }
+
+    fn volume_at(&self, x: f32, y: f32, mode: Mode) -> Option<f32> {
+        if !self.is_big(mode) || !(B_VOL_Y - 12.0..=B_VOL_Y + 12.0).contains(&y) || self.volume().is_none() {
+            return None;
+        }
+        let (x0, x1) = B_VOL_X;
+        (x >= x0 - 8.0 && x <= x1 + 8.0).then(|| ((x - x0) / (x1 - x0)).clamp(0.0, 1.0))
+    }
+
+    /// (ação, centro x) dos botões da última linha do player grande.
+    fn toggles(&self) -> [(u32, f32); 3] {
+        [(SHUFFLE, 34.0), (OPEN_PLAYER, W / 2.0), (REPEAT, W - 34.0)]
+    }
+
+    fn toggle_at(&self, x: f32, y: f32, mode: Mode) -> Option<u32> {
+        if !self.is_big(mode) || !(B_TOG_Y - 16.0..=B_TOG_Y + 16.0).contains(&y) {
+            return None;
+        }
+        let m = self.media.as_ref()?;
+        self.toggles().into_iter().find_map(|(a, cx)| {
+            let half = if a == OPEN_PLAYER { 70.0 } else { 18.0 };
+            let enabled = match a {
+                SHUFFLE => m.can_shuffle && m.shuffle.is_some(),
+                REPEAT => m.can_repeat && m.repeat.is_some(),
+                _ => true,
+            };
+            ((cx - half..=cx + half).contains(&x) && enabled).then_some(a)
+        })
     }
 
     /// Capa arredondada (guardada no tamanho atual).
     fn paste_art(&self, c: &mut Canvas, mode: Mode) -> bool {
         let Some(m) = self.media.as_ref().filter(|m| !m.empty) else { return false };
         let (Some(art), Some(key)) = (&m.art, &m.art_key) else { return false };
-        let ((x, y), size, radius) = Self::art_geom(mode);
+        let ((x, y), size, radius) = self.art_geom(mode);
         let px = (size * c.s).round() as u32;
         let cache_key = (key.clone(), px);
         let mut cache = self.art_cache.borrow_mut();
@@ -495,9 +699,34 @@ impl Media {
         true
     }
 
+    /// Fundo "capa viva": a capa reduzida a poucos pixels, mais saturada, ampliada até o cartão
+    /// (a ampliação suave vira um degradê com as cores da capa) e escurecida para o texto aparecer.
+    fn background(&self, c: &Canvas, mode: Mode) -> Option<Image> {
+        let m = self.media.as_ref().filter(|m| !m.empty)?;
+        let (art, key) = (m.art.as_ref()?, m.art_key.as_ref()?);
+        let l = self.layout(mode);
+        let (w, h) = ((l.w * c.s).round() as u32, (l.h * c.s).round() as u32);
+        let cache_key = (key.clone(), w, h);
+        let mut cache = self.bg_cache.borrow_mut();
+        if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
+            let tiny = gfx::resize(&gfx::fit_square(art, 64), 6, 6);
+            let mut rgb = Rgb::from_image(&tiny);
+            rgb.saturate(1.35);
+            let mut big = gfx::resize(&rgb.to_image(), w, h);
+            // escurece (45%) mantendo o alfa
+            for p in big.px.chunks_mut(4) {
+                for ch in &mut p[..3] {
+                    *ch = (*ch as f32 * 0.55) as u8;
+                }
+            }
+            *cache = Some((cache_key, big));
+        }
+        cache.as_ref().map(|c| c.1.clone())
+    }
+
     /// Nota musical no lugar da capa, quando há música mas não há imagem.
-    fn note(c: &mut Canvas, mode: Mode, glyph: f32) {
-        let ((x, y), size, _) = Self::art_geom(mode);
+    fn note(&self, c: &mut Canvas, mode: Mode, glyph: f32) {
+        let ((x, y), size, _) = self.art_geom(mode);
         c.text(x + size / 2.0, y + size / 2.0, "♪", Face::Symbol, glyph, MUTED, Anchor::MM, None);
     }
 
@@ -559,30 +788,8 @@ impl Media {
             None => {}
         }
     }
-}
 
-impl Kind for Media {
-    fn key(&self) -> &'static str {
-        "midia"
-    }
-    fn title(&self) -> &'static str {
-        "Tocando agora"
-    }
-
-    fn layout(&self, mode: Mode) -> Layout {
-        match mode {
-            Mode::P => Layout { w: W, h: COMPACT_H, radius: COMPACT_RADIUS },
-            Mode::M => Layout { w: W, h: MEDIUM_H, radius: M_RADIUS },
-            Mode::G => Layout { w: W, h: H, radius: RADIUS },
-        }
-    }
-
-    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
-        let m = self.media.as_ref().filter(|m| !m.empty);
-        let ((ax, ay), art, radius) = Self::art_geom(mode);
-        if m.is_none_or(|m| m.art.is_none()) {
-            c.fill_round_rect(ax, ay, ax + art, ay + art, radius, WHITE.alpha(0.12));
-        }
+    fn draw_controls(&self, c: &mut Canvas, mode: Mode) {
         let dim = WHITE.alpha(0.3);
         for (ctl, cx, cy, size, enabled, circle) in self.controls(mode) {
             let (glyph, color) = if circle {
@@ -598,26 +805,134 @@ impl Kind for Media {
                 Ctl::Next => drawing::skip(c, cx, cy, glyph, color, true),
             }
         }
-        if let Some(m) = m.filter(|m| mode != Mode::P && m.duration > 0.0) {
-            let frac = (self.position() / m.duration) as f32;
-            let (x0, x1, y, h) = if mode == Mode::M { (M_TEXT_X, W - 16.0, M_BAR_Y, 3.0) } else { (18.0, W - 18.0, BAR_Y, 4.0) };
-            c.fill_round_rect(x0, y, x1, y + h, h / 2.0, WHITE.alpha(0.22));
-            if frac > 0.0 {
-                c.fill_round_rect(x0, y, (x0 + h).max(x0 + (x1 - x0) * frac), y + h, h / 2.0, Rgba::rgb(235, 235, 240));
+    }
+
+    fn draw_bar(&self, c: &mut Canvas, mode: Mode) {
+        let Some(m) = self.media.as_ref().filter(|m| !m.empty && m.duration > 0.0) else { return };
+        let Some((x0, x1, y, h)) = self.bar_geom(mode) else { return };
+        let frac = (self.position() / m.duration) as f32;
+        c.fill_round_rect(x0, y, x1, y + h, h / 2.0, WHITE.alpha(0.22));
+        if frac > 0.0 {
+            c.fill_round_rect(x0, y, (x0 + h).max(x0 + (x1 - x0) * frac), y + h, h / 2.0, Rgba::rgb(235, 235, 240));
+        }
+        if mode == Mode::G || self.is_big(mode) {
+            let pos = self.position();
+            let ty = y + h + 6.0;
+            c.text(x0, ty, &fmt_time(pos), Face::Regular, 10.0, MUTED, Anchor::LA, None);
+            c.text(x1, ty, &format!("-{}", fmt_time(m.duration - pos)), Face::Regular, 10.0, MUTED, Anchor::RA, None);
+        }
+    }
+
+    /// O resto do player grande: título, volume do app, aleatório, abrir e repetir.
+    fn draw_big(&self, c: &mut Canvas, m: &Snapshot) {
+        let w = W - 32.0;
+        c.text(16.0, B_TITLE_Y, &m.title, Face::Semibold, 15.0, FG, Anchor::LA, Some(w));
+        c.text(16.0, B_TITLE_Y + 21.0, &m.artist, Face::Regular, 12.5, MUTED, Anchor::LA, Some(w));
+        let icon = |c: &mut Canvas, x: f32, y: f32, glyph: &str, size: f32, col: Rgba| {
+            c.text(x, y, glyph, Face::Icons, size, col, Anchor::MM, None);
+        };
+        let (x0, x1) = B_VOL_X;
+        match self.volume() {
+            Some(v) => {
+                icon(c, 24.0, B_VOL_Y, "\u{e992}", 14.0, MUTED);
+                icon(c, W - 24.0, B_VOL_Y, "\u{e995}", 14.0, MUTED);
+                c.fill_round_rect(x0, B_VOL_Y - 2.5, x1, B_VOL_Y + 2.5, 2.5, WHITE.alpha(0.22));
+                c.fill_round_rect(x0, B_VOL_Y - 2.5, x0 + 5.0f32.max((x1 - x0) * v), B_VOL_Y + 2.5, 2.5, Rgba::rgb(235, 235, 240));
+            }
+            None => {
+                c.text(W / 2.0, B_VOL_Y, "Role a roda do mouse para o volume", Face::Regular, 11.5, MUTED, Anchor::MM, None);
             }
         }
+        for (action, cx) in self.toggles() {
+            let y = B_TOG_Y;
+            match action {
+                SHUFFLE | REPEAT => {
+                    let (on, enabled) = if action == SHUFFLE {
+                        (m.shuffle == Some(true), m.can_shuffle && m.shuffle.is_some())
+                    } else {
+                        (m.repeat.is_some_and(|r| r > 0), m.can_repeat && m.repeat.is_some())
+                    };
+                    if on {
+                        c.fill_round_rect(cx - 16.0, y - 15.0, cx + 16.0, y + 15.0, 9.0, WHITE.alpha(0.2));
+                    }
+                    let glyph = match action {
+                        SHUFFLE => "\u{e8b1}",
+                        _ if m.repeat == Some(1) => "\u{e8ed}",
+                        _ => "\u{e8ee}",
+                    };
+                    let col = if !enabled { WHITE.alpha(0.25) } else if on { FG } else { MUTED };
+                    icon(c, cx, y, glyph, 15.0, col);
+                }
+                _ => {
+                    let label = format!("Abrir {}", source_name(m.kind));
+                    let tw = c.text_width(&label, Face::Semibold, 12.0);
+                    c.text(cx - 9.0, y, &label, Face::Semibold, 12.0, Rgba::rgb(90, 200, 250), Anchor::MM, None);
+                    icon(c, cx - 9.0 + tw / 2.0 + 12.0, y, "\u{e8a7}", 11.0, Rgba::rgb(90, 200, 250));
+                }
+            }
+        }
+    }
+}
+
+impl Kind for Media {
+    fn key(&self) -> &'static str {
+        "midia"
+    }
+    fn title(&self) -> &'static str {
+        "Tocando agora"
+    }
+
+    fn layout(&self, mode: Mode) -> Layout {
+        if self.is_big(mode) {
+            return Layout { w: W, h: B_H, radius: RADIUS };
+        }
+        match mode {
+            Mode::P => Layout { w: W, h: COMPACT_H, radius: COMPACT_RADIUS },
+            Mode::M => Layout { w: W, h: MEDIUM_H, radius: M_RADIUS },
+            Mode::G => Layout { w: W, h: H, radius: RADIUS },
+        }
+    }
+
+    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+        let m = self.media.as_ref().filter(|m| !m.empty);
+        let l = self.layout(mode);
+        // fundo "capa viva" (com a capa anterior sumindo, logo depois de trocar de música)
+        if let Some(bg) = self.background(c, mode) {
+            c.push_round_clip(0.0, 0.0, l.w, l.h, l.radius);
+            c.image(&bg, 0.0, 0.0);
+            if let Some((old, since)) = &self.fade {
+                let t = since.elapsed().as_secs_f32() * 1000.0 / FADE_MS;
+                if t < 1.0 {
+                    c.image_px(old, 0.0, 0.0, (l.w * c.s).round(), (l.h * c.s).round(), 1.0 - t);
+                }
+            }
+            c.pop_clip();
+        }
+        let ((ax, ay), art, radius) = self.art_geom(mode);
+        if m.is_none_or(|m| m.art.is_none()) {
+            c.fill_round_rect(ax, ay, ax + art, ay + art, radius, WHITE.alpha(0.12));
+        }
+        self.draw_controls(c, mode);
+        self.draw_bar(c, mode);
 
         let error = self.media.as_ref().and_then(|m| m.error.clone());
         let (funny_title, mut funny_sub) = (FUNNY[self.msg].0.to_string(), FUNNY[self.msg].1.to_string());
         if let Some(e) = error {
             funny_sub = e;
         }
+        if let Some(m) = m.filter(|_| self.is_big(mode)) {
+            if !self.paste_art(c, mode) {
+                self.note(c, mode, 64.0);
+            }
+            self.draw_big(c, m);
+            return;
+        }
         match mode {
             Mode::P => {
                 let x = C_TEXT_X;
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
-                        Self::note(c, mode, 18.0);
+                        self.note(c, mode, 18.0);
                     }
                     c.text(x, 14.0, &m.title, Face::Semibold, 12.0, FG, Anchor::LA, Some(C_TEXT_W));
                     c.text(x, 33.0, &m.artist, Face::Regular, 10.5, MUTED, Anchor::LA, Some(C_TEXT_W));
@@ -631,7 +946,7 @@ impl Kind for Media {
                 let (x, w) = (M_TEXT_X, M_TEXT_W);
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
-                        Self::note(c, mode, 28.0);
+                        self.note(c, mode, 28.0);
                     }
                     c.text(x, 13.0, &m.title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
                     c.text(x, 32.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
@@ -648,21 +963,15 @@ impl Kind for Media {
                 c.text(x, 19.0, source_label(&kind), Face::Semibold, 10.0, source_color(&kind), Anchor::LA, None);
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
-                        Self::note(c, mode, 32.0);
+                        self.note(c, mode, 32.0);
                     }
                     let lines = c.wrap(&m.title, Face::Semibold, 14.0, w, 2);
                     for (i, line) in lines.iter().enumerate() {
                         c.text(x, 35.0 + 19.0 * i as f32, line, Face::Semibold, 14.0, FG, Anchor::LA, Some(w));
                     }
                     c.text(x, 37.0 + 19.0 * lines.len() as f32, &m.artist, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
-                    if m.duration > 0.0 {
-                        let pos = self.position();
-                        let ty = BAR_Y + 10.0;
-                        c.text(18.0, ty, &fmt_time(pos), Face::Regular, 10.0, MUTED, Anchor::LA, None);
-                        c.text(W - 18.0, ty, &format!("-{}", fmt_time(m.duration - pos)), Face::Regular, 10.0, MUTED, Anchor::RA, None);
-                    }
                 } else {
-                    Self::note(c, mode, 32.0);
+                    self.note(c, mode, 32.0);
                     c.text(x, 35.0, &funny_title, Face::Semibold, 14.0, FG, Anchor::LA, Some(w));
                     for (i, line) in c.wrap(&funny_sub, Face::Regular, 12.0, w, 2).iter().enumerate() {
                         c.text(x, 57.0 + 17.0 * i as f32, line, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
@@ -672,8 +981,20 @@ impl Kind for Media {
         }
     }
 
-    /// O equalizador "cochilando" quando nada está tocando.
+    /// O equalizador "cochilando" quando nada está tocando, e o aviso de volume da roda do mouse.
     fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        if let Some(until) = self.hud_until.filter(|t| Instant::now() < *t) {
+            let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
+            let alpha = (left / 0.25).min(1.0);
+            let level = self.volume().unwrap_or(0.0);
+            let (w, h) = (150.0, 28.0);
+            let (x, y) = (ox + (W - w) / 2.0, oy + 8.0);
+            c.fill_round_rect(x, y, x + w, y + h, h / 2.0, Rgba(0, 0, 0, (150.0 * alpha) as u8));
+            c.text(x + 18.0, y + h / 2.0, "\u{e995}", Face::Icons, 12.0, WHITE.alpha(alpha), Anchor::MM, None);
+            let (bx0, bx1) = (x + 34.0, x + w - 14.0);
+            c.fill_round_rect(bx0, y + h / 2.0 - 2.0, bx1, y + h / 2.0 + 2.0, 2.0, WHITE.alpha(0.25 * alpha));
+            c.fill_round_rect(bx0, y + h / 2.0 - 2.0, bx0 + 4.0f32.max((bx1 - bx0) * level), y + h / 2.0 + 2.0, 2.0, WHITE.alpha(alpha));
+        }
         if self.has_media() {
             return;
         }
@@ -685,7 +1006,13 @@ impl Kind for Media {
     }
 
     fn overlay_fps(&self) -> u32 {
-        if self.has_media() { 0 } else { IDLE_FPS }
+        if self.hud_until.is_some_and(|t| Instant::now() < t) {
+            30
+        } else if self.has_media() {
+            0
+        } else {
+            IDLE_FPS
+        }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
@@ -696,10 +1023,26 @@ impl Kind for Media {
                 Ctl::Next => NEXT,
             });
         }
-        (self.on_art(x, y, mode) && env.shortcuts()).then_some(OPEN_PLAYER)
+        if let Some(a) = self.toggle_at(x, y, mode) {
+            return Some(a);
+        }
+        if let Some(v) = self.volume_at(x, y, mode) {
+            return Some(VOLUME + (v * 100.0).round() as u32);
+        }
+        if let Some(f) = self.bar_at(x, y, mode) {
+            if self.media.as_ref().is_some_and(|m| m.can_seek) {
+                return Some(SEEK + (f * 1000.0).round() as u32);
+            }
+        }
+        if self.on_art(x, y, mode) {
+            // no pequeno não cabe o player grande: abre o app
+            return if mode == Mode::P { env.shortcuts().then_some(OPEN_PLAYER) } else { Some(BIG) };
+        }
+        None
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
+        let m = self.media.clone().unwrap_or_default();
         match action {
             TOGGLE => {
                 let _ = self.tx.send(Cmd::Toggle);
@@ -711,6 +1054,33 @@ impl Kind for Media {
                 let _ = self.tx.send(Cmd::Prev);
             }
             OPEN_PLAYER => self.open_player(ctx),
+            BIG => self.big = !self.big,
+            SHUFFLE => {
+                let _ = self.tx.send(Cmd::Shuffle(m.shuffle != Some(true)));
+            }
+            REPEAT => {
+                // desligado -> repetir a lista -> repetir a música -> desligado
+                let next = match m.repeat.unwrap_or(0) {
+                    0 => 2,
+                    2 => 1,
+                    _ => 0,
+                };
+                let _ = self.tx.send(Cmd::Repeat(next));
+            }
+            a if (SEEK..=SEEK + 1000).contains(&a) => {
+                let secs = m.duration * (a - SEEK) as f64 / 1000.0;
+                let _ = self.tx.send(Cmd::Seek(secs));
+                // mostra na hora, sem esperar o player confirmar
+                if let Some(snap) = &mut self.media {
+                    snap.position = secs;
+                    snap.updated = Some(win::now());
+                }
+            }
+            a if (VOLUME..=VOLUME + 100).contains(&a) => {
+                let level = (a - VOLUME) as f32 / 100.0;
+                let _ = self.tx.send(Cmd::Volume(level));
+                self.volume_wanted = Some((level, Instant::now()));
+            }
             a if (SOURCE..SOURCE + SOURCES.len() as u32).contains(&a) => {
                 let value = SOURCES[(a - SOURCE) as usize].0;
                 ctx.wcfg().insert("fonte".into(), json!(value));
@@ -728,8 +1098,13 @@ impl Kind for Media {
             let r = Self::reach(size, circle) + 2.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
+        if let Some(a) = self.toggle_at(x, y, mode) {
+            let cx = self.toggles().iter().find(|t| t.0 == a).map(|t| t.1).unwrap_or(0.0);
+            let half = if a == OPEN_PLAYER { 72.0 } else { 18.0 };
+            return Some((cx - half, B_TOG_Y - 16.0, cx + half, B_TOG_Y + 16.0, 10.0));
+        }
         if self.on_art(x, y, mode) {
-            let ((ax, ay), art, radius) = Self::art_geom(mode);
+            let ((ax, ay), art, radius) = self.art_geom(mode);
             return Some((ax, ay, ax + art, ay + art, radius));
         }
         None
@@ -748,21 +1123,46 @@ impl Kind for Media {
                 .into(),
             );
         }
+        if let Some(a) = self.toggle_at(x, y, mode) {
+            return Some(
+                match a {
+                    SHUFFLE => if m.shuffle == Some(true) { "Aleatório ligado" } else { "Aleatório" },
+                    REPEAT => match m.repeat {
+                        Some(1) => "Repetindo esta música",
+                        Some(2) => "Repetindo a lista",
+                        _ => "Repetir",
+                    },
+                    _ => "Abrir o player",
+                }
+                .into(),
+            );
+        }
+        if let Some(v) = self.volume_at(x, y, mode) {
+            return Some(format!("Volume do app: {}%\nClique para mudar", (v * 100.0).round()));
+        }
+        if let Some(f) = self.bar_at(x, y, mode) {
+            let at = fmt_time(m.duration * f as f64);
+            return Some(if m.can_seek { format!("{at}\nClique para pular para cá") } else { format!("{} de {}", fmt_time(self.position()), fmt_time(m.duration)) });
+        }
         let probe = Canvas::new(1, 1, 1.0);
         let mut song = probe.wrap(&m.title, Face::Regular, 11.5, 300.0, 3).join("\n");
         if !m.artist.is_empty() {
             song += &format!("\n\n{}", m.artist);
         }
         if self.on_art(x, y, mode) {
-            if !env.shortcuts() {
+            let hint = match mode {
+                Mode::P if env.shortcuts() => "Clique para abrir o player",
+                Mode::P => "",
+                _ if self.is_big(mode) => "Clique para fechar o player grande",
+                _ => "Clique para abrir o player grande",
+            };
+            if hint.is_empty() {
                 return Some(song);
             }
-            return Some(song + if m.artist.is_empty() { "\n\n" } else { "\n" } + "Clique para abrir o player");
-        }
-        if self.on_bar(x, y, mode) {
-            return Some(format!("{} de {}", fmt_time(self.position()), fmt_time(m.duration)));
+            return Some(song + if m.artist.is_empty() { "\n\n" } else { "\n" } + hint);
         }
         let text_area = match mode {
+            _ if self.is_big(mode) => (B_TITLE_Y..B_TITLE_Y + 36.0).contains(&y),
             Mode::P => (C_TEXT_X..=C_TEXT_X + C_TEXT_W).contains(&x),
             Mode::M => x >= M_TEXT_X && y < M_CTRL_Y - 18.0,
             Mode::G => x >= TEXT_X && y < BAR_Y - 6.0,
@@ -770,8 +1170,17 @@ impl Kind for Media {
         text_area.then_some(song)
     }
 
+    /// Roda do mouse: o volume do app que está tocando (ou o do Windows, se não achar o app).
     fn wheel(&mut self, _x: f32, _y: f32, steps: f32, _mode: Mode, _ctx: &mut Ctx) {
-        win::change_volume(steps);
+        match self.volume() {
+            Some(v) => {
+                let level = (v + steps * 0.04).clamp(0.0, 1.0);
+                let _ = self.tx.send(Cmd::Volume(level));
+                self.volume_wanted = Some((level, Instant::now()));
+                self.hud_until = Some(Instant::now() + HUD);
+            }
+            None => win::change_volume(steps),
+        }
     }
 
     fn menu(&self, env: &Env) -> Vec<MenuItem> {
@@ -781,15 +1190,44 @@ impl Kind for Media {
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        Some(self.next_poll.min(self.next_message))
+        let mut next = self.next_poll.min(self.next_message);
+        if self.fade.is_some() {
+            next = next.min(self.frame_at);
+        }
+        if let Some(t) = self.hud_until {
+            next = next.min(t);
+        }
+        Some(next)
     }
 
     fn tick(&mut self, _ctx: &mut Ctx) -> bool {
         let now = Instant::now();
         let mut changed = false;
+        if let Some((_, since)) = &self.fade {
+            changed = true; // um quadro da troca de fundo
+            if since.elapsed().as_secs_f32() * 1000.0 >= FADE_MS {
+                self.fade = None;
+            }
+            self.frame_at = now + Duration::from_millis(33);
+        }
+        if self.hud_until.is_some_and(|t| now >= t) {
+            self.hud_until = None;
+            changed = true;
+        }
         if now >= self.next_poll {
             self.next_poll = now + POLL;
             if let Some(snap) = self.shared.lock().unwrap().clone() {
+                // trocou de música: o fundo antigo some aos poucos por cima do novo
+                let old_key = self.media.as_ref().and_then(|m| m.art_key.clone());
+                if old_key.is_some() && snap.art_key != old_key {
+                    if let Some((_, img)) = self.bg_cache.borrow().as_ref() {
+                        self.fade = Some((img.clone(), now));
+                    }
+                    self.frame_at = now;
+                }
+                if !self.has_media() || snap.empty {
+                    self.big = self.big && !snap.empty;
+                }
                 self.media = Some(snap);
             }
             let sig = self.signature();

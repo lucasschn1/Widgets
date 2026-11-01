@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/desktop.png" width="760" alt="Os quatro widgets na área de trabalho">
+  <img src="docs/images/desktop.png" width="760" alt="Os widgets na área de trabalho">
 </p>
 
 Eles ficam presos ao papel de parede, atrás das janelas, e o fundo de cada um é o próprio
@@ -40,11 +40,18 @@ Quando sair uma versão nova, o próprio app avisa e atualiza com um clique. Par
 
 ## O que vem junto
 
-**Clima e Sistema** mostra o tempo agora e nas próximas horas, além de CPU, memória e disco
-em anéis. Avisa quando vai começar a chover.
+**Tempo** tem o céu de agora como fundo: azul de dia, escuro de noite, cinza quando fecha, com
+a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, com um clique, os próximos
+7 dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
+
+**Sistema** mostra CPU, memória e disco em três anéis. Clique num anel e o widget cresce com os
+5 apps que mais usam aquele recurso, cada um com o seu ícone (no disco, as unidades). No tamanho
+grande, a lista fica sempre aberta, junto com a rede e há quanto tempo o PC está ligado.
 
 **Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
-outros), com capa, barra de progresso e controles. A roda do mouse em cima dele muda o volume.
+outros). O fundo ganha as cores da capa. Clique na capa para abrir o player grande, com o
+volume do app, aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em
+cima dele muda o volume do app que está tocando.
 
 **GitHub** traz o mapa de contribuições, a sequência de dias e as últimas atividades. Se você
 usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso

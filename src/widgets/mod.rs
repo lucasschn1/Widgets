@@ -8,6 +8,7 @@ pub mod github;
 pub mod media;
 pub mod pomodoro;
 pub mod system;
+pub mod tempo;
 
 use std::time::Instant;
 
@@ -17,12 +18,13 @@ use crate::config::{self, Get};
 use crate::gfx::Canvas;
 
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
-pub const KEYS: &[&str] = &["sistema", "midia", "github", "pomodoro"];
+pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro"];
 
 /// Nome do widget `key` (sem criar o widget).
 pub fn title(key: &str) -> &'static str {
     match key {
-        "sistema" => "Clima e Sistema",
+        "tempo" => "Tempo",
+        "sistema" => "Sistema",
         "midia" => "Tocando agora",
         "github" => "GitHub",
         "pomodoro" => "Pomodoro",
@@ -33,7 +35,8 @@ pub fn title(key: &str) -> &'static str {
 /// Frase curta sobre o widget (galeria e boas-vindas).
 pub fn description(key: &str) -> &'static str {
     match key {
-        "sistema" => "Tempo agora e nas próximas horas, com CPU, memória e disco.",
+        "tempo" => "O céu de agora, as próximas horas e os próximos dias.",
+        "sistema" => "CPU, memória e disco em anéis, com os apps que mais usam.",
         "midia" => "A música ou o vídeo tocando no Windows, com capa e controles.",
         "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
         "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
@@ -44,7 +47,8 @@ pub fn description(key: &str) -> &'static str {
 /// Ícone do widget na barra lateral das configurações (ver theme::icon).
 pub fn icon_name(key: &str) -> &'static str {
     match key {
-        "sistema" => "clima",
+        "tempo" => "clima",
+        "sistema" => "sistema",
         "midia" => "midia",
         "github" => "github",
         "pomodoro" => "pomodoro",
@@ -56,6 +60,7 @@ pub fn icon_name(key: &str) -> &'static str {
 pub fn sample(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
     match key {
         "midia" => Some(Box::new(media::Media::sample())),
+        "sistema" => Some(Box::new(system::System::sample())),
         "github" => Some(Box::new(github::GitHub::sample(cfg, cache))),
         _ => create(key, cfg, cache),
     }
@@ -64,7 +69,8 @@ pub fn sample(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
 /// Cria o widget `key` (None para os que ainda não existem nesta versão).
 pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
     match key {
-        "sistema" => Some(Box::new(system::System::new(cfg, cache))),
+        "tempo" => Some(Box::new(tempo::Tempo::new(cfg, cache))),
+        "sistema" => Some(Box::new(system::System::new())),
         "midia" => Some(Box::new(media::Media::new(cfg))),
         "github" => Some(Box::new(github::GitHub::new(cfg, cache))),
         "pomodoro" => Some(Box::new(pomodoro::Pomodoro::new(cfg))),

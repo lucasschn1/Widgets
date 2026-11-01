@@ -619,7 +619,7 @@ impl Suggest {
             let (seq, query) = (self.seq, self.query.clone());
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let found = crate::widgets::system::search_cities(&query, 6).unwrap_or_default();
+                let found = crate::widgets::tempo::search_cities(&query, 6).unwrap_or_default();
                 let _ = tx.send((seq, found));
                 events::wake();
             });
