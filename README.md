@@ -240,7 +240,7 @@ As imagens do README são desenhadas pelo próprio código, com dados de exemplo
 <summary><b>Lançando uma versão</b></summary>
 
 1. Mude `version` no `Cargo.toml` e faça o commit.
-2. Crie e envie a tag: `git tag v3.5.0` e depois `git push origin main v3.5.0`.
+2. Crie e envie a tag: `git tag v3.6.0` e depois `git push origin main v3.6.0`.
 
 O GitHub Actions compila o `Widgets.exe`, gera o `.zip` e o instalador e publica o Release.
 Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua máquina,

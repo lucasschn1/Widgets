@@ -434,6 +434,8 @@ pub struct Tempo {
     status: Status,
     started: Instant,
     view: Cell<View>,
+    /// quando a vista (ou a página) mudou: os painéis entram um depois do outro
+    view_at: Cell<Instant>,
     /// página dos detalhes (pequeno e médio)
     page: Cell<usize>,
     /// roda do mouse acumulada para virar a página (o touchpad manda passos pequenos)
@@ -463,6 +465,7 @@ impl Tempo {
             status: Status { updated, ..Default::default() },
             started: Instant::now(),
             view: Cell::new(View::Main),
+            view_at: Cell::new(Instant::now() - Duration::from_secs(5)),
             page: Cell::new(0),
             page_wheel: 0.0,
             hour_wheel: 0.0,
@@ -696,6 +699,7 @@ impl Tempo {
             return;
         }
         self.view.set(View::Day(d));
+        self.mark_view();
         let len = self.day_hours(d).len();
         // hoje começa na hora de agora; os outros dias, de manhã (ou na hora clicada)
         let now_hour = self.weather.as_ref().and_then(|w| w["now"].str_of("time")).and_then(minute_of_day).map(|m| m / 60);
@@ -736,7 +740,18 @@ impl Tempo {
     }
 
     fn animating(&self) -> bool {
-        self.main_scroll.animating() || self.day_scroll.animating()
+        self.main_scroll.animating() || self.day_scroll.animating() || self.view_at.get().elapsed() < Duration::from_millis(700)
+    }
+
+    /// Começa a entrada dos painéis (abriu os detalhes, um dia ou outra página).
+    fn mark_view(&self) {
+        self.view_at.set(Instant::now());
+    }
+
+    /// Opacidade do painel `i` entrando (0 a 1).
+    fn tile_in(&self, i: usize) -> f32 {
+        let ms = self.view_at.get().elapsed().as_secs_f32() * 1000.0 - i as f32 * 45.0;
+        ease((ms / 320.0).clamp(0.0, 1.0))
     }
 
     // ---------- geometria dos botões ----------
@@ -1000,11 +1015,54 @@ impl Tempo {
         c.line(&[(cx + 2.5 * d, cy - 5.0), (cx - 2.5 * d, cy), (cx + 2.5 * d, cy + 5.0)], col, 1.8);
     }
 
-    fn draw_tile(c: &mut Canvas, t: &Tile, (x, y, w, h): Rect4) {
-        c.fill_round_rect(x, y, x + w, y + h, 14.0, Rgba(0, 0, 0, 44));
+    /// Ícone pequeno de linha antes do título do painel (desenhado, sem depender de fonte).
+    fn draw_tile_icon(c: &mut Canvas, title: &str, x: f32, y: f32, col: Rgba) {
+        let (cx, cy) = (x + 4.5, y + 5.5);
+        match title {
+            "SENSAÇÃO" => {
+                c.line(&[(cx, cy - 4.5), (cx, cy + 1.5)], col, 1.6);
+                c.fill_circle(cx, cy + 3.0, 2.4, col);
+            }
+            "UMIDADE" | "CHUVA" => {
+                c.polygon(&[(cx, cy - 5.0), (cx - 3.1, cy + 0.6), (cx + 3.1, cy + 0.6)], col);
+                c.fill_circle(cx, cy + 1.6, 3.2, col);
+            }
+            "VENTO" => {
+                c.line(&[(cx - 4.0, cy - 2.5), (cx + 3.0, cy - 2.5)], col, 1.4);
+                c.line(&[(cx - 4.0, cy + 0.5), (cx + 4.5, cy + 0.5)], col, 1.4);
+                c.line(&[(cx - 4.0, cy + 3.5), (cx + 1.5, cy + 3.5)], col, 1.4);
+            }
+            "ÍNDICE UV" => {
+                c.fill_circle(cx, cy, 2.3, col);
+                for k in 0..8 {
+                    let a = (k as f32 * 45.0).to_radians();
+                    c.line(&[(cx + a.cos() * 3.6, cy + a.sin() * 3.6), (cx + a.cos() * 5.0, cy + a.sin() * 5.0)], col, 1.1);
+                }
+            }
+            _ => {
+                // nascer / pôr do sol: meio sol sobre o horizonte
+                c.arc(cx, cy + 3.0, 3.2, 180.0, 360.0, col, 1.4);
+                c.line(&[(cx - 5.0, cy + 3.5), (cx + 5.0, cy + 3.5)], col, 1.4);
+                for deg in [-150.0f32, -90.0, -30.0] {
+                    let a = deg.to_radians();
+                    c.line(&[(cx + a.cos() * 4.8, cy + 3.0 + a.sin() * 4.8), (cx + a.cos() * 6.4, cy + 3.0 + a.sin() * 6.4)], col, 1.2);
+                }
+            }
+        }
+    }
+
+    /// Um painel de detalhe; `a`: opacidade da entrada (0 a 1), que também o traz um pouco de baixo.
+    fn draw_tile(c: &mut Canvas, t: &Tile, (x, y, w, h): Rect4, a: f32) {
+        if a <= 0.01 {
+            return;
+        }
+        let fa = |col: Rgba| Rgba(col.0, col.1, col.2, (col.3 as f32 * a) as u8);
+        let y = y + (1.0 - a) * 6.0;
+        c.fill_round_rect(x, y, x + w, y + h, 14.0, fa(Rgba(0, 0, 0, 44)));
         let ix = x + 11.0;
         let iw = w - 22.0;
-        c.text(ix, y + 10.0, &t.title, Face::Semibold, 9.5, FG.alpha(0.7), Anchor::LA, Some(iw));
+        Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 9.5, fa(FG.alpha(0.7)));
+        c.text(ix + 12.0, y + 10.0, &t.title, Face::Semibold, 9.5, fa(FG.alpha(0.7)), Anchor::LA, Some(iw - 12.0));
         let wind_room = if matches!(t.visual, Visual::Wind(_)) { 34.0 } else { 0.0 };
         let vsize = if h >= 80.0 { 23.0 } else { 20.0 };
         // a unidade ("km/h") vai menor, ao lado do número
@@ -1012,41 +1070,41 @@ impl Tempo {
             Some((n, u)) => (n, Some(u)),
             None => (t.value.as_str(), None),
         };
-        let nw = c.text(ix - 1.0, y + 22.0, number, Face::Regular, vsize, FG, Anchor::LA, Some(iw - wind_room));
+        let nw = c.text(ix - 1.0, y + 22.0, number, Face::Regular, vsize, fa(FG), Anchor::LA, Some(iw - wind_room));
         if let Some(u) = unit {
             let base = y + 22.0 + vsize * 0.98;
-            c.text(ix - 1.0 + nw + 4.0, base, u, Face::Regular, 12.5, FG.alpha(0.85), Anchor::LS, Some((iw - wind_room - nw - 4.0).max(10.0)));
+            c.text(ix - 1.0 + nw + 4.0, base, u, Face::Regular, 12.5, fa(FG.alpha(0.85)), Anchor::LS, Some((iw - wind_room - nw - 4.0).max(10.0)));
         }
         let mut sub_lines = 2;
         let by = y + h - 31.0;
         match t.visual {
             Visual::Uv(uv) => {
-                let stops = [(0.0, Rgba::rgb(48, 209, 88)), (0.3, Rgba::rgb(255, 214, 10)), (0.55, Rgba::rgb(255, 159, 10)), (0.8, Rgba::rgb(255, 69, 58)), (1.0, Rgba::rgb(191, 90, 242))];
+                let stops = [(0.0, fa(Rgba::rgb(48, 209, 88))), (0.3, fa(Rgba::rgb(255, 214, 10))), (0.55, fa(Rgba::rgb(255, 159, 10))), (0.8, fa(Rgba::rgb(255, 69, 58))), (1.0, fa(Rgba::rgb(191, 90, 242)))];
                 c.gradient_h(ix, by, ix + iw, by + 4.0, 2.0, &stops, ix, ix + iw);
                 let px = ix + iw * (uv as f32 / 11.0).clamp(0.0, 1.0);
-                c.fill_circle(px, by + 2.0, 4.5, Rgba(0, 0, 0, 90));
-                c.fill_circle(px, by + 2.0, 3.2, WHITE);
+                c.fill_circle(px, by + 2.0, 4.5, fa(Rgba(0, 0, 0, 90)));
+                c.fill_circle(px, by + 2.0, 3.2, fa(WHITE));
                 sub_lines = 1;
             }
             Visual::Sun(progress) => {
-                c.fill_round_rect(ix, by + 1.0, ix + iw, by + 3.0, 1.0, WHITE.alpha(0.25));
+                c.fill_round_rect(ix, by + 1.0, ix + iw, by + 3.0, 1.0, fa(WHITE.alpha(0.25)));
                 if let Some(p) = progress {
                     let px = ix + iw * p.clamp(0.0, 1.0);
-                    c.fill_round_rect(ix, by + 1.0, px, by + 3.0, 1.0, Rgba::rgb(255, 214, 10));
-                    c.fill_circle(px, by + 2.0, 4.5, Rgba::rgb(255, 214, 10));
+                    c.fill_round_rect(ix, by + 1.0, px, by + 3.0, 1.0, fa(Rgba::rgb(255, 214, 10)));
+                    c.fill_circle(px, by + 2.0, 4.5, fa(Rgba::rgb(255, 214, 10)));
                 }
                 sub_lines = 1;
             }
             Visual::Wind(deg) => {
                 // a seta aponta para onde o vento vai
                 let (cx, cy, r) = (x + w - 25.0, y + 34.0, 13.0);
-                c.stroke_circle(cx, cy, r, WHITE.alpha(0.3), 1.0);
+                c.stroke_circle(cx, cy, r, fa(WHITE.alpha(0.3)), 1.0);
                 let a = ((deg + 180.0) as f32).to_radians();
                 let (dx, dy) = (a.sin(), -a.cos());
                 let tip = (cx + dx * 9.0, cy + dy * 9.0);
-                c.line(&[(cx - dx * 9.0, cy - dy * 9.0), tip], FG, 1.6);
+                c.line(&[(cx - dx * 9.0, cy - dy * 9.0), tip], fa(FG), 1.6);
                 let (lx, ly) = (-dy, dx);
-                c.line(&[(tip.0 - dx * 4.0 + lx * 3.0, tip.1 - dy * 4.0 + ly * 3.0), tip, (tip.0 - dx * 4.0 - lx * 3.0, tip.1 - dy * 4.0 - ly * 3.0)], FG, 1.6);
+                c.line(&[(tip.0 - dx * 4.0 + lx * 3.0, tip.1 - dy * 4.0 + ly * 3.0), tip, (tip.0 - dx * 4.0 - lx * 3.0, tip.1 - dy * 4.0 - ly * 3.0)], fa(FG), 1.6);
             }
             Visual::None => {}
         }
@@ -1054,7 +1112,7 @@ impl Tempo {
         let n = lines.len();
         for (k, line) in lines.iter().enumerate() {
             let ly = y + h - 10.0 - 13.0 * (n - 1 - k) as f32;
-            c.text(ix, ly, line, Face::Regular, 10.5, FG.alpha(0.78), Anchor::LS, Some(iw));
+            c.text(ix, ly, line, Face::Regular, 10.5, fa(FG.alpha(0.78)), Anchor::LS, Some(iw));
         }
     }
 
@@ -1070,8 +1128,8 @@ impl Tempo {
         let tiles = self.now_tiles();
         let per = Self::tiles_per_page(mode);
         let page = self.page.get().min(Self::pages(mode) - 1);
-        for (slot, tile) in Self::tile_slots(mode).into_iter().zip(tiles.iter().skip(page * per)) {
-            Self::draw_tile(c, tile, slot);
+        for (i, (slot, tile)) in Self::tile_slots(mode).into_iter().zip(tiles.iter().skip(page * per)).enumerate() {
+            Self::draw_tile(c, tile, slot, self.tile_in(i));
         }
         for (i, (x0, y0, x1, y1)) in Self::dot_rects(mode).into_iter().enumerate() {
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
@@ -1100,7 +1158,7 @@ impl Tempo {
                 let w = (W - 2.0 * PAD - 8.0) / 2.0;
                 for (i, tile) in Self::day_tiles(&day).iter().enumerate() {
                     let slot = (PAD + (w + 8.0) * (i % 2) as f32, DAY_TILES_G + 82.0 * (i / 2) as f32, w, 74.0);
-                    Self::draw_tile(c, tile, slot);
+                    Self::draw_tile(c, tile, slot, self.tile_in(i));
                 }
             }
             _ => {
@@ -1320,9 +1378,16 @@ impl Kind for Tempo {
             DETAILS => {
                 self.view.set(View::Details);
                 self.page.set(0);
+                self.mark_view();
             }
-            NEXT_PAGE => self.page.set((self.page.get() + 1) % Self::pages(mode)),
-            a if (PAGE..PAGE + 10).contains(&a) => self.page.set(((a - PAGE) as usize).min(Self::pages(mode) - 1)),
+            NEXT_PAGE => {
+                self.page.set((self.page.get() + 1) % Self::pages(mode));
+                self.mark_view();
+            }
+            a if (PAGE..PAGE + 10).contains(&a) => {
+                self.page.set(((a - PAGE) as usize).min(Self::pages(mode) - 1));
+                self.mark_view();
+            }
             a if (DAY..DAY + 10).contains(&a) => self.open_day((a - DAY) as usize, None),
             a if (HOUR..HOUR + NEXT_HOURS as u32).contains(&a) => {
                 if let Some(h) = self.next_hours().get((a - HOUR) as usize) {
@@ -1356,6 +1421,9 @@ impl Kind for Tempo {
                     let n = Self::pages(mode);
                     let p = self.page.get();
                     let next = if self.page_wheel > 0.0 { (p + 1).min(n - 1) } else { p.saturating_sub(1) };
+                    if next != p {
+                        self.mark_view();
+                    }
                     self.page.set(next);
                     self.page_wheel = 0.0;
                 }
@@ -1570,6 +1638,8 @@ impl Tempo {
         }
         t.page.set(page);
         t.main_scroll = Scroll::at(scroll);
+        // a entrada dos painéis já terminou
+        t.view_at.set(Instant::now() - Duration::from_secs(5));
         t
     }
 }

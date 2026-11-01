@@ -201,6 +201,7 @@ impl App {
         app.place_split_system();
         app.grow_old_small();
         app.clear_small_overlaps();
+        app.fit_new_heights();
         if app.cards.is_empty() && !app.tray.ok {
             app.create_card("tempo", true); // sem bandeja, não pode ficar sem nada na tela
         }
@@ -361,6 +362,54 @@ impl App {
 
     /// Depois do pequeno virar quadrado: se um widget que estava solto embaixo de um pequeno
     /// (sem encaixar) ficou por baixo dele, desce o suficiente, levando junto os encaixados nele.
+    /// Um widget mudou de altura numa versão nova (ex.: o Tocando agora grande ficou com a capa
+    /// na largura toda): os vizinhos saem da frente uma vez, como ao mudar de tamanho. A altura de
+    /// cada um fica guardada para a próxima comparação.
+    fn fit_new_heights(&mut self) {
+        // alturas antes da versão 3.6 (quando ainda não eram guardadas)
+        let legacy = |key: &str, mode: Mode| -> Option<f32> {
+            match (key, mode) {
+                ("midia", Mode::M) => Some(102.0),
+                ("midia", Mode::G) => Some(278.0),
+                ("github", Mode::M) => Some(233.0),
+                ("github", Mode::G) => Some(340.0),
+                ("sistema", Mode::G) => Some(424.0),
+                _ => None,
+            }
+        };
+        for i in 0..self.cards.len() {
+            let (key, mode) = (self.cards[i].key(), self.cards[i].mode);
+            if self.cards[i].temp {
+                continue;
+            }
+            let now_h = self.cards[i].layout(mode).h;
+            let w = &self.sh.cfg[key];
+            let old_h = match (w.f64_of("altura"), w.str_of("altura_tamanho")) {
+                (Some(h), Some(m)) if m == mode.code() => Some(h as f32),
+                (Some(_), Some(_)) => None,
+                _ => legacy(key, mode),
+            };
+            if let Some(old_h) = old_h.filter(|h| (h - now_h).abs() > 0.5) {
+                let card = &self.cards[i];
+                let (cw, _) = card.card_size();
+                let old = card.card_rect_at(card.pos, Some((cw, (old_h * card.s).round() as i32)));
+                let new = card.card_rect();
+                let start = self.stack_below(i, Some(old)).into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + new.3 - old.3))).collect();
+                for (j, to) in self.make_room(i, old, new, start) {
+                    self.cards[j].pos = to;
+                    self.cards[j].present(&self.sh, true);
+                    let k = self.cards[j].key();
+                    let wj = self.sh.cfg.obj_mut(k);
+                    wj.insert("x".into(), json!(to.0));
+                    wj.insert("y".into(), json!(to.1));
+                }
+            }
+            let w = self.sh.cfg.obj_mut(key);
+            w.insert("altura".into(), json!(now_h));
+            w.insert("altura_tamanho".into(), json!(mode.code()));
+        }
+    }
+
     fn clear_small_overlaps(&mut self) {
         if self.sh.cfg["app"].bool_of("pequeno_quadrado_v2").unwrap_or(false) {
             return;
@@ -715,6 +764,7 @@ impl App {
         card.drag = None;
         if action.is_some() && card.hot.is_some() {
             card.pressing = true;
+            card.press_anim = Some((Instant::now(), true));
             card.present(&self.sh, false);
         }
     }
@@ -723,6 +773,7 @@ impl App {
         let press = self.cards[i].press.take();
         if self.cards[i].pressing {
             self.cards[i].pressing = false;
+            self.cards[i].press_anim = Some((Instant::now(), false));
             self.cards[i].present(&self.sh, false);
         }
         if self.cards[i].drag.is_some() {

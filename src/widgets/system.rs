@@ -21,8 +21,10 @@ const LIST_N: usize = 5;
 const BACK_ROW_H: f32 = 34.0;
 const BACK_LIST_Y: f32 = 44.0;
 const BACK_N: usize = 3;
-const SEG_Y: f32 = 150.0;
-const G_LIST_Y: f32 = 194.0;
+/// grande: o cabeçalho "SISTEMA" em cima empurra o resto para baixo
+const G_TOP: f32 = 24.0;
+const SEG_Y: f32 = 150.0 + G_TOP;
+const G_LIST_Y: f32 = 194.0 + G_TOP;
 const G_FOOT_Y: f32 = G_LIST_Y + ROW_H * LIST_N as f32 + 6.0;
 const G_H: f32 = G_FOOT_Y + 34.0;
 
@@ -242,7 +244,11 @@ impl System {
 
     /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
     fn rings_geom(mode: Mode) -> (f32, f32, f32, f32, f32) {
-        if mode == Mode::P { (SMALL / 2.0, 62.0, 100.0, 9.0, 22.0) } else { (PAD + 60.0, 75.0, 120.0, 11.0, 28.0) }
+        match mode {
+            Mode::P => (SMALL / 2.0, 62.0, 100.0, 10.5, 24.0),
+            Mode::M => (PAD + 60.0, 75.0, 120.0, 13.0, 30.0),
+            Mode::G => (PAD + 60.0, 75.0 + G_TOP, 120.0, 13.0, 30.0),
+        }
     }
 
     fn ring_at(&self, x: f32, y: f32, mode: Mode) -> Option<usize> {
@@ -262,7 +268,8 @@ impl System {
             let col = (SMALL - 16.0) / 3.0;
             (8.0 + col * i as f32, 118.0, 8.0 + col * (i + 1) as f32, SMALL - 6.0)
         } else {
-            let y = 22.0 + 36.0 * i as f32;
+            let top = if mode == Mode::G { G_TOP } else { 0.0 };
+            let y = 22.0 + top + 36.0 * i as f32;
             (148.0, y - 6.0, W - 10.0, y + 30.0)
         }
     }
@@ -368,9 +375,24 @@ impl System {
             let rc = di / 2.0 - wd / 2.0;
             c.stroke_circle(cx, cy, rc, color(i).alpha(if dim { 0.1 } else { 0.22 }), wd);
             if *v > 0.003 {
-                c.arc(cx, cy, rc, -90.0, -90.0 + 360.0 * v.min(0.999), col, wd);
+                let end = -90.0 + 360.0 * v.min(0.999);
+                c.arc(cx, cy, rc, -90.0, end, col, wd);
+                if !dim {
+                    // a ponta brilha um pouco, como nos anéis de atividade
+                    let a = end.to_radians();
+                    let (tx, ty) = (cx + rc * a.cos(), cy + rc * a.sin());
+                    c.fill_circle(tx, ty, wd * 0.78, color(i).alpha(0.2));
+                    c.fill_circle(tx, ty, wd * 0.48, color(i).mix(WHITE, 0.35));
+                }
             }
         }
+    }
+
+    /// Cabeçalho do grande: "SISTEMA" na cor da CPU e os núcleos à direita.
+    fn draw_header(&self, c: &mut Canvas) {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        c.text(PAD, 12.0, "SISTEMA", Face::Semibold, 11.0, Rgba::rgb(255, 107, 139), Anchor::LA, None);
+        c.text(W - PAD, 12.0, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 
     fn draw_metrics(&self, c: &mut Canvas, mode: Mode) {
@@ -559,6 +581,7 @@ impl Kind for System {
         self.draw_rings(c, mode);
         self.draw_metrics(c, mode);
         if mode == Mode::G {
+            self.draw_header(c);
             let which = self.current(mode).unwrap_or(1);
             self.draw_seg(c, which);
             self.draw_list(c, which, G_LIST_Y, LIST_N, ROW_H);

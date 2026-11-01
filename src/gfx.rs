@@ -122,6 +122,8 @@ pub struct Gfx {
     icon_family: &'static str,
     /// números grandes (temperatura, relógio): a fonte de títulos do Windows 11, se houver
     display_family: &'static str,
+    /// algarismos de largura igual (o relógio não "treme" quando os números mudam)
+    tabular: Option<IDWriteTypography>,
 }
 
 thread_local! {
@@ -151,7 +153,10 @@ impl Gfx {
             let round = d2d.CreateStrokeStyle(&props, None)?;
             let icon_family = if crate::win::font_exists("SegoeIcons.ttf") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
             let display_family = if crate::win::font_exists("SegUIVar.ttf") { "Segoe UI Variable Display" } else { "Segoe UI" };
-            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family })
+            let tabular = dw.CreateTypography().ok().filter(|t| {
+                t.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 }).is_ok()
+            });
+            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular })
         }
     }
 
@@ -187,6 +192,9 @@ impl Gfx {
         let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
             let layout = self.dw.CreateTextLayout(&utf16, &format, 100_000.0, 0.0).expect("CreateTextLayout");
+            if let (Some(t), false) = (&self.tabular, matches!(face, Face::Icons | Face::Symbol)) {
+                let _ = layout.SetTypography(t, DWRITE_TEXT_RANGE { startPosition: 0, length: utf16.len() as u32 });
+            }
             let mut metrics = DWRITE_TEXT_METRICS::default();
             let _ = layout.GetMetrics(&mut metrics);
             let mut lines = [DWRITE_LINE_METRICS::default(); 1];
@@ -767,4 +775,22 @@ pub fn fit_square(img: &Image, px: u32) -> Image {
         square.px[d..d + side as usize * 4].copy_from_slice(&img.px[s..s + side as usize * 4]);
     }
     resize(&square, px, px)
+}
+
+#[cfg(test)]
+mod digit_tests {
+    use super::*;
+
+    /// Algarismos de largura igual: "11:11" e "00:00" ocupam o mesmo espaço.
+    #[test]
+    fn tabular_digits() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        for face in [Face::Light, Face::Regular, Face::Semibold] {
+            let (a, b) = (c.text_width("11:11", face, 40.0), c.text_width("00:00", face, 40.0));
+            assert!((a - b).abs() < 0.5, "{face:?}: 11:11 = {a}, 00:00 = {b}");
+        }
+    }
 }

@@ -370,21 +370,24 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
 // ---------- o widget ----------
 
 const W: f32 = 320.0;
-// grande: capa, título, barra e controles; embaixo, o volume do app e aleatório/abrir/repetir
-const G_VOL_Y: f32 = 214.0;
-const G_TOG_Y: f32 = 250.0;
+// grande: a capa na largura toda em cima; embaixo, fonte, título e artista, a barra, os
+// controles, o volume do app e aleatório/abrir/repetir
+const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, 200.0, 18.0); // x, y, largura, altura, raio
+const G_TEXT_Y: f32 = 228.0;
+const G_VOL_Y: f32 = 384.0;
+const G_TOG_Y: f32 = 420.0;
 const H: f32 = G_TOG_Y + 28.0;
 const VOL_X: (f32, f32) = (44.0, W - 44.0);
 const RADIUS: f32 = RADIUS_G;
 const ART: f32 = 76.0;
 const ART_RADIUS: f32 = 14.0;
 const ART_XY: (f32, f32) = (18.0, 18.0);
-const TEXT_X: f32 = 18.0 + 76.0 + 14.0;
-const TEXT_W: f32 = W - TEXT_X - 18.0;
-const BAR_Y: f32 = 114.0;
-const CTRL_Y: f32 = 162.0;
+const TEXT_X: f32 = 18.0;
+const TEXT_W: f32 = W - 36.0;
+const BAR_Y: f32 = 290.0;
+const CTRL_Y: f32 = 336.0;
 const PLAY_D: f32 = 44.0;
-const IDLE_BOX: (f32, f32, f32, f32) = (18.0, 110.0, W - 36.0, 70.0); // x, y, largura, altura do equalizador
+const IDLE_BOX: (f32, f32, f32, f32) = (36.0, 66.0, W - 72.0, 100.0); // x, y, largura, altura do equalizador (na capa)
 
 // pequeno (quadrado): capa e tocar em cima, título e artista embaixo, barra fina no pé
 const C_ART: f32 = 64.0;
@@ -395,17 +398,17 @@ const C_PLAY_D: f32 = 36.0;
 const C_BAR_Y: f32 = 138.0;
 const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
-// médio: capa, título e artista, controles e uma barra de progresso fina
-const MEDIUM_H: f32 = 102.0;
+// médio: capa, fonte, título e artista, controles e uma barra de progresso fina
+const MEDIUM_H: f32 = 110.0;
 const M_RADIUS: f32 = RADIUS_M;
 const M_ART: f32 = 74.0;
 const M_ART_RADIUS: f32 = 12.0;
 const M_ART_XY: (f32, f32) = (14.0, 14.0);
 const M_TEXT_X: f32 = 14.0 + 74.0 + 14.0;
 const M_TEXT_W: f32 = W - M_TEXT_X - 16.0;
-const M_CTRL_Y: f32 = 66.0;
+const M_CTRL_Y: f32 = 74.0;
 const M_PLAY_D: f32 = 32.0;
-const M_BAR_Y: f32 = 92.0;
+const M_BAR_Y: f32 = 100.0;
 const M_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 17.0, 14.0 + 17.0, 40.0, 40.0);
 
 const POLL: Duration = Duration::from_millis(250);
@@ -659,6 +662,15 @@ impl Media {
         }
     }
 
+    /// (x, y, largura, altura, raio) da capa: quadrada no pequeno e no médio, larga no grande.
+    fn art_rect(&self, mode: Mode) -> (f32, f32, f32, f32, f32) {
+        if mode == Mode::G {
+            return G_ART;
+        }
+        let ((x, y), size, r) = self.art_geom(mode);
+        (x, y, size, size, r)
+    }
+
     fn idle_box(mode: Mode) -> (f32, f32, f32, f32) {
         match mode {
             Mode::P => C_IDLE_BOX,
@@ -715,8 +727,8 @@ impl Media {
     }
 
     fn on_art(&self, x: f32, y: f32, mode: Mode) -> bool {
-        let ((ax, ay), art, _) = self.art_geom(mode);
-        self.has_media() && (ax..=ax + art).contains(&x) && (ay..=ay + art).contains(&y)
+        let (ax, ay, aw, ah, _) = self.art_rect(mode);
+        self.has_media() && (ax..=ax + aw).contains(&x) && (ay..=ay + ah).contains(&y)
     }
 
     /// Fração (0 a 1) da música no ponto x, se (x, y) está sobre a barra de progresso.
@@ -764,15 +776,16 @@ impl Media {
     fn paste_art(&self, c: &mut Canvas, mode: Mode) -> bool {
         let Some(m) = self.media.as_ref().filter(|m| !m.empty) else { return false };
         let (Some(art), Some(key)) = (&m.art, &m.art_key) else { return false };
-        let ((x, y), size, radius) = self.art_geom(mode);
-        let px = (size * c.s).round() as u32;
+        let (x, y, w, h, radius) = self.art_rect(mode);
+        let px = (w * c.s).round() as u32;
         let cache_key = (key.clone(), px);
         let mut cache = self.art_cache.borrow_mut();
         if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
             *cache = Some((cache_key, gfx::fit_square(art, px)));
         }
-        c.push_round_clip(x, y, x + size, y + size, radius);
-        c.image(&cache.as_ref().unwrap().1, x, y);
+        // quadrada na largura da área; se a área é mais baixa, mostra o meio da capa
+        c.push_round_clip(x, y, x + w, y + h, radius);
+        c.image(&cache.as_ref().unwrap().1, x, y - (w - h) / 2.0);
         c.pop_clip();
         true
     }
@@ -824,17 +837,17 @@ impl Media {
 
     /// Sombra suave embaixo da capa (dá profundidade sobre o fundo colorido).
     fn art_shadow(&self, c: &mut Canvas, mode: Mode) {
-        let ((x, y), size, radius) = self.art_geom(mode);
+        let (x, y, w, h, radius) = self.art_rect(mode);
         for i in 1..=4 {
             let g = i as f32 * 2.0;
-            c.fill_round_rect(x - g / 2.0, y + 3.0 + g / 2.0, x + size + g / 2.0, y + size + 3.0 + g, radius + g, Rgba(0, 0, 0, 16));
+            c.fill_round_rect(x - g / 2.0, y + 3.0 + g / 2.0, x + w + g / 2.0, y + h + 3.0 + g, radius + g, Rgba(0, 0, 0, 16));
         }
     }
 
     /// Nota musical no lugar da capa, quando há música mas não há imagem.
     fn note(&self, c: &mut Canvas, mode: Mode, glyph: f32) {
-        let ((x, y), size, _) = self.art_geom(mode);
-        c.text(x + size / 2.0, y + size / 2.0, "♪", Face::Symbol, glyph, MUTED, Anchor::MM, None);
+        let (x, y, w, h, _) = self.art_rect(mode);
+        c.text(x + w / 2.0, y + h / 2.0, "♪", Face::Symbol, glyph, MUTED, Anchor::MM, None);
     }
 
     /// Quadros de um equalizador "cochilando", com zzz subindo. Desenhados uma vez só.
@@ -989,9 +1002,9 @@ impl Media {
     /// Tudo o que fica por cima do fundo.
     fn draw_fg(&self, c: &mut Canvas, mode: Mode, has_bg: bool) {
         let m = self.media.as_ref().filter(|m| !m.empty);
-        let ((ax, ay), art, radius) = self.art_geom(mode);
+        let (ax, ay, aw, ah, radius) = self.art_rect(mode);
         if m.is_none_or(|m| m.art.is_none()) {
-            c.fill_round_rect(ax, ay, ax + art, ay + art, radius, WHITE.alpha(0.12));
+            c.fill_round_rect(ax, ay, ax + aw, ay + ah, radius, WHITE.alpha(0.12));
         } else if has_bg {
             self.art_shadow(c, mode);
         }
@@ -1025,8 +1038,9 @@ impl Media {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 28.0);
                     }
-                    c.text(x, 13.0, &m.title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
-                    c.text(x, 32.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
+                    c.text(x, 12.0, source_label(m.kind), Face::Semibold, 9.5, source_color(m.kind), Anchor::LA, None);
+                    c.text(x, 26.0, &m.title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
+                    c.text(x, 44.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
                 } else {
                     c.text(x, 22.0, &funny_title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
                     for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.0, w, 2).iter().enumerate() {
@@ -1037,22 +1051,19 @@ impl Media {
             Mode::G => {
                 let (x, w) = (TEXT_X, TEXT_W);
                 let kind = m.map(|m| m.kind.to_string()).unwrap_or_else(|| self.pref());
-                c.text(x, 19.0, source_label(&kind), Face::Semibold, 10.0, source_color(&kind), Anchor::LA, None);
+                let y = G_TEXT_Y;
+                c.text(x, y, source_label(&kind), Face::Semibold, 10.0, source_color(&kind), Anchor::LA, None);
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
-                        self.note(c, mode, 32.0);
+                        self.note(c, mode, 44.0);
                     }
-                    let lines = c.wrap(&m.title, Face::Semibold, 14.0, w, 2);
-                    for (i, line) in lines.iter().enumerate() {
-                        c.text(x, 35.0 + 19.0 * i as f32, line, Face::Semibold, 14.0, FG, Anchor::LA, Some(w));
-                    }
-                    c.text(x, 37.0 + 19.0 * lines.len() as f32, &m.artist, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
+                    c.text(x, y + 15.0, &m.title, Face::Semibold, 15.5, FG, Anchor::LA, Some(w));
+                    c.text(x, y + 37.0, &m.artist, Face::Regular, 12.5, MUTED, Anchor::LA, Some(w));
                     self.draw_extras(c, m);
                 } else {
-                    self.note(c, mode, 32.0);
-                    c.text(x, 35.0, &funny_title, Face::Semibold, 14.0, FG, Anchor::LA, Some(w));
+                    c.text(x, y + 15.0, &funny_title, Face::Semibold, 15.5, FG, Anchor::LA, Some(w));
                     for (i, line) in c.wrap(&funny_sub, Face::Regular, 12.0, w, 2).iter().enumerate() {
-                        c.text(x, 57.0 + 17.0 * i as f32, line, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
+                        c.text(x, y + 37.0 + 17.0 * i as f32, line, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
                     }
                 }
             }
@@ -1204,9 +1215,16 @@ impl Kind for Media {
             let half = if a == OPEN_PLAYER { 72.0 } else { 18.0 };
             return Some((cx - half, G_TOG_Y - 16.0, cx + half, G_TOG_Y + 16.0, 10.0));
         }
+        // a barra de progresso "engrossa" com o mouse em cima
+        if let (Some(_), Some((x0, x1, by, h))) = (self.bar_at(x, y, mode), self.bar_geom(mode)) {
+            if self.media.as_ref().is_some_and(|m| m.can_seek) {
+                let cy = by + h / 2.0;
+                return Some((x0, cy - 3.5, x1, cy + 3.5, 3.5));
+            }
+        }
         if self.on_art(x, y, mode) {
-            let ((ax, ay), art, radius) = self.art_geom(mode);
-            return Some((ax, ay, ax + art, ay + art, radius));
+            let (ax, ay, aw, ah, radius) = self.art_rect(mode);
+            return Some((ax, ay, ax + aw, ay + ah, radius));
         }
         None
     }

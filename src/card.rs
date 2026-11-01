@@ -51,6 +51,11 @@ pub struct Slide {
     dur: Duration,
 }
 
+fn ease_out_quick(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
 /// Sombra suave embaixo do cartão, do tamanho da janela (cartão de w×h pixels mais a margem `m`).
 /// As bordas mais fracas ficam totalmente transparentes: ali os cliques passam para a área de
 /// trabalho, como antes.
@@ -95,6 +100,8 @@ pub struct Card {
     pub hover_target: f32,
     pub hot: Option<Hot>,
     pub pressing: bool,
+    /// o botão apertado afunda e volta com mola: (quando, true = apertou / false = soltou)
+    pub press_anim: Option<(Instant, bool)>,
     pub press: Option<Press>,
     pub drag: Option<(i32, i32)>,
     pub anim: Option<ResizeAnim>,
@@ -134,6 +141,7 @@ impl Card {
             hover_target: 0.0,
             hot: None,
             pressing: false,
+            press_anim: None,
             press: None,
             drag: None,
             anim: None,
@@ -376,7 +384,9 @@ impl Card {
         let m = MARGIN;
         if let (Some((x0, y0, x1, y1, r)), None) = (self.hot, self.drag) {
             if x1 - x0 >= 2.0 && y1 - y0 >= 2.0 {
-                c.fill_round_rect(m + x0, m + y0, m + x1, m + y1, r, if self.pressing { PRESS_FILL } else { HOT_FILL });
+                // apertado, o realce encolhe um pouco; solto, volta passando um tico do tamanho
+                let k = self.press_inset().min((x1 - x0).min(y1 - y0) / 4.0);
+                c.fill_round_rect(m + x0 + k, m + y0 + k, m + x1 - k, m + y1 - k, (r - k).max(0.0), if self.pressing { PRESS_FILL } else { HOT_FILL });
             }
         }
         if self.status.error.is_some() && !sh.editing {
@@ -595,8 +605,25 @@ impl Card {
     }
 
     /// Quando a próxima etapa de animação precisa acontecer.
+    /// Quanto o realce do botão apertado encolhe agora (pixels lógicos; negativo: passou do tamanho).
+    fn press_inset(&self) -> f32 {
+        const DEPTH: f32 = 2.5;
+        match self.press_anim {
+            Some((at, true)) => DEPTH * ease_out_quick(at.elapsed().as_secs_f32() * 1000.0 / 90.0),
+            Some((at, false)) => DEPTH * (1.0 - ease_spring(at.elapsed().as_secs_f32() * 1000.0 / 240.0)),
+            None => 0.0,
+        }
+    }
+
+    fn press_animating(&self) -> bool {
+        match self.press_anim {
+            Some((at, down)) => at.elapsed() < Duration::from_millis(if down { 110 } else { 260 }),
+            None => false,
+        }
+    }
+
     pub fn next_frame(&self) -> Option<Instant> {
-        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target {
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
         }
         let mut wait = None;
