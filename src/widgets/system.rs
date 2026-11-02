@@ -40,7 +40,8 @@ const CLOSE: u32 = 3;
 const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
 const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
 
-fn color(i: usize) -> Rgba {
+/// Cor do anel de cada recurso (0 CPU, 1 memória, 2 disco); o ícone do app usa as mesmas.
+pub(crate) fn color(i: usize) -> Rgba {
     match i {
         0 => Rgba::rgb(255, 55, 95),
         1 => Rgba::rgb(48, 209, 88),
