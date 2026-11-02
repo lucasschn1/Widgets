@@ -47,6 +47,11 @@ const DAY_TILES_G: f32 = 182.0;
 const DAY_TILE_H: f32 = (LARGE_H - DAY_TILES_G - 14.0 - G_TILE_GAP) / 2.0;
 const SCROLL_MS: f32 = 260.0;
 const RAIN_BLUE: Rgba = Rgba::rgb(110, 200, 255);
+/// faixa do índice UV: baixo, moderado, alto, muito alto e extremo
+const UV_STOPS: [(f32, Rgba); 5] =
+    [(0.0, Rgba::rgb(48, 209, 88)), (0.3, Rgba::rgb(255, 214, 10)), (0.55, Rgba::rgb(255, 159, 10)), (0.8, Rgba::rgb(255, 69, 58)), (1.0, Rgba::rgb(191, 90, 242))];
+/// faixa de temperatura: do frio ao quente
+const TEMP_STOPS: [(f32, Rgba); 4] = [(0.0, Rgba::rgb(90, 200, 250)), (0.45, Rgba::rgb(120, 220, 160)), (0.75, Rgba::rgb(255, 214, 10)), (1.0, Rgba::rgb(255, 120, 40))];
 
 const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
 const WEATHER_RETRY: Duration = Duration::from_secs(2 * 60);
@@ -416,10 +421,12 @@ enum Visual {
     None,
     /// índice UV (barra de baixo a extremo, com o ponto)
     Uv(f64),
-    /// quanto do dia já passou (0 a 1), ou None de noite
-    Sun(Option<f32>),
-    /// de onde vem o vento (graus)
-    Wind(f64),
+    /// o caminho do sol no dia: nascer, pôr e agora (frações do dia, de 0 a 1)
+    Sun(f32, f32, Option<f32>),
+    /// vento: de onde vem (graus) e a velocidade (km/h)
+    Wind(f64, i64),
+    /// sensação: a temperatura real e a sensação
+    Feels(i64, i64),
 }
 
 /// Um painel de detalhe: título, valor grande, frase embaixo e o desenho.
@@ -821,27 +828,24 @@ impl Tempo {
         // sol: o próximo acontecimento (nascer ou pôr) e quanto do dia já passou
         let (sunrise, sunset, now_min) = (s("sunrise"), s("sunset"), minute_of_day(&s("time")));
         let (rise_m, set_m) = (minute_of_day(&sunrise), minute_of_day(&sunset));
+        let frac = |m: Option<i64>| m.map(|m| m as f32 / 1440.0);
+        let path = Visual::Sun(frac(rise_m).unwrap_or(0.25), frac(set_m).unwrap_or(0.75), frac(now_min));
         let sun = match (now_min, rise_m, set_m) {
-            (Some(t), Some(r), Some(_)) if t < r => Tile { title: "NASCER DO SOL".into(), value: hhmm(&sunrise), sub: format!("Pôr do sol às {}", hhmm(&sunset)), visual: Visual::Sun(None) },
-            (Some(t), Some(r), Some(st)) if t < st => Tile {
-                title: "PÔR DO SOL".into(),
-                value: hhmm(&sunset),
-                sub: format!("Nasceu às {}", hhmm(&sunrise)),
-                visual: Visual::Sun(Some((t - r) as f32 / (st - r).max(1) as f32)),
-            },
-            _ => Tile { title: "NASCER DO SOL".into(), value: hhmm(&s("sunrise_next")), sub: format!("Pôr do sol foi às {}", hhmm(&sunset)), visual: Visual::Sun(None) },
+            (Some(t), Some(r), Some(_)) if t < r => Tile { title: "NASCER DO SOL".into(), value: hhmm(&sunrise), sub: format!("Pôr do sol: {}", hhmm(&sunset)), visual: path },
+            (Some(t), Some(_), Some(st)) if t < st => Tile { title: "PÔR DO SOL".into(), value: hhmm(&sunset), sub: format!("Nascer do sol: {}", hhmm(&sunrise)), visual: path },
+            _ => Tile { title: "NASCER DO SOL".into(), value: hhmm(&s("sunrise_next")), sub: format!("Pôr do sol: {}", hhmm(&sunset)), visual: path },
         };
         let rain_today = f("rain_today");
         vec![
-            Tile { title: "SENSAÇÃO".into(), value: deg(n("feels")), sub: feels_sub, visual: Visual::None },
-            Tile { title: "UMIDADE".into(), value: n("humidity").map(|v| format!("{v}%")).unwrap_or_else(|| "--".into()), sub: format!("Ponto de orvalho de {}", deg(n("dew"))), visual: Visual::None },
-            Tile { title: "VENTO".into(), value: format!("{} km/h", n("wind").unwrap_or(0)), sub: format!("Vem do {}", wind_from(f("wind_dir"))), visual: Visual::Wind(f("wind_dir")) },
-            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: format!("{}  ·  máx. {} hoje", uv_level(f("uv")), f("uv_max").round()), visual: Visual::Uv(f("uv")) },
+            Tile { title: "SENSAÇÃO".into(), value: deg(n("feels")), sub: feels_sub, visual: Visual::Feels(temp, feels) },
+            Tile { title: "UMIDADE".into(), value: n("humidity").map(|v| format!("{v}%")).unwrap_or_else(|| "--".into()), sub: format!("O ponto de orvalho está em {} agora.", deg(n("dew"))), visual: Visual::None },
+            Tile { title: "VENTO".into(), value: format!("{} km/h", n("wind").unwrap_or(0)), sub: format!("Do {}", wind_from(f("wind_dir"))), visual: Visual::Wind(f("wind_dir"), n("wind").unwrap_or(0)) },
+            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: format!("Máximo de {} hoje", f("uv_max").round()), visual: Visual::Uv(f("uv")) },
             sun,
             Tile {
                 title: "CHUVA".into(),
                 value: format!("{}%", n("pop").unwrap_or(0)),
-                sub: if rain_today >= 0.1 { format!("Próximas 12\u{a0}h  ·  {}\u{a0}mm hoje", br1(rain_today)) } else { "Chance nas próximas 12\u{a0}h".into() },
+                sub: if rain_today >= 0.1 { format!("Chance nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Chance nas próximas 12\u{a0}h.".into() },
                 visual: Visual::None,
             },
         ]
@@ -855,8 +859,13 @@ impl Tempo {
         vec![
             Tile { title: "CHUVA".into(), value: format!("{}%", n("pop")), sub: if rain >= 0.1 { format!("{} mm no dia", br1(rain)) } else { "Sem chuva prevista".into() }, visual: Visual::None },
             Tile { title: "VENTO".into(), value: format!("{} km/h", n("wind")), sub: "Máximo do dia".into(), visual: Visual::None },
-            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: format!("{} (máximo)", uv_level(f("uv"))), visual: Visual::Uv(f("uv")) },
-            Tile { title: "NASCER DO SOL".into(), value: hhmm(&s("sunrise")), sub: format!("Pôr do sol às {}", hhmm(&s("sunset"))), visual: Visual::None },
+            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: "Máximo do dia".into(), visual: Visual::Uv(f("uv")) },
+            Tile {
+                title: "NASCER DO SOL".into(),
+                value: hhmm(&s("sunrise")),
+                sub: format!("Pôr do sol: {}", hhmm(&s("sunset"))),
+                visual: Visual::Sun(minute_of_day(&s("sunrise")).unwrap_or(360) as f32 / 1440.0, minute_of_day(&s("sunset")).unwrap_or(1080) as f32 / 1440.0, None),
+            },
         ]
     }
 
@@ -1046,68 +1055,190 @@ impl Tempo {
         }
     }
 
-    /// Um painel de detalhe; `a`: opacidade da entrada (0 a 1), que também o traz um pouco de baixo.
+    /// Um painel de detalhe, no estilo dos módulos do Tempo da Apple: o título pequeno com o ícone,
+    /// o valor grande, um desenho próprio (bússola, caminho do sol, faixa do UV ou da sensação) e
+    /// uma frase curta no pé. `a`: opacidade da entrada (0 a 1), que também o traz um pouco de baixo.
     fn draw_tile(c: &mut Canvas, t: &Tile, (x, y, w, h): Rect4, a: f32) {
         if a <= 0.01 {
             return;
         }
         let fa = |col: Rgba| Rgba(col.0, col.1, col.2, (col.3 as f32 * a) as u8);
         let y = y + (1.0 - a) * 6.0;
-        c.fill_round_rect(x, y, x + w, y + h, 14.0, fa(Rgba(0, 0, 0, 44)));
-        let ix = x + 11.0;
-        let iw = w - 22.0;
-        Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 9.5, fa(FG.alpha(0.7)));
-        c.text(ix + 12.0, y + 10.0, &t.title, Face::Semibold, 9.5, fa(FG.alpha(0.7)), Anchor::LA, Some(iw - 12.0));
-        let wind_room = if matches!(t.visual, Visual::Wind(_)) { 34.0 } else { 0.0 };
-        let vsize = if h >= 110.0 { 28.0 } else if h >= 80.0 { 23.0 } else { 20.0 };
-        // a unidade ("km/h") vai menor, ao lado do número
+        // alto (grande) ou baixo (pequeno e médio)
+        let tall = h >= 100.0;
+        let r = if tall { 16.0 } else { 14.0 };
+        c.fill_round_rect(x, y, x + w, y + h, r, fa(Rgba(0, 0, 0, 46)));
+        c.stroke_round_rect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, r, fa(WHITE.alpha(0.07)), 1.0 / c.s);
+        let ix = x + 12.0;
+        let iw = w - 24.0;
+        let head = fa(FG.alpha(0.62));
+        Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 10.5, head);
+        c.text(ix + 13.0, y + 11.0, &t.title, Face::Semibold, 9.5, head, Anchor::LA, Some(iw - 13.0));
+
+        // a bússola do vento ocupa o painel alto inteiro, com a velocidade no meio
+        if let (Visual::Wind(deg, speed), true) = (&t.visual, tall) {
+            let (cx, cy) = (x + w / 2.0, y + 26.0 + (h - 34.0) / 2.0);
+            let rad = ((h - 40.0) / 2.0).min(w / 2.0 - 14.0);
+            Self::draw_compass(c, cx, cy, rad, *deg, true, &fa);
+            c.text(cx, cy - 4.0, &speed.to_string(), Face::Semibold, 16.0, fa(FG), Anchor::MM, None);
+            c.text(cx, cy + 10.0, "km/h", Face::Regular, 9.0, fa(FG.alpha(0.7)), Anchor::MM, None);
+            return;
+        }
+
+        // o valor (a unidade, "km/h", vai menor ao lado do número)
+        let (vsize, vy) = if tall { (30.0, y + 24.0) } else { (21.0, y + 23.0) };
         let (number, unit) = match t.value.split_once(' ') {
             Some((n, u)) => (n, Some(u)),
             None => (t.value.as_str(), None),
         };
-        let nw = c.text(ix - 1.0, y + 22.0, number, Face::Regular, vsize, fa(FG), Anchor::LA, Some(iw - wind_room));
+        let room = if matches!(t.visual, Visual::Wind(..)) { 56.0 } else { 0.0 };
+        let nw = c.text(ix - 1.0, vy, number, Face::Regular, vsize, fa(FG), Anchor::LA, Some(iw - room));
         if let Some(u) = unit {
-            let base = y + 22.0 + vsize * 0.98;
-            c.text(ix - 1.0 + nw + 4.0, base, u, Face::Regular, 12.5, fa(FG.alpha(0.85)), Anchor::LS, Some((iw - wind_room - nw - 4.0).max(10.0)));
+            let base = vy + vsize * 0.98;
+            c.text(ix - 1.0 + nw + 4.0, base, u, Face::Regular, if tall { 15.0 } else { 12.0 }, fa(FG.alpha(0.85)), Anchor::LS, Some((iw - room - nw - 4.0).max(10.0)));
         }
-        let mut sub_lines = 2;
-        let by = y + h - 31.0;
+        // uma palavra logo abaixo do número (o nível do UV), como no Tempo da Apple
+        let value_bottom = vy + vsize * 1.18;
+        if let Visual::Uv(uv) = t.visual {
+            if tall {
+                c.text(ix, value_bottom + 1.0, uv_level(uv), Face::Semibold, 14.0, fa(FG), Anchor::LA, None);
+            } else {
+                c.text(ix - 1.0 + nw + 7.0, vy + vsize * 0.98, uv_level(uv), Face::Semibold, 12.0, fa(FG), Anchor::LS, None);
+            }
+        }
+
+        // a frase no pé (até 2 linhas no alto; 1 no baixo quando há desenho)
+        let has_art = !matches!(t.visual, Visual::None | Visual::Wind(..));
+        let max_lines = if tall { 2 } else if has_art { 1 } else { 2 };
+        // no painel baixo, a sensação diz só a temperatura real (a frase inteira não cabe)
+        let sub = match t.visual {
+            Visual::Feels(real, _) if !tall => format!("Real: {real}°"),
+            _ => t.sub.clone(),
+        };
+        let lines = c.wrap(&sub, Face::Regular, 10.5, iw, max_lines);
+        let n = lines.len() as f32;
+        for (k, line) in lines.iter().enumerate() {
+            let ly = y + h - 10.0 - 13.0 * (n - 1.0 - k as f32);
+            c.text(ix, ly, line, Face::Regular, 10.5, fa(FG.alpha(0.8)), Anchor::LS, Some(iw));
+        }
+        let text_top = y + h - 10.0 - 13.0 * n - 4.0;
+
         match t.visual {
             Visual::Uv(uv) => {
-                let stops = [(0.0, fa(Rgba::rgb(48, 209, 88))), (0.3, fa(Rgba::rgb(255, 214, 10))), (0.55, fa(Rgba::rgb(255, 159, 10))), (0.8, fa(Rgba::rgb(255, 69, 58))), (1.0, fa(Rgba::rgb(191, 90, 242)))];
-                c.gradient_h(ix, by, ix + iw, by + 4.0, 2.0, &stops, ix, ix + iw);
-                let px = ix + iw * (uv as f32 / 11.0).clamp(0.0, 1.0);
-                c.fill_circle(px, by + 2.0, 4.5, fa(Rgba(0, 0, 0, 90)));
-                c.fill_circle(px, by + 2.0, 3.2, fa(WHITE));
-                sub_lines = 1;
+                let by = text_top - 8.0;
+                Self::draw_scale(c, ix, by, iw, (uv as f32 / 11.0).clamp(0.0, 1.0), None, &UV_STOPS, &fa);
             }
-            Visual::Sun(progress) => {
-                c.fill_round_rect(ix, by + 1.0, ix + iw, by + 3.0, 1.0, fa(WHITE.alpha(0.25)));
-                if let Some(p) = progress {
-                    let px = ix + iw * p.clamp(0.0, 1.0);
-                    c.fill_round_rect(ix, by + 1.0, px, by + 3.0, 1.0, fa(Rgba::rgb(255, 214, 10)));
-                    c.fill_circle(px, by + 2.0, 4.5, fa(Rgba::rgb(255, 214, 10)));
+            Visual::Feels(real, feels) => {
+                // faixa da temperatura: a real como um traço, a sensação como o ponto
+                let lo = real.min(feels) as f32 - 8.0;
+                let hi = real.max(feels) as f32 + 8.0;
+                let pos = |v: i64| ((v as f32 - lo) / (hi - lo)).clamp(0.0, 1.0);
+                let by = text_top - 8.0;
+                Self::draw_scale(c, ix, by, iw, pos(feels), Some(pos(real)), &TEMP_STOPS, &fa);
+            }
+            Visual::Sun(rise, set, now) => {
+                if tall {
+                    Self::draw_sun_path(c, ix, value_bottom + 6.0, iw, (text_top - 4.0 - value_bottom - 6.0).max(12.0), rise, set, now, &fa);
+                } else {
+                    // baixo: a curva ao lado do horário
+                    let x0 = ix + nw + 14.0;
+                    Self::draw_sun_path(c, x0, vy + 3.0, (ix + iw - x0).max(30.0), vsize - 2.0, rise, set, now, &fa);
                 }
-                sub_lines = 1;
             }
-            Visual::Wind(deg) => {
-                // a seta aponta para onde o vento vai
-                let (cx, cy, r) = (x + w - 25.0, y + 34.0, 13.0);
-                c.stroke_circle(cx, cy, r, fa(WHITE.alpha(0.3)), 1.0);
-                let a = ((deg + 180.0) as f32).to_radians();
-                let (dx, dy) = (a.sin(), -a.cos());
-                let tip = (cx + dx * 9.0, cy + dy * 9.0);
-                c.line(&[(cx - dx * 9.0, cy - dy * 9.0), tip], fa(FG), 1.6);
-                let (lx, ly) = (-dy, dx);
-                c.line(&[(tip.0 - dx * 4.0 + lx * 3.0, tip.1 - dy * 4.0 + ly * 3.0), tip, (tip.0 - dx * 4.0 - lx * 3.0, tip.1 - dy * 4.0 - ly * 3.0)], fa(FG), 1.6);
+            Visual::Wind(deg, _) => {
+                // baixo: a bússola pequena à direita do valor
+                let rad = (h - 30.0).min(52.0) / 2.0;
+                Self::draw_compass(c, x + w - 12.0 - rad, y + 18.0 + (h - 18.0) / 2.0 - 4.0, rad, deg, false, &fa);
             }
             Visual::None => {}
         }
-        let lines = c.wrap(&t.sub, Face::Regular, 10.5, iw, sub_lines);
-        let n = lines.len();
-        for (k, line) in lines.iter().enumerate() {
-            let ly = y + h - 10.0 - 13.0 * (n - 1 - k) as f32;
-            c.text(ix, ly, line, Face::Regular, 10.5, fa(FG.alpha(0.78)), Anchor::LS, Some(iw));
+    }
+
+    /// Faixa em degradê com o ponto (e, se houver, um traço de referência).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scale(c: &mut Canvas, x: f32, y: f32, w: f32, at: f32, mark: Option<f32>, stops: &[(f32, Rgba)], fa: &dyn Fn(Rgba) -> Rgba) {
+        let stops: Vec<(f32, Rgba)> = stops.iter().map(|&(p, col)| (p, fa(col))).collect();
+        c.gradient_h(x, y - 2.0, x + w, y + 2.0, 2.0, &stops, x, x + w);
+        if let Some(m) = mark {
+            let mx = x + w * m;
+            c.fill_round_rect(mx - 1.0, y - 5.0, mx + 1.0, y + 5.0, 1.0, fa(WHITE.alpha(0.9)));
+        }
+        let px = x + w * at;
+        c.fill_circle(px, y, 5.0, fa(Rgba(0, 0, 0, 90)));
+        c.fill_circle(px, y, 3.6, fa(WHITE));
+    }
+
+    /// Bússola: marcações a cada 10°, os pontos cardeais (no alto) e a seta para onde o vento vai.
+    fn draw_compass(c: &mut Canvas, cx: f32, cy: f32, r: f32, from_deg: f64, letters: bool, fa: &dyn Fn(Rgba) -> Rgba) {
+        for k in 0..36 {
+            let ang = (k as f32 * 10.0).to_radians();
+            let (sx, sy) = (ang.sin(), -ang.cos());
+            let cardinal = k % 9 == 0;
+            let inner = r - if cardinal { 6.0 } else { 3.5 };
+            let col = if cardinal { FG.alpha(0.85) } else { FG.alpha(0.3) };
+            c.line(&[(cx + sx * inner, cy + sy * inner), (cx + sx * r, cy + sy * r)], fa(col), if cardinal { 1.4 } else { 1.0 });
+        }
+        if letters {
+            for (k, l) in ["N", "L", "S", "O"].iter().enumerate() {
+                let ang = (k as f32 * 90.0).to_radians();
+                let d = r - 13.0;
+                c.text(cx + ang.sin() * d, cy - ang.cos() * d, l, Face::Semibold, 8.5, fa(FG.alpha(if k == 0 { 0.95 } else { 0.6 })), Anchor::MM, None);
+            }
+        }
+        // a seta atravessa a bússola; no meio fica a velocidade (no alto) ou nada (no baixo)
+        let to = ((from_deg + 180.0) as f32).to_radians();
+        let (dx, dy) = (to.sin(), -to.cos());
+        let len = r - if letters { 18.0 } else { 5.0 };
+        let gap = if letters { 15.0 } else { 0.0 };
+        let tail = (cx - dx * len, cy - dy * len);
+        let head = (cx + dx * len, cy + dy * len);
+        let white = fa(FG);
+        if gap > 0.0 {
+            c.line(&[tail, (cx - dx * gap, cy - dy * gap)], white, 1.6);
+            c.line(&[(cx + dx * gap, cy + dy * gap), head], white, 1.6);
+        } else {
+            c.line(&[tail, head], white, 1.6);
+        }
+        c.fill_circle(tail.0, tail.1, 2.4, white);
+        let (lx, ly) = (-dy, dx);
+        let back = (head.0 - dx * 6.0, head.1 - dy * 6.0);
+        c.polygon(&[(head.0 + dx * 1.5, head.1 + dy * 1.5), (back.0 + lx * 4.0, back.1 + ly * 4.0), (back.0 - lx * 4.0, back.1 - ly * 4.0)], white);
+    }
+
+    /// O caminho do sol no dia (de meia-noite a meia-noite): uma onda que passa pelo horizonte no
+    /// nascer e no pôr, mais clara acima dele, com o ponto na hora de agora.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_sun_path(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, rise: f32, set: f32, now: Option<f32>, fa: &dyn Fn(Rgba) -> Rgba) {
+        let noon = (rise + set) / 2.0;
+        let tau = std::f32::consts::TAU;
+        let at_horizon = (tau * (rise - noon)).cos();
+        // altura (de -1 a 1) do sol na fração `u` do dia
+        let elev = |u: f32| ((tau * (u - noon)).cos() - at_horizon) / (1.0 - at_horizon).max(0.2);
+        let lowest = elev(noon + 0.5).min(-0.2);
+        let horizon_y = y + h * (1.0 / (1.0 - lowest));
+        let to_y = |e: f32| horizon_y - e * (horizon_y - y);
+        let steps = 60;
+        let pts: Vec<(f32, f32, bool)> = (0..=steps)
+            .map(|k| {
+                let u = k as f32 / steps as f32;
+                let e = elev(u);
+                (x + w * u, to_y(e.max(lowest)), e >= 0.0)
+            })
+            .collect();
+        for pair in pts.windows(2) {
+            let up = pair[0].2 && pair[1].2;
+            c.line(&[(pair[0].0, pair[0].1), (pair[1].0, pair[1].1)], fa(if up { FG.alpha(0.85) } else { FG.alpha(0.25) }), if up { 1.8 } else { 1.4 });
+        }
+        c.line(&[(x, horizon_y), (x + w, horizon_y)], fa(FG.alpha(0.35)), 1.0);
+        if let Some(u) = now {
+            let e = elev(u);
+            let (px, py) = (x + w * u, to_y(e.max(lowest)));
+            if e >= 0.0 {
+                c.fill_circle(px, py, 7.0, fa(Rgba(255, 255, 255, 50)));
+                c.fill_circle(px, py, 4.0, fa(WHITE));
+            } else {
+                c.fill_circle(px, py, 3.5, fa(FG.alpha(0.55)));
+            }
         }
     }
 
