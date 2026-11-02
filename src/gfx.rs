@@ -704,6 +704,17 @@ pub fn load_image(path: &std::path::Path) -> Option<Image> {
 
 /// Redimensiona uma imagem com boa qualidade (WIC "Fant").
 pub fn resize(img: &Image, w: u32, h: u32) -> Image {
+    scale_with(img, w, h, WICBitmapInterpolationModeFant)
+}
+
+/// Redimensiona para mostrar uma foto (capas): "Fant" para reduzir e cúbica de alta qualidade
+/// para ampliar, que não deixa os pixels quadrados aparecerem.
+pub fn resize_photo(img: &Image, w: u32, h: u32) -> Image {
+    let mode = if w > img.w || h > img.h { WICBitmapInterpolationModeHighQualityCubic } else { WICBitmapInterpolationModeFant };
+    scale_with(img, w, h, mode)
+}
+
+fn scale_with(img: &Image, w: u32, h: u32, mode: WICBitmapInterpolationMode) -> Image {
     let (w, h) = (w.max(1), h.max(1));
     with(|g| unsafe {
         let src = g
@@ -711,7 +722,7 @@ pub fn resize(img: &Image, w: u32, h: u32) -> Image {
             .CreateBitmapFromMemory(img.w, img.h, &GUID_WICPixelFormat32bppPBGRA, img.w * 4, &img.px)
             .expect("bitmap");
         let scaler = g.wic.CreateBitmapScaler().expect("scaler");
-        scaler.Initialize(&src, w, h, WICBitmapInterpolationModeFant).expect("scale");
+        scaler.Initialize(&src, w, h, mode).expect("scale");
         let mut out = Image::new(w, h);
         let _ = scaler.CopyPixels(std::ptr::null(), w * 4, &mut out.px);
         out
@@ -766,15 +777,63 @@ pub fn decode_image(bytes: &[u8]) -> Option<Image> {
 
 /// Recorta o meio da imagem num quadrado e redimensiona para `px` (como o ImageOps.fit).
 pub fn fit_square(img: &Image, px: u32) -> Image {
-    let side = img.w.min(img.h).max(1);
-    let (x0, y0) = ((img.w - side) / 2, (img.h - side) / 2);
-    let mut square = Image::new(side, side);
-    for y in 0..side {
-        let s = (((y + y0) * img.w + x0) * 4) as usize;
-        let d = (y * side * 4) as usize;
-        square.px[d..d + side as usize * 4].copy_from_slice(&img.px[s..s + side as usize * 4]);
+    fit_cover(img, px, px)
+}
+
+/// Pedaço w×h da imagem a partir de (x, y) (que precisa estar dentro dela).
+pub fn crop(img: &Image, x: u32, y: u32, w: u32, h: u32) -> Image {
+    let (w, h) = (w.min(img.w - x).max(1), h.min(img.h - y).max(1));
+    let mut out = Image::new(w, h);
+    for row in 0..h {
+        let s = (((row + y) * img.w + x) * 4) as usize;
+        let d = (row * w * 4) as usize;
+        out.px[d..d + w as usize * 4].copy_from_slice(&img.px[s..s + w as usize * 4]);
     }
-    resize(&square, px, px)
+    out
+}
+
+/// O meio da imagem na proporção w:h (o maior pedaço que cabe), já em w×h pixels: a imagem
+/// cobre o retângulo inteiro sem deformar, cortando o mesmo tanto dos dois lados.
+pub fn fit_cover(img: &Image, w: u32, h: u32) -> Image {
+    let (w, h) = (w.max(1), h.max(1));
+    let (sw, sh) = (img.w.max(1) as u64, img.h.max(1) as u64);
+    // largura e altura do recorte: a imagem inteira num sentido, a proporção pedida no outro
+    let (cw, ch) = if sw * h as u64 > sh * w as u64 {
+        (((sh * w as u64 + h as u64 / 2) / h as u64).max(1) as u32, sh as u32)
+    } else {
+        (sw as u32, ((sw * h as u64 + w as u64 / 2) / w as u64).max(1) as u32)
+    };
+    let part = crop(img, (img.w - cw.min(img.w)) / 2, (img.h - ch.min(img.h)) / 2, cw, ch);
+    resize_photo(&part, w, h)
+}
+
+/// Tira as faixas pretas em volta da imagem (vídeos 16:9 dentro de uma miniatura 4:3, por
+/// exemplo). Uma faixa é uma linha (ou coluna) quase toda escura; tira no máximo 1/4 de cada lado.
+pub fn trim_bars(img: &Image) -> Image {
+    let dark = |x: u32, y: u32| {
+        let i = ((y * img.w + x) * 4) as usize;
+        img.px[i].max(img.px[i + 1]).max(img.px[i + 2]) < 24
+    };
+    let row_dark = |y: u32| (0..img.w).filter(|&x| dark(x, y)).count() as u32 * 20 >= img.w * 19;
+    let col_dark = |x: u32, y0: u32, y1: u32| (y0..y1).filter(|&y| dark(x, y)).count() as u32 * 20 >= (y1 - y0) * 19;
+    let (mut top, mut bottom) = (0, img.h);
+    while top < img.h / 4 && row_dark(top) {
+        top += 1;
+    }
+    while bottom > img.h - img.h / 4 && row_dark(bottom - 1) {
+        bottom -= 1;
+    }
+    let (mut left, mut right) = (0, img.w);
+    while left < img.w / 4 && col_dark(left, top, bottom) {
+        left += 1;
+    }
+    while right > img.w - img.w / 4 && col_dark(right - 1, top, bottom) {
+        right -= 1;
+    }
+    if (top, bottom, left, right) == (0, img.h, 0, img.w) {
+        return img.clone();
+    }
+    crop(img, left, top, right - left, bottom - top)
 }
 
 #[cfg(test)]

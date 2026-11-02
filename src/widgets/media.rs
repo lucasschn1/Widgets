@@ -260,9 +260,120 @@ fn read_art(props: &windows::Media::Control::GlobalSystemMediaTransportControlsS
     gfx::decode_image(&buf)
 }
 
+// ---------- a capa ----------
+
+/// Proporções até 50% diferentes da área (uma capa quadrada no grande, um vídeo 16:9 no grande):
+/// a capa cobre a área inteira, cortando o mesmo tanto dos dois lados.
+const COVER_SLACK: f32 = 1.5;
+/// Quanto uma capa pode ser ampliada antes de os pixels aparecerem.
+const MAX_ZOOM: f32 = 1.6;
+
+/// A capa pronta para uma área de w×h pixels, sem deformar e centralizada: cobrindo a área
+/// (recorte no meio) se as proporções são parecidas; senão (um vídeo 16:9 num quadrado, ou uma
+/// capa pequena demais para ampliar), inteira no meio, sobre ela mesma desfocada e escurecida.
+pub fn cover_image(art: &Image, w: u32, h: u32) -> Image {
+    let (w, h) = (w.max(1), h.max(1));
+    let (aw, ah) = (art.w.max(1) as f32, art.h.max(1) as f32);
+    let ratio = (aw / ah) / (w as f32 / h as f32);
+    let cover_zoom = (w as f32 / aw).max(h as f32 / ah);
+    if ratio.max(1.0 / ratio) <= COVER_SLACK && cover_zoom <= MAX_ZOOM {
+        return gfx::fit_cover(art, w, h);
+    }
+    // fundo: a própria capa, bem desfocada (em tamanho pequeno, que basta) e mais escura
+    let (bw, bh) = ((w / 4).max(4), (h / 4).max(4));
+    let mut small = gfx::fit_cover(art, bw, bh);
+    blur(&mut small.px, bw, bh, 4, bh.min(bw) as f32 / 5.0);
+    for p in small.px.chunks_mut(4) {
+        for ch in 0..3 {
+            p[ch] = (p[ch] as f32 * 0.55) as u8;
+        }
+        p[3] = 255;
+    }
+    let mut out = gfx::resize_photo(&small, w, h);
+    let zoom = (w as f32 / aw).min(h as f32 / ah).min(MAX_ZOOM);
+    let (fw, fh) = ((aw * zoom).round().max(1.0) as u32, (ah * zoom).round().max(1.0) as u32);
+    let front = gfx::resize_photo(art, fw.min(w), fh.min(h));
+    out.over(&front, ((w - front.w) / 2) as i32, ((h - front.h) / 2) as i32);
+    out
+}
+
+/// Capa em alta resolução para vídeos do YouTube. O navegador passa para o Windows só uma
+/// miniatura (o Edge, 150 × 83), que fica pixelada no widget: aqui se acha o vídeo pelo título e
+/// pelo canal e baixa a miniatura original na maior resolução que houver, conferindo que é a
+/// mesma imagem (senão fica a do navegador).
+mod youtube {
+    use super::*;
+    use crate::util;
+
+    /// Do maior para o menor: 1280 × 720, 640 × 480, 480 × 360 e 320 × 180.
+    const SIZES: [&str; 4] = ["maxresdefault", "sddefault", "hqdefault", "mqdefault"];
+    /// diferença média (0 a 255) até a qual duas miniaturas são a mesma imagem
+    const SAME: f32 = 20.0;
+
+    /// Parece a miniatura de um vídeo e é pequena: vale procurar a original.
+    pub fn worth_upgrading(img: &Image) -> bool {
+        let aspect = img.w as f32 / img.h.max(1) as f32;
+        img.w < 640 && (1.25..=1.9).contains(&aspect)
+    }
+
+    /// Os primeiros `n` vídeos de uma página de busca do YouTube.
+    pub fn video_ids(html: &str, n: usize) -> Vec<String> {
+        let tag = "\"videoRenderer\":{\"videoId\":\"";
+        let mut ids: Vec<String> = Vec::new();
+        for (i, _) in html.match_indices(tag) {
+            let id: String = html[i + tag.len()..].chars().take_while(|c| *c != '"').collect();
+            let valid = id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if valid && !ids.contains(&id) {
+                ids.push(id);
+                if ids.len() == n {
+                    break;
+                }
+            }
+        }
+        ids
+    }
+
+    /// As duas são a mesma imagem (em qualquer tamanho): comparadas pequenas, na proporção da
+    /// primeira.
+    pub fn same_picture(small: &Image, big: &Image) -> bool {
+        let aspect = small.w as f32 / small.h.max(1) as f32;
+        let (w, h) = (32, ((32.0 / aspect).round() as u32).clamp(8, 64));
+        let (a, b) = (gfx::fit_cover(small, w, h), gfx::fit_cover(big, w, h));
+        let diff: u64 = a.px.chunks(4).zip(b.px.chunks(4)).map(|(p, q)| (0..3).map(|c| p[c].abs_diff(q[c]) as u64).sum::<u64>()).sum();
+        diff as f32 / (w * h * 3) as f32 <= SAME
+    }
+
+    /// A miniatura original do vídeo que está tocando (já sem faixas pretas), ou None.
+    pub fn hd_thumbnail(title: &str, channel: &str, small: &Image) -> Option<Image> {
+        let query = format!("{title} {channel}");
+        let url = format!("https://www.youtube.com/results?search_query={}", util::urlencode(query.trim()));
+        let (status, html) = util::fetch_text(&url, &[("Accept-Language", "pt-BR,pt;q=0.9")]).ok()?;
+        if status >= 400 {
+            return None;
+        }
+        for id in video_ids(&html, 3) {
+            for size in SIZES {
+                let Ok((200, bytes)) = util::fetch_bytes(&format!("https://i.ytimg.com/vi/{id}/{size}.jpg")) else { continue };
+                // quando o tamanho não existe, vem uma imagem cinza de 120 × 90
+                let Some(img) = gfx::decode_image(&bytes).filter(|i| i.w >= 320) else { continue };
+                let img = gfx::trim_bars(&img);
+                if same_picture(small, &img) {
+                    return Some(img);
+                }
+                break; // os outros tamanhos deste vídeo são a mesma imagem: tenta o próximo vídeo
+            }
+        }
+        None
+    }
+}
+
 struct Reader {
     art_key: Option<String>,
     art: Option<Arc<Image>>,
+    /// a capa em alta já chegou (muda a chave da capa, para os desenhos se refazerem)
+    art_hd: bool,
+    /// capa em alta sendo procurada: (música, resposta)
+    upgrade: Option<(String, std::sync::mpsc::Receiver<Option<Image>>)>,
 }
 
 impl Reader {
@@ -281,7 +392,33 @@ impl Reader {
         let key = format!("{app_id}\u{1}{title}\u{1}{artist}");
         if self.art_key.as_deref() != Some(key.as_str()) || self.art.is_none() {
             self.art_key = Some(key.clone());
-            self.art = read_art(&props).map(Arc::new);
+            // sem as faixas pretas de vídeos 16:9 em miniaturas 4:3: senão a capa fica deslocada
+            self.art = read_art(&props).map(|img| Arc::new(gfx::trim_bars(&img)));
+            self.art_hd = false;
+            self.upgrade = None;
+            let small = self.art.clone().filter(|a| media_kind(&app_id) == "youtube" && youtube::worth_upgrading(a));
+            if let Some(small) = small {
+                let (tx, rx) = channel();
+                let (title, artist) = (title.clone(), artist.clone());
+                std::thread::spawn(move || {
+                    unsafe {
+                        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                    }
+                    let _ = tx.send(youtube::hd_thumbnail(&title, &artist, &small));
+                });
+                self.upgrade = Some((key.clone(), rx));
+            }
+        }
+        if let Some((for_key, rx)) = &self.upgrade {
+            if *for_key == key {
+                if let Ok(found) = rx.try_recv() {
+                    if let Some(img) = found {
+                        self.art = Some(Arc::new(img));
+                        self.art_hd = true;
+                    }
+                    self.upgrade = None;
+                }
+            }
         }
         let controls = info.Controls()?;
         let updated = timeline.LastUpdatedTime()?.UniversalTime;
@@ -309,7 +446,7 @@ impl Reader {
             can_repeat: controls.IsRepeatEnabled().unwrap_or(false),
             volume: mixer::get(&app_id),
             art: self.art.clone(),
-            art_key: self.art.as_ref().map(|_| key),
+            art_key: self.art.as_ref().map(|_| if self.art_hd { format!("{key}\u{1}hd") } else { key }),
             error: None,
         })
     }
@@ -321,7 +458,7 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
     }
     let mut manager: Option<Manager> = None;
     let mut current: Option<Session> = None;
-    let mut reader = Reader { art_key: None, art: None };
+    let mut reader = Reader { art_key: None, art: None, art_hd: false, upgrade: None };
     loop {
         let p = pref.lock().unwrap().clone();
         let result = (|| {
@@ -505,7 +642,7 @@ pub struct Media {
     msg: usize,
     next_poll: Instant,
     next_message: Instant,
-    art_cache: RefCell<Option<((String, u32), Image)>>,
+    art_cache: RefCell<Option<((String, u32, u32), Image)>>,
     /// fundo: a capa desfocada, um pouco maior que o cartão
     bg_cache: RefCell<Option<((String, u32, u32), Image)>>,
     /// fundo da música anterior, sumindo aos poucos depois de trocar de música
@@ -770,20 +907,22 @@ impl Media {
         })
     }
 
-    /// Capa arredondada (guardada no tamanho atual).
+    /// Capa arredondada, feita no tamanho exato da área em pixels (guardada até mudar).
     fn paste_art(&self, c: &mut Canvas, mode: Mode) -> bool {
         let Some(m) = self.media.as_ref().filter(|m| !m.empty) else { return false };
         let (Some(art), Some(key)) = (&m.art, &m.art_key) else { return false };
         let (x, y, w, h, radius) = self.art_rect(mode);
-        let px = (w * c.s).round() as u32;
-        let cache_key = (key.clone(), px);
+        // os quatro lados em pixels inteiros: a imagem cai pixel a pixel, sem ser esticada de novo
+        let s = c.s;
+        let (px0, py0) = ((x * s).round(), (y * s).round());
+        let (pw, ph) = (((x + w) * s).round() - px0, ((y + h) * s).round() - py0);
+        let cache_key = (key.clone(), pw as u32, ph as u32);
         let mut cache = self.art_cache.borrow_mut();
         if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
-            *cache = Some((cache_key, gfx::fit_square(art, px)));
+            *cache = Some((cache_key, cover_image(art, pw as u32, ph as u32)));
         }
-        // quadrada na largura da área; se a área é mais baixa, mostra o meio da capa
         c.push_round_clip(x, y, x + w, y + h, radius);
-        c.image(&cache.as_ref().unwrap().1, x, y - (w - h) / 2.0);
+        c.image_px(&cache.as_ref().unwrap().1, px0, py0, pw, ph, 1.0);
         c.pop_clip();
         true
     }
@@ -1421,3 +1560,4 @@ mod tests {
         }
     }
 }
+

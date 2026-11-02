@@ -12,8 +12,8 @@ use serde_json::json;
 
 use super::*;
 use crate::drawing;
-use crate::gfx::{self, Anchor, Canvas, Face, Image};
-use crate::widgets::media::fmt_time;
+use crate::gfx::{Anchor, Canvas, Face, Image};
+use crate::widgets::media::{self, fmt_time};
 use crate::widgets::{island_act, IslandInfo};
 
 const KEY: &str = "midia";
@@ -241,7 +241,7 @@ impl Island {
     fn art(&mut self, art: &Arc<Image>, px: u32) -> Image {
         let key = Arc::as_ptr(art) as usize;
         if self.art_cache.as_ref().map(|c| (c.0, c.1)) != Some((key, px)) {
-            self.art_cache = Some((key, px, gfx::fit_square(art, px)));
+            self.art_cache = Some((key, px, media::cover_image(art, px, px)));
         }
         self.art_cache.as_ref().unwrap().2.clone()
     }

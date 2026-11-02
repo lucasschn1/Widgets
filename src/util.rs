@@ -111,8 +111,8 @@ pub fn fetch_json_with(url: &str, headers: &[(&str, &str)]) -> Result<serde_json
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-/// Baixa uma página: (código HTTP, texto). Erros de rede viram Err.
-pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), String> {
+/// Pedido GET já com a configuração de rede do app.
+fn get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::http::Response<ureq::Body>, String> {
     // TLS do próprio Windows (Schannel): executável menor e usa os certificados do sistema (sem
     // PlatformVerifier, o ureq usaria só a lista da Mozilla, e sites como o YouTube, cuja cadeia o
     // Windows monta por outra raiz, falhariam)
@@ -130,10 +130,23 @@ pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), 
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
-    let mut resp = req.call().map_err(|e| e.to_string())?;
+    req.call().map_err(|e| e.to_string())
+}
+
+/// Baixa uma página: (código HTTP, texto). Erros de rede viram Err.
+pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), String> {
+    let mut resp = get(url, headers)?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().with_config().limit(20 * 1024 * 1024).read_to_string().map_err(|e| e.to_string())?;
     Ok((status, text))
+}
+
+/// Baixa um arquivo (ex.: uma imagem): (código HTTP, bytes).
+pub fn fetch_bytes(url: &str) -> Result<(u16, Vec<u8>), String> {
+    let mut resp = get(url, &[])?;
+    let status = resp.status().as_u16();
+    let bytes = resp.body_mut().with_config().limit(10 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
+    Ok((status, bytes))
 }
 
 /// Codifica um texto para usar numa URL.
