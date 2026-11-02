@@ -625,16 +625,8 @@ impl Kind for System {
         if self.ring_at(x, y, mode).is_some() { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
-        if mode == Mode::G && y >= SEG_Y {
-            return None;
-        }
-        if mode != Mode::G && self.flipped.get().is_some() {
-            return Some("Clique para voltar aos anéis".into());
-        }
-        let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
-        let action = if i == 2 { "Clique para ver as unidades" } else { "Clique para ver os apps que mais usam" };
-        Some(format!("{}  ·  {}%\n{}\n{action}", TITLES[i], (self.target[i] * 100.0).round(), self.details[i]))
+    fn tooltip(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<String> {
+        None
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {

@@ -897,7 +897,7 @@ impl Kind for GitHub {
         if Self::on_header(x, y, mode) || self.on_message(x) { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
+    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
         if let Some((day, count)) = self.day_at(x, y, mode) {
             let amount = match count {
                 0 => "Nenhuma contribuição".to_string(),
@@ -915,18 +915,7 @@ impl Kind for GitHub {
             let local = row.when - util::tz_offset(); // horário local
             let (_, m, d) = util::civil_from_days((local / 86400.0).floor() as i64);
             let secs = local.rem_euclid(86400.0) as i64;
-            let mut text = format!("{title}\n\n{d} de {} às {:02}:{:02}", MONTHS[m as usize - 1], secs / 3600, secs / 60 % 60);
-            if env.shortcuts() {
-                text += "\nClique para abrir no GitHub";
-            }
-            return Some(text);
-        }
-        if Self::on_header(x, y, mode) {
-            let mut lines = vec!["Abrir o perfil no GitHub".to_string()];
-            if let Some(t) = self.status.updated {
-                lines.push(format!("Atualizado {}", util::time_ago(t)));
-            }
-            return Some(lines.join("\n"));
+            return Some(format!("{title}\n\n{d} de {} às {:02}:{:02}", MONTHS[m as usize - 1], secs / 3600, secs / 60 % 60));
         }
         None
     }

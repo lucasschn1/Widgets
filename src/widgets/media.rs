@@ -1103,7 +1103,10 @@ impl Media {
                 c.fill_round_rect(x0, G_VOL_Y - 2.5, x0 + 5.0f32.max((x1 - x0) * v), G_VOL_Y + 2.5, 2.5, Rgba::rgb(235, 235, 240));
             }
             None => {
-                c.text(W / 2.0, G_VOL_Y, "Role a roda do mouse para o volume", Face::Regular, 11.5, MUTED, Anchor::MM, None);
+                // sem o volume do app: a mesma linha, apagada (a roda do mouse continua mudando)
+                icon(c, 24.0, G_VOL_Y, "\u{e992}", 14.0, FAINT);
+                icon(c, W - 24.0, G_VOL_Y, "\u{e995}", 14.0, FAINT);
+                c.fill_round_rect(x0, G_VOL_Y - 2.5, x1, G_VOL_Y + 2.5, 2.5, WHITE.alpha(0.12));
             }
         }
         for (action, cx) in self.toggles() {
@@ -1372,47 +1375,36 @@ impl Kind for Media {
         if self.control_at(x, y, mode).is_none() && self.on_art(x, y, mode) { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
+    fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
         let m = self.media.as_ref().filter(|m| !m.empty)?;
-        if let Some((ctl, ..)) = self.control_at(x, y, mode) {
-            return Some(
-                match ctl {
-                    Ctl::Prev => "Anterior",
-                    Ctl::Next => "Próxima",
-                    Ctl::Toggle(false) => "Tocar",
-                    Ctl::Toggle(true) => "Pausar",
-                }
-                .into(),
-            );
+        if self.control_at(x, y, mode).is_some() {
+            return None;
         }
         if let Some(a) = self.toggle_at(x, y, mode) {
-            return Some(
-                match a {
-                    SHUFFLE => if m.shuffle == Some(true) { "Aleatório ligado" } else { "Aleatório" },
-                    REPEAT => match m.repeat {
-                        Some(1) => "Repetindo esta música",
-                        Some(2) => "Repetindo a lista",
-                        _ => "Repetir",
-                    },
-                    _ => "Abrir o player",
-                }
-                .into(),
-            );
+            return match (a, m.repeat) {
+                (REPEAT, Some(1)) => Some("Repetindo esta música".into()),
+                (REPEAT, Some(2)) => Some("Repetindo a lista".into()),
+                _ => None,
+            };
         }
         if let Some(v) = self.volume_at(x, y, mode) {
-            return Some(format!("Volume do app: {}%\nClique para mudar", (v * 100.0).round()));
+            return Some(format!("Volume {}%", (v * 100.0).round()));
         }
         if let Some(f) = self.bar_at(x, y, mode) {
-            let at = fmt_time(m.duration * f as f64);
-            return Some(if m.can_seek { format!("{at}\nClique para pular para cá") } else { format!("{} de {}", fmt_time(self.position()), fmt_time(m.duration)) });
+            return m.can_seek.then(|| fmt_time(m.duration * f as f64));
         }
+        // o nome inteiro, só quando ele aparece cortado
+        let (width, size) = match mode {
+            Mode::P => (C_TEXT_W, 12.5),
+            Mode::M => (M_TEXT_W, 13.5),
+            Mode::G => (TEXT_W, 15.5),
+        };
         let probe = Canvas::new(1, 1, 1.0);
-        let mut song = probe.wrap(&m.title, Face::Regular, 11.5, 300.0, 3).join("\n");
-        if !m.artist.is_empty() {
-            song += &format!("\n\n{}", m.artist);
+        if probe.text_width(&m.title, Face::Semibold, size) <= width {
+            return None;
         }
-        let _ = (env, x, y, mode);
-        Some(song + if m.artist.is_empty() { "\n\n" } else { "\n\n" } + "Clique para virar a ilha flutuante")
+        let song = probe.wrap(&m.title, Face::Regular, 11.5, 300.0, 3).join("\n");
+        Some(if m.artist.is_empty() { song } else { format!("{song}\n\n{}", m.artist) })
     }
 
     /// Roda do mouse: o volume do app que está tocando (ou o do Windows, se não achar o app).

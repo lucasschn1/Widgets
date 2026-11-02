@@ -561,36 +561,13 @@ impl Kind for Pomodoro {
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let wcfg = env.wcfg();
         if let Some((control, ..)) = self.control_at(x, y, mode) {
-            return Some(match control {
-                Control::Restart => "Reiniciar esta fase".into(),
-                Control::Skip => format!("Pular para: {}", self.next_phase(wcfg).label().to_lowercase()),
-                Control::Toggle(true) => "Pausar".into(),
-                Control::Toggle(false) => "Começar".into(),
-            });
+            return match control {
+                Control::Skip => Some(format!("Pular para: {}", self.next_phase(wcfg).label().to_lowercase())),
+                _ => None,
+            };
         }
         if Self::on_ring(x, y, mode) {
-            let mut lines = vec![format!("{}  ·  {} restantes", self.phase.label(), fmt_timer(self.left()))];
-            if let Some(end) = self.end {
-                lines.push(format!("Termina às {}", win::clock_at(end)));
-            }
-            if self.phase == Phase::Foco {
-                let every = Self::every(wcfg);
-                lines.push(format!("Pomodoro {} de {} até a pausa longa", (self.cycle + 1).min(every), every));
-            }
-            lines.push(format!("Clique para {}", if self.running() { "pausar" } else { "começar" }));
-            lines.push("Roda do mouse: ±1 minuto".into());
-            return Some(lines.join("\n"));
-        }
-        if Self::on_clock(x, y, mode) {
-            let t = win::local_time();
-            let stats = today(env.cfg, false);
-            let mut date = util::long_date(&t);
-            date[..1].make_ascii_uppercase();
-            let mut lines = vec![date, format!("Hoje: {} pomodoros  ·  {} de foco", stats.1, fmt_minutes(stats.2 as f64))];
-            if env.shortcuts() {
-                lines.push("Clique para abrir o Relógio do Windows".into());
-            }
-            return Some(lines.join("\n"));
+            return self.end.map(|end| format!("Termina às {}", win::clock_at(end)));
         }
         None
     }

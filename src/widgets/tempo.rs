@@ -1475,34 +1475,8 @@ impl Kind for Tempo {
         if self.hit(x, y, mode, env) == Some(DETAILS) && y < HOURS_Y { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
     }
 
-    fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
-        let Some(wx) = &self.weather else {
-            return self.status.error.as_ref().map(|_| "Clique para tentar de novo".to_string());
-        };
-        let view = self.view_for(mode);
-        if view != View::Main && self.navigable() {
-            return None;
-        }
-        let action = self.hit(x, y, mode, env);
-        match action {
-            Some(a) if (DAY..DAY + 10).contains(&a) => {
-                let name = self.day((a - DAY) as usize).and_then(|d| d.str_of("name").map(String::from)).unwrap_or_default();
-                return Some(format!("Clique para ver as horas e os detalhes de {}", name.to_lowercase()));
-            }
-            Some(a) if (HOUR..HOUR + NEXT_HOURS as u32).contains(&a) => return Some("Role para ver mais horas\nClique numa hora para ver o dia".into()),
-            Some(SCROLL_BACK) | Some(SCROLL_FWD) => return None,
-            _ => {}
-        }
-        let mut lines = vec![format!("{}  ·  {}", wx.str_of("desc").unwrap_or(""), self.temp_text()), wx.str_of("details").unwrap_or("").to_string()];
-        if let Some(t) = self.status.updated {
-            lines.push(format!("Atualizado {}", util::time_ago(t)));
-        }
-        if action == Some(DETAILS) {
-            lines.push("Clique para ver os detalhes".into());
-        } else if action == Some(OPEN_FORECAST) {
-            lines.push("Clique para ver a previsão completa".into());
-        }
-        Some(lines.join("\n"))
+    fn tooltip(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<String> {
+        None
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
