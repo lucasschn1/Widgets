@@ -25,7 +25,7 @@ use crate::win;
 const W: f32 = WIDE;
 const PAD: f32 = 16.0;
 const M_H: f32 = MEDIUM_H;
-const HOURS_Y: f32 = 80.0;
+const HOURS_Y: f32 = 78.0;
 /// colunas de horas visíveis na faixa
 const HOURS: usize = 6;
 /// horas na faixa da tela principal (rolando)
@@ -630,7 +630,7 @@ impl Tempo {
 
     fn minmax(&self) -> String {
         match self.weather.as_ref().map(|w| (w.i64_of("max"), w.i64_of("min"))) {
-            Some((Some(max), Some(min))) => format!("Máx. {max}°  Mín. {min}°"),
+            Some((Some(max), Some(min))) => format!("Máx. {max}°   Mín. {min}°"),
             _ => String::new(),
         }
     }
@@ -767,11 +767,11 @@ impl Tempo {
 
     /// Setinhas nas pontas da faixa de horas.
     fn chevron_rects(y: f32) -> (Rect4, Rect4) {
-        ((0.0, y, PAD - 2.0, y + STRIP_H), (W - PAD + 2.0, y, W, y + STRIP_H))
+        ((0.0, y, PAD + 2.0, y + STRIP_H), (W - PAD - 2.0, y, W, y + STRIP_H))
     }
 
     fn strip_bounds() -> (f32, f32) {
-        (PAD - 4.0, W - PAD + 4.0)
+        (PAD + 2.0, W - PAD - 2.0)
     }
 
     fn dot_rects(mode: Mode) -> Vec<Rect4> {
@@ -894,19 +894,19 @@ impl Tempo {
 
     /// Cidade, temperatura grande e, à direita, ícone, condição e máxima/mínima.
     fn draw_top(&self, c: &mut Canvas, env: &Env) {
-        let city = self.city(env);
-        c.text(PAD - 1.0, 14.0, "\u{e707}", Face::Icons, 11.5, FG, Anchor::LA, None);
-        c.text(PAD + 14.0, 13.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(190.0));
-        c.text(PAD - 2.0, 28.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
+        // esquerda: cidade e temperatura; direita: ícone, condição e máx./mín., alinhados pela
+        // mesma margem
+        c.text(PAD, 14.0, &short_city(&self.city(env)), Face::Semibold, 13.0, FG, Anchor::LA, Some(170.0));
+        c.text(PAD - 3.0, 28.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
-                let size = 30.0;
-                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), W - PAD - size + 2.0, 10.0);
-                c.text(W - PAD, 44.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.5, FG, Anchor::RA, Some(150.0));
-                c.text(W - PAD, 61.0, &self.minmax(), Face::Regular, 11.5, MUTED, Anchor::RA, None);
+                let size = 28.0;
+                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), W - PAD - size, 9.0);
+                c.text(W - PAD, 41.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.5, FG, Anchor::RA, Some(150.0));
+                c.text(W - PAD, 58.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::RA, None);
             }
             None => {
-                c.text(W - PAD, 44.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
+                c.text(W - PAD, 41.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
             }
         }
     }
@@ -923,25 +923,27 @@ impl Tempo {
         let first = (off.floor() as usize).saturating_sub(1);
         for (i, h) in list.iter().enumerate().skip(first).take(HOURS + 2) {
             let cx = x0 + col * (i as f32 - off + 0.5);
-            c.text(cx, y + 2.0, h[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
-            c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + 17.0);
+            c.text(cx, y, h[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
+            c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + 15.0);
+            // a chance de chuva fica junto da temperatura, menor, sem encostar no ícone
             let pop = h[4].as_i64().unwrap_or(0);
             if pop >= 20 {
-                c.text(cx, y + 40.0, &format!("{pop}%"), Face::Semibold, 9.5, RAIN_BLUE, Anchor::MA, None);
+                c.text(cx, y + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
             }
-            c.text(cx, y + 51.0, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, 12.0, FG, Anchor::MA, None);
+            c.text(cx, y + 50.0, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
         }
         c.pop_clip();
         let max = Self::max_scroll(list.len());
         let (l, r) = Self::chevron_rects(y);
-        let cy = y + STRIP_H / 2.0 - 2.0;
+        // setas pequenas e discretas, na margem (não ficam por cima das horas)
+        let cy = y + 26.0;
         if off > 0.05 {
-            let x = (l.0 + l.2) / 2.0 + 1.0;
-            c.line(&[(x + 2.5, cy - 5.0), (x - 2.5, cy), (x + 2.5, cy + 5.0)], FG.alpha(0.8), 1.6);
+            let x = (l.0 + l.2) / 2.0 + 2.0;
+            c.line(&[(x + 2.0, cy - 4.0), (x - 2.0, cy), (x + 2.0, cy + 4.0)], FG.alpha(0.55), 1.4);
         }
         if off < max - 0.05 {
-            let x = (r.0 + r.2) / 2.0 - 1.0;
-            c.line(&[(x - 2.5, cy - 5.0), (x + 2.5, cy), (x - 2.5, cy + 5.0)], FG.alpha(0.8), 1.6);
+            let x = (r.0 + r.2) / 2.0 - 2.0;
+            c.line(&[(x - 2.0, cy - 4.0), (x + 2.0, cy), (x - 2.0, cy + 4.0)], FG.alpha(0.55), 1.4);
         }
     }
 
@@ -960,9 +962,10 @@ impl Tempo {
             let y = y0 + DAY_H * i as f32;
             let cy = y + DAY_H / 2.0;
             c.hline_px(PAD, W - PAD, y, WHITE.alpha(0.12));
-            c.text(PAD, cy, d[0].as_str().unwrap_or(""), Face::Regular, 12.5, FG, Anchor::LM, None);
-            let icon = 20.0;
-            c.image(&weather_art(d[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), 62.0, cy - icon / 2.0);
+            let name = capitalize(d[0].as_str().unwrap_or(""));
+            c.text(PAD, cy, &name, if i == 0 { Face::Semibold } else { Face::Regular }, 12.5, FG, Anchor::LM, None);
+            let icon = 22.0;
+            c.image(&weather_art(d[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), 76.0 - icon / 2.0, cy - icon / 2.0);
             let (mn, mx) = (d[2].as_i64().unwrap_or(0) as f32, d[3].as_i64().unwrap_or(0) as f32);
             c.text(bx0 - 8.0, cy, &format!("{mn}°"), Face::Regular, 12.5, MUTED, Anchor::RM, None);
             c.text(W - PAD, cy, &format!("{mx}°"), Face::Semibold, 12.5, FG, Anchor::RM, None);
@@ -982,28 +985,23 @@ impl Tempo {
     /// Pequeno (quadrado): cidade, temperatura grande e, embaixo, ícone, condição e máx./mín.
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
         let (x, w) = (14.0, SMALL - 28.0);
-        let city = self.city(env);
-        let city = city.split(',').next().unwrap_or(&city).to_string();
-        c.text(x, 14.0, &city, Face::Semibold, 12.5, FG, Anchor::LA, Some(w));
-        c.text(x - 2.0, 30.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
+        c.text(x, 14.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 30.0));
+        c.text(x - 3.0, 28.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
-                let size = 24.0;
-                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), x - 2.0, 88.0);
-                c.text(x, 115.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
-                if let (Some(max), Some(min)) = (wx.i64_of("max"), wx.i64_of("min")) {
-                    c.text(x, 132.0, &format!("Máx. {max}°  Mín. {min}°"), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
-                }
+                let size = 26.0;
+                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), SMALL - 14.0 - size, 10.0);
+                c.text(x, 104.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
+                c.text(x, 122.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
             }
             None => {
-                for (i, line) in c.wrap(&self.weather_msg, Face::Regular, 11.5, w, 3).iter().enumerate() {
-                    c.text(x, 96.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
+                for (k, line) in c.wrap(&self.weather_msg, Face::Semibold, 12.0, w, 3).iter().enumerate() {
+                    c.text(x, 92.0 + 16.0 * k as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
                 }
             }
         }
     }
 
-    /// Botão redondo com uma seta (voltar, dia anterior, dia seguinte).
     fn draw_button(c: &mut Canvas, r: Rect4, left: bool, enabled: bool) {
         let (cx, cy) = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
         c.fill_circle(cx, cy, 12.0, WHITE.alpha(if enabled { 0.16 } else { 0.06 }));
@@ -1061,7 +1059,7 @@ impl Tempo {
         Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 9.5, fa(FG.alpha(0.7)));
         c.text(ix + 12.0, y + 10.0, &t.title, Face::Semibold, 9.5, fa(FG.alpha(0.7)), Anchor::LA, Some(iw - 12.0));
         let wind_room = if matches!(t.visual, Visual::Wind(_)) { 34.0 } else { 0.0 };
-        let vsize = if h >= 80.0 { 23.0 } else { 20.0 };
+        let vsize = if h >= 110.0 { 28.0 } else if h >= 80.0 { 23.0 } else { 20.0 };
         // a unidade ("km/h") vai menor, ao lado do número
         let (number, unit) = match t.value.split_once(' ') {
             Some((n, u)) => (n, Some(u)),
@@ -1118,7 +1116,7 @@ impl Tempo {
         let w = Self::width(mode);
         let city = self.city(env);
         let city = city.split(',').next().unwrap_or(&city).to_string();
-        let tw = c.text(42.0, 22.0, &city, Face::Semibold, 13.0, FG, Anchor::LM, Some(w - 42.0 - 14.0 - 40.0));
+        let tw = c.text(42.0, 22.0, &city, Face::Semibold, 13.0, FG, Anchor::LM, Some(w - 42.0 - 14.0));
         if mode != Mode::P {
             c.text(42.0 + tw + 8.0, 22.5, "agora", Face::Regular, 11.5, MUTED, Anchor::LM, None);
         }
@@ -1202,6 +1200,20 @@ impl Tempo {
         let (x0, x1) = Self::strip_bounds();
         let i = ((x - x0) / ((x1 - x0) / HOURS as f32) + off).floor() as usize;
         (i < len).then_some(HOUR + i as u32)
+    }
+}
+
+/// "São José dos Pinhais" de "São José dos Pinhais, Paraná".
+fn short_city(city: &str) -> String {
+    city.split(',').next().unwrap_or(city).trim().to_string()
+}
+
+/// "Ter" de "ter".
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
