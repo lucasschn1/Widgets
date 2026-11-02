@@ -141,10 +141,10 @@ impl App {
     /// Um widget desenhado no tamanho e escala pedidos: o de verdade, ou um de exemplo.
     fn render_widget(&self, key: &'static str, mode: Mode, s: f32) -> Option<(Image, f32)> {
         if let Some(c) = self.cards.iter().find(|c| c.key() == key) {
-            return Some((render_kind(c.kind.as_ref(), mode, s, &self.sh), c.kind.layout(mode).radius * s));
+            return Some((render_kind(c.kind.as_ref(), mode, s, &self.sh), widgets::Layout::of(mode).radius * s));
         }
         let kind = widgets::sample(key, &self.sh.cfg, &self.sh.cache)?;
-        Some((render_kind(kind.as_ref(), mode, s, &self.sh), kind.layout(mode).radius * s))
+        Some((render_kind(kind.as_ref(), mode, s, &self.sh), widgets::Layout::of(mode).radius * s))
     }
 
     pub(super) fn render_panel(&mut self, i: usize) {
@@ -492,7 +492,7 @@ impl App {
                 match self.find(key) {
                     Some(j) => self.set_mode(j, mode),
                     None => {
-                        self.sh.cfg.obj_mut(key).insert("tamanho".into(), json!(mode.code()));
+                        widgets::store_size(self.sh.cfg.obj_mut(key), mode);
                         self.sh.save();
                     }
                 }

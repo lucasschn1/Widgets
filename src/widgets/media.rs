@@ -21,7 +21,7 @@ use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
 use windows_future::IAsyncOperation;
 
-use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{self, Anchor, Canvas, Face, Image};
@@ -369,16 +369,14 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
 
 // ---------- o widget ----------
 
-const W: f32 = 320.0;
+const W: f32 = WIDE;
 // grande: a capa na largura toda em cima; embaixo, fonte, título e artista, a barra, os
 // controles, o volume do app e aleatório/abrir/repetir
 const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, 200.0, 18.0); // x, y, largura, altura, raio
 const G_TEXT_Y: f32 = 228.0;
 const G_VOL_Y: f32 = 384.0;
-const G_TOG_Y: f32 = 420.0;
-const H: f32 = G_TOG_Y + 28.0;
+const G_TOG_Y: f32 = LARGE_H - 28.0;
 const VOL_X: (f32, f32) = (44.0, W - 44.0);
-const RADIUS: f32 = RADIUS_G;
 const ART: f32 = 76.0;
 const ART_RADIUS: f32 = 14.0;
 const ART_XY: (f32, f32) = (18.0, 18.0);
@@ -398,18 +396,18 @@ const C_PLAY_D: f32 = 36.0;
 const C_BAR_Y: f32 = 138.0;
 const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
-// médio: capa, fonte, título e artista, controles e uma barra de progresso fina
-const MEDIUM_H: f32 = 110.0;
-const M_RADIUS: f32 = RADIUS_M;
-const M_ART: f32 = 74.0;
-const M_ART_RADIUS: f32 = 12.0;
+// médio: a capa na altura toda à esquerda; à direita, fonte, título e artista, os controles e
+// a barra de progresso alinhada com o pé da capa
+const M_ART: f32 = MEDIUM_H - 28.0;
+const M_ART_RADIUS: f32 = 14.0;
 const M_ART_XY: (f32, f32) = (14.0, 14.0);
-const M_TEXT_X: f32 = 14.0 + 74.0 + 14.0;
+const M_TEXT_X: f32 = M_ART_XY.0 + M_ART + 16.0;
 const M_TEXT_W: f32 = W - M_TEXT_X - 16.0;
-const M_CTRL_Y: f32 = 74.0;
-const M_PLAY_D: f32 = 32.0;
-const M_BAR_Y: f32 = 100.0;
-const M_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 17.0, 14.0 + 17.0, 40.0, 40.0);
+const M_CTRL_Y: f32 = 96.0;
+const M_PLAY_D: f32 = 36.0;
+const M_BAR_Y: f32 = MEDIUM_H - 17.0;
+const M_IDLE_D: f32 = 56.0;
+const M_IDLE_BOX: (f32, f32, f32, f32) = (M_ART_XY.0 + (M_ART - M_IDLE_D) / 2.0, M_ART_XY.1 + (M_ART - M_IDLE_D) / 2.0, M_IDLE_D, M_IDLE_D);
 
 const POLL: Duration = Duration::from_millis(250);
 const MESSAGE_EVERY: Duration = Duration::from_secs(12);
@@ -698,11 +696,11 @@ impl Media {
                 vec![(toggle, x, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, x, y + 40.0, 13.0, m.can_next, false)]
             }
             Mode::M => {
-                let (x, y) = (M_TEXT_X, M_CTRL_Y);
+                let (cx, y) = (M_TEXT_X + M_TEXT_W / 2.0, M_CTRL_Y);
                 vec![
-                    (Ctl::Prev, x + 14.0, y, 15.0, m.can_prev, false),
-                    (toggle, x + 62.0, y, M_PLAY_D, m.can_toggle, true),
-                    (Ctl::Next, x + 110.0, y, 15.0, m.can_next, false),
+                    (Ctl::Prev, cx - 50.0, y, 16.0, m.can_prev, false),
+                    (toggle, cx, y, M_PLAY_D, m.can_toggle, true),
+                    (Ctl::Next, cx + 50.0, y, 16.0, m.can_next, false),
                 ]
             }
             Mode::G => {
@@ -992,11 +990,7 @@ impl Media {
     }
 
     fn layout_of(&self, mode: Mode) -> Layout {
-        match mode {
-            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
-            Mode::M => Layout { w: W, h: MEDIUM_H, radius: M_RADIUS },
-            Mode::G => Layout { w: W, h: H, radius: RADIUS },
-        }
+        Layout::of(mode)
     }
 
     /// Tudo o que fica por cima do fundo.
@@ -1038,13 +1032,15 @@ impl Media {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 28.0);
                     }
-                    c.text(x, 12.0, source_label(m.kind), Face::Semibold, 9.5, source_color(m.kind), Anchor::LA, None);
-                    c.text(x, 26.0, &m.title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
-                    c.text(x, 44.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
+                    c.text(x, 16.0, source_label(m.kind), Face::Semibold, 9.5, source_color(m.kind), Anchor::LA, None);
+                    c.text(x, 30.0, &m.title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
+                    c.text(x, 50.0, &m.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                 } else {
-                    c.text(x, 22.0, &funny_title, Face::Semibold, 13.0, FG, Anchor::LA, Some(w));
-                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.0, w, 2).iter().enumerate() {
-                        c.text(x, 42.0 + 16.0 * i as f32, line, Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
+                    let kind = self.pref();
+                    c.text(x, 16.0, source_label(&kind), Face::Semibold, 9.5, source_color(&kind), Anchor::LA, None);
+                    c.text(x, 30.0, &funny_title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
+                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.5, w, 3).iter().enumerate() {
+                        c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                     }
                 }
             }
@@ -1102,10 +1098,6 @@ impl Kind for Media {
     }
     fn title(&self) -> &'static str {
         "Tocando agora"
-    }
-
-    fn layout(&self, mode: Mode) -> Layout {
-        self.layout_of(mode)
     }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {

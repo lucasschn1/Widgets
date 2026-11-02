@@ -76,7 +76,7 @@ pub fn card_shadow(w: u32, h: u32, m: u32, radius: f32, s: f32) -> Image {
 
 /// Desenha um widget num tamanho e escala quaisquer (miniaturas, prévia).
 pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
-    let l = kind.layout(mode);
+    let l = Layout::of(mode);
     let mut c = Canvas::new((l.w * s).round() as u32, (l.h * s).round() as u32, s);
     c.text_scale = sh.text_scale;
     let env = Env { cfg: &sh.cfg, key: kind.key() };
@@ -172,7 +172,7 @@ impl Card {
     // --- geometria ---
 
     pub fn layout(&self, mode: Mode) -> Layout {
-        self.kind.layout(mode)
+        Layout::of(mode)
     }
 
     pub fn card_size_of(&self, mode: Mode) -> (i32, i32) {

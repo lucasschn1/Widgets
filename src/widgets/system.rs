@@ -6,15 +6,14 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, Status, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, Kind, MenuItem, Mode, Status, LARGE_H, SMALL, WIDE};
 use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
 use crate::theme::*;
 use crate::win;
 
-const W: f32 = 320.0;
+const W: f32 = WIDE;
 const PAD: f32 = 16.0;
-const M_H: f32 = 150.0;
 const ROW_H: f32 = 38.0;
 const LIST_N: usize = 5;
 /// médio virado: linhas mais baixas, para caber 3 embaixo do cabeçalho
@@ -25,8 +24,9 @@ const BACK_N: usize = 3;
 const G_TOP: f32 = 24.0;
 const SEG_Y: f32 = 150.0 + G_TOP;
 const G_LIST_Y: f32 = 194.0 + G_TOP;
-const G_FOOT_Y: f32 = G_LIST_Y + ROW_H * LIST_N as f32 + 6.0;
-const G_H: f32 = G_FOOT_Y + 34.0;
+/// rodapé (rede e tempo ligado) no pé do cartão, logo depois da lista
+const G_FOOT_Y: f32 = LARGE_H - 34.0;
+const _: () = assert!(G_LIST_Y + ROW_H * LIST_N as f32 + 6.0 <= G_FOOT_Y, "a lista não cabe no grande");
 
 const EVERY: Duration = Duration::from_secs(2);
 const RING_MS: f32 = 550.0;
@@ -229,17 +229,6 @@ impl System {
     fn close_rect(mode: Mode) -> (f32, f32, f32, f32) {
         let r = if mode == Mode::P { SMALL } else { W };
         (r - 38.0, 8.0, r - 10.0, 36.0)
-    }
-
-    fn base_h(mode: Mode) -> f32 {
-        if mode == Mode::P { SMALL } else { M_H }
-    }
-
-    fn height(&self, mode: Mode) -> f32 {
-        match mode {
-            Mode::G => G_H,
-            m => Self::base_h(m),
-        }
     }
 
     /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
@@ -555,15 +544,6 @@ impl Kind for System {
         Mode::M
     }
 
-    fn layout(&self, mode: Mode) -> Layout {
-        let radius = match mode {
-            Mode::P => SMALL_RADIUS,
-            Mode::M => RADIUS_M,
-            Mode::G => RADIUS_G,
-        };
-        Layout { w: if mode == Mode::P { SMALL } else { W }, h: self.height(mode), radius }
-    }
-
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         if self.mode_seen.get() != mode {
             // mudou de tamanho: o cartão desvira
@@ -723,7 +703,7 @@ mod tests {
             let mut s = s;
             s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
             s.bars_since = Instant::now() - Duration::from_secs(5);
-            let l = s.layout(mode);
+            let l = crate::widgets::Layout::of(mode);
             let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
             c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
             s.draw(&mut c, mode, &Env { cfg: &cfg, key: "sistema" });

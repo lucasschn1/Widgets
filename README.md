@@ -102,8 +102,9 @@ soma quanto você focou no dia, e começa ou pausa com um clique (ou pelo clique
 ## Do tamanho que você quiser
 
 Cada widget tem três tamanhos. Clique no botão que aparece no canto, ou dê dois cliques no
-widget. Os vizinhos se ajeitam sozinhos. O pequeno é um quadrado: dois lado a lado ocupam a
-largura de um médio.
+widget. Os vizinhos se ajeitam sozinhos. Os tamanhos são os mesmos em todos os widgets, então
+eles se encaixam como peças: o pequeno é um quadrado, o médio tem a altura dele e a largura de
+dois pequenos lado a lado, e o grande tem a largura do médio e espaço para as listas.
 
 <p align="center">
   <img src="docs/images/tamanhos.webp" width="340" alt="Mudando de tamanho">

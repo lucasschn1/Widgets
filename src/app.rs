@@ -377,6 +377,20 @@ impl App {
                 _ => None,
             }
         };
+        // alturas da versão 3.6, a última em que cada widget tinha as próprias medidas; a 3.6 só
+        // guardava a altura ao abrir, então quem mudou de tamanho depois ficou com a de outro
+        let v36 = |key: &str, mode: Mode| -> Option<f32> {
+            match (key, mode) {
+                (_, Mode::P) => Some(widgets::SMALL),
+                ("midia", Mode::M) => Some(110.0),
+                ("github", Mode::M) => Some(163.0),
+                (_, Mode::M) => Some(150.0),
+                ("tempo", Mode::G) => Some(348.0),
+                ("github", Mode::G) => Some(377.0),
+                ("pomodoro", Mode::G) => Some(340.0),
+                (_, Mode::G) => Some(448.0),
+            }
+        };
         for i in 0..self.cards.len() {
             let (key, mode) = (self.cards[i].key(), self.cards[i].mode);
             if self.cards[i].temp {
@@ -386,8 +400,9 @@ impl App {
             let w = &self.sh.cfg[key];
             let old_h = match (w.f64_of("altura"), w.str_of("altura_tamanho")) {
                 (Some(h), Some(m)) if m == mode.code() => Some(h as f32),
-                (Some(_), Some(_)) => None,
-                _ => legacy(key, mode),
+                (Some(_), Some(_)) => v36(key, mode),
+                // antes da 3.6, os que não estão na lista já tinham a altura da 3.6
+                _ => legacy(key, mode).or(v36(key, mode)),
             };
             if let Some(old_h) = old_h.filter(|h| (h - now_h).abs() > 0.5) {
                 let card = &self.cards[i];
@@ -404,9 +419,7 @@ impl App {
                     wj.insert("y".into(), json!(to.1));
                 }
             }
-            let w = self.sh.cfg.obj_mut(key);
-            w.insert("altura".into(), json!(now_h));
-            w.insert("altura_tamanho".into(), json!(mode.code()));
+            widgets::store_size(self.sh.cfg.obj_mut(key), mode);
         }
     }
 
@@ -650,7 +663,7 @@ impl App {
         let (mode, pos) = (self.cards[i].mode, self.cards[i].pos);
         let key = self.cards[i].key();
         let w = self.sh.cfg.obj_mut(key);
-        w.insert("tamanho".into(), json!(mode.code()));
+        widgets::store_size(w, mode);
         w.insert("x".into(), json!(pos.0));
         w.insert("y".into(), json!(pos.1));
         w.remove("compact");
@@ -1208,7 +1221,7 @@ impl App {
                 let w = self.sh.cfg.obj_mut(key);
                 w.insert("x".into(), json!(pos.0));
                 w.insert("y".into(), json!(pos.1));
-                w.insert("tamanho".into(), json!(mode.code()));
+                widgets::store_size(w, mode);
                 self.set_visible_with(key, true, true, false);
             }
             Undo::Show(key) => {
@@ -1273,7 +1286,7 @@ impl App {
                     let w = self.sh.cfg.obj_mut(key);
                     w.insert("x".into(), json!(x));
                     w.insert("y".into(), json!(y));
-                    w.insert("tamanho".into(), json!(mode.code()));
+                    widgets::store_size(w, mode);
                     self.set_visible_with(key, true, true, false);
                 }
                 Some(i) => {
@@ -1767,7 +1780,7 @@ impl App {
                         let (mode, pos) = (self.cards[i].mode, self.cards[i].pos);
                         let key = self.cards[i].key();
                         let w = self.sh.cfg.obj_mut(key);
-                        w.insert("tamanho".into(), json!(mode.code()));
+                        widgets::store_size(w, mode);
                         w.insert("x".into(), json!(pos.0));
                         w.insert("y".into(), json!(pos.1));
                         w.remove("compact");

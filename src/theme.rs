@@ -55,9 +55,6 @@ pub const TINT: (u8, u8, u8) = (18, 18, 24);
 pub const TINT_AMOUNT: f64 = 0.40;
 pub const SHEEN: f32 = 0.12; // reflexo branco no topo do vidro
 pub const EDGE: (f32, f32) = (0.42, 0.07); // opacidade da borda clara, no topo e na base
-/// cantos dos cartões por tamanho: médio e grande (o pequeno é SMALL_RADIUS)
-pub const RADIUS_M: f32 = 26.0;
-pub const RADIUS_G: f32 = 28.0;
 
 /// Desaceleração com um leve passo além do ponto, voltando (a "mola" das animações).
 pub fn ease_spring(t: f32) -> f32 {

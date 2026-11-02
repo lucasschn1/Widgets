@@ -17,10 +17,24 @@ use serde_json::Value;
 use crate::config::{self, Get};
 use crate::gfx::Canvas;
 
-/// Lado do tamanho pequeno: um quadrado. Dois lado a lado (com o espaço do encaixe entre eles)
-/// ocupam a largura de um widget médio.
+// ---------- medidas dos três tamanhos (as mesmas em todos os widgets) ----------
+//
+// Cada widget desenha o conteúdo dentro destas medidas; elas nunca mudam com o que ele mostra.
+//
+// O pequeno é um quadrado; o médio tem a mesma altura e a largura de dois pequenos lado a lado
+// (com o espaço do encaixe entre eles), como nos widgets do Mac; o grande tem a mesma largura do
+// médio e altura para as listas (dias, processos, atividades) e a capa grande.
+
+/// Lado do tamanho pequeno (um quadrado).
 pub const SMALL: f32 = 154.0;
+/// Largura do médio e do grande: dois pequenos e o espaço do encaixe.
+pub const WIDE: f32 = 2.0 * SMALL + crate::theme::WIDGET_GAP;
+pub const MEDIUM_H: f32 = SMALL;
+pub const LARGE_H: f32 = 448.0;
+/// cantos de cada tamanho
 pub const SMALL_RADIUS: f32 = 24.0;
+pub const MEDIUM_RADIUS: f32 = 26.0;
+pub const LARGE_RADIUS: f32 = 28.0;
 /// Altura da antiga "pílula" pequena (até a versão 3.1), para acertar os layouts.
 pub const OLD_SMALL_H: f32 = 64.0;
 
@@ -121,11 +135,22 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub w: f32,
     pub h: f32,
     pub radius: f32,
+}
+
+impl Layout {
+    /// Medidas do cartão em cada tamanho (em pixels lógicos), iguais em todos os widgets.
+    pub const fn of(mode: Mode) -> Layout {
+        match mode {
+            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
+            Mode::M => Layout { w: WIDE, h: MEDIUM_H, radius: MEDIUM_RADIUS },
+            Mode::G => Layout { w: WIDE, h: LARGE_H, radius: LARGE_RADIUS },
+        }
+    }
 }
 
 /// Área a destacar sob o mouse: (x0, y0, x1, y1, raio), em unidades lógicas do cartão.
@@ -257,7 +282,6 @@ pub trait Kind {
     fn default_mode(&self) -> Mode {
         Mode::G
     }
-    fn layout(&self, mode: Mode) -> Layout;
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);
     /// Camada redesenhada a cada quadro por cima do cartão pronto (animações leves); (ox, oy) é
@@ -308,6 +332,15 @@ pub trait Kind {
     fn sound_level(&self) -> Option<f32> {
         None
     }
+}
+
+/// Grava o tamanho do widget na seção dele do config.json, junto com a altura que ele tem nesse
+/// tamanho: numa versão nova, se a altura mudar, o App nota e abre espaço embaixo (ver
+/// `App::fit_new_heights`).
+pub fn store_size(w: &mut serde_json::Map<String, Value>, mode: Mode) {
+    w.insert("tamanho".into(), serde_json::json!(mode.code()));
+    w.insert("altura".into(), serde_json::json!(Layout::of(mode).h));
+    w.insert("altura_tamanho".into(), serde_json::json!(mode.code()));
 }
 
 /// Número no config: aceita inteiro ou fracionário.

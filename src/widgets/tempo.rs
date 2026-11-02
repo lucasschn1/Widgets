@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -22,24 +22,29 @@ use crate::theme::*;
 use crate::util;
 use crate::win;
 
-const W: f32 = 320.0;
+const W: f32 = WIDE;
 const PAD: f32 = 16.0;
-const M_H: f32 = 150.0;
+const M_H: f32 = MEDIUM_H;
 const HOURS_Y: f32 = 80.0;
 /// colunas de horas visíveis na faixa
 const HOURS: usize = 6;
 /// horas na faixa da tela principal (rolando)
 const NEXT_HOURS: usize = 24;
 const STRIP_H: f32 = 66.0;
-const DAY_H: f32 = 30.0;
 const G_LINE_Y: f32 = 150.0;
 const G_DAYS_Y: f32 = 186.0;
-const G_DAYS: usize = 5;
-const G_H: f32 = G_DAYS_Y + DAY_H * G_DAYS as f32 + 12.0;
+/// no grande, a semana inteira (a previsão tem 7 dias), dividindo a altura que sobra
+const G_DAYS: usize = 7;
+const DAY_H: f32 = (LARGE_H - G_DAYS_Y - 12.0) / G_DAYS as f32;
+/// painéis de detalhe no grande: 3 linhas de 2, ocupando a altura toda
+const G_TILE_GAP: f32 = 8.0;
+const G_TILES_Y: f32 = 46.0;
+const G_TILE_H: f32 = (LARGE_H - G_TILES_Y - 14.0 - 2.0 * G_TILE_GAP) / 3.0;
 /// detalhe do dia: onde ficam a faixa de horas (médio / grande) e os painéis (grande)
 const DAY_STRIP_M: f32 = 44.0;
 const DAY_STRIP_G: f32 = 104.0;
 const DAY_TILES_G: f32 = 182.0;
+const DAY_TILE_H: f32 = (LARGE_H - DAY_TILES_G - 14.0 - G_TILE_GAP) / 2.0;
 const SCROLL_MS: f32 = 260.0;
 const RAIN_BLUE: Rgba = Rgba::rgb(110, 200, 255);
 
@@ -608,23 +613,15 @@ impl Tempo {
     }
 
     fn width(mode: Mode) -> f32 {
-        if mode == Mode::P { SMALL } else { W }
+        Layout::of(mode).w
     }
 
     fn height(&self, mode: Mode) -> f32 {
-        match mode {
-            Mode::P => SMALL,
-            Mode::M => M_H,
-            Mode::G => G_H,
-        }
+        Layout::of(mode).h
     }
 
     fn radius(mode: Mode) -> f32 {
-        match mode {
-            Mode::P => SMALL_RADIUS,
-            Mode::M => RADIUS_M,
-            Mode::G => RADIUS_G,
-        }
+        Layout::of(mode).radius
     }
 
     fn temp_text(&self) -> String {
@@ -799,7 +796,7 @@ impl Tempo {
             }
             Mode::G => {
                 let w = (W - 2.0 * PAD - 8.0) / 2.0;
-                (0..6).map(|i| (PAD + (w + 8.0) * (i % 2) as f32, 46.0 + 100.0 * (i / 2) as f32, w, 92.0)).collect()
+                (0..6).map(|i| (PAD + (w + G_TILE_GAP) * (i % 2) as f32, G_TILES_Y + (G_TILE_H + G_TILE_GAP) * (i / 2) as f32, w, G_TILE_H)).collect()
             }
         }
     }
@@ -869,7 +866,7 @@ impl Tempo {
     fn draw_sky(&self, c: &mut Canvas, mode: Mode) {
         let (w, h) = (Self::width(mode), self.height(mode));
         let (top, bottom) = sky(self.code(), self.is_day());
-        c.gradient_round_rect(0.0, 0.0, w, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h.min(G_H));
+        c.gradient_round_rect(0.0, 0.0, w, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h);
         // a luz do sol (ou da lua) vindo do canto de cima, com o céu limpo
         if self.code() <= 2 {
             let (warm, amount) = if self.is_day() { (Rgba::rgb(255, 214, 130), 0.4) } else { (Rgba::rgb(200, 210, 255), 0.25) };
@@ -1157,7 +1154,7 @@ impl Tempo {
                 self.draw_strip(c, &hours, DAY_STRIP_G, self.day_scroll.shown());
                 let w = (W - 2.0 * PAD - 8.0) / 2.0;
                 for (i, tile) in Self::day_tiles(&day).iter().enumerate() {
-                    let slot = (PAD + (w + 8.0) * (i % 2) as f32, DAY_TILES_G + 82.0 * (i / 2) as f32, w, 74.0);
+                    let slot = (PAD + (w + G_TILE_GAP) * (i % 2) as f32, DAY_TILES_G + (DAY_TILE_H + G_TILE_GAP) * (i / 2) as f32, w, DAY_TILE_H);
                     Self::draw_tile(c, tile, slot, self.tile_in(i));
                 }
             }
@@ -1230,10 +1227,6 @@ impl Kind for Tempo {
     }
     fn default_mode(&self) -> Mode {
         Mode::M
-    }
-
-    fn layout(&self, mode: Mode) -> Layout {
-        Layout { w: Self::width(mode), h: self.height(mode), radius: Self::radius(mode) }
     }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
@@ -1687,7 +1680,7 @@ mod tests {
             t.view.set(view);
             t.page.set(page);
             t.main_scroll = Scroll::at(scroll);
-            let l = t.layout(mode);
+            let l = Layout::of(mode);
             let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
             c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
             t.draw(&mut c, mode, &Env { cfg: &cfg, key: "tempo" });

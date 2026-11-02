@@ -507,7 +507,7 @@ impl App {
             let w = self.sh.cfg.obj_mut(key);
             w.insert("x".into(), json!(pos.0));
             w.insert("y".into(), json!(pos.1));
-            w.insert("tamanho".into(), json!(self.cards[i].mode.code()));
+            widgets::store_size(w, self.cards[i].mode);
             w.remove("compact");
         }
         self.remember_screens();

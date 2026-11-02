@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, Kind, MenuItem, Mode, NotifyAction, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -77,19 +77,21 @@ const TOGGLE_AUTO: u32 = 7;
 const DURATION: u32 = 1000; // + fase * 1000 + minutos
 const EVERY: u32 = 900; // + n
 
-const W: f32 = 320.0;
+const W: f32 = WIDE;
 const PAD: f32 = 20.0;
 const C_RING: (f32, f32, f32, f32) = (SMALL / 2.0, 62.0, 104.0, 9.0); // cx, cy, diâmetro, espessura
-const MEDIUM_H: f32 = 150.0;
-const M_RING: (f32, f32, f32, f32) = (75.0, 75.0, 110.0, 8.0);
+const M_RING: (f32, f32, f32, f32) = (77.0, MEDIUM_H / 2.0, 110.0, 8.0);
 const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
-const M_CTRL_Y: f32 = 118.0;
+const M_CTRL_Y: f32 = 120.0;
+const M_DOTS_Y: f32 = 86.0;
 const M_PLAY_D: f32 = 34.0;
-const HEIGHT: f32 = 340.0;
-const G_RING: (f32, f32, f32, f32) = (160.0, 174.0, 140.0, 10.0);
-const G_DOTS_Y: f32 = 262.0;
-const G_CTRL_Y: f32 = 298.0;
-const G_PLAY_D: f32 = 42.0;
+// grande: cabeçalho, o anel grande no meio, os ciclos, os botões e, no pé, a próxima fase
+const G_HEAD_LINE: f32 = 92.0;
+const G_RING: (f32, f32, f32, f32) = (W / 2.0, 206.0, 176.0, 12.0);
+const G_DOTS_Y: f32 = 320.0;
+const G_CTRL_Y: f32 = 362.0;
+const G_PLAY_D: f32 = 44.0;
+const G_FOOT_Y: f32 = LARGE_H - 24.0;
 const MIN_S: f64 = 60.0;
 const MAX_S: f64 = 180.0 * 60.0;
 
@@ -190,6 +192,15 @@ impl Pomodoro {
             }
         } else {
             Phase::Foco
+        }
+    }
+
+    /// A fase que vem quando esta acabar sozinha (a pausa longa depois do último foco do ciclo).
+    fn upcoming(&self, wcfg: &Value) -> Phase {
+        match self.phase {
+            Phase::Foco if self.cycle + 1 >= Self::every(wcfg) => Phase::Longa,
+            Phase::Foco => Phase::Pausa,
+            _ => Phase::Foco,
         }
     }
 
@@ -386,14 +397,6 @@ impl Kind for Pomodoro {
         Mode::M
     }
 
-    fn layout(&self, mode: Mode) -> Layout {
-        match mode {
-            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
-            Mode::M => Layout { w: W, h: MEDIUM_H, radius: RADIUS_M },
-            Mode::G => Layout { w: W, h: HEIGHT, radius: RADIUS_G },
-        }
-    }
-
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         let wcfg = env.wcfg();
         let color = self.phase.color();
@@ -428,7 +431,7 @@ impl Kind for Pomodoro {
 
         // um ponto por pomodoro do ciclo até a pausa longa
         let (spacing, r) = (14.0, 3.5);
-        let (x0, dy) = if mode == Mode::M { (M_COL_X + r, 84.0) } else { (W / 2.0 - (every - 1) as f32 * spacing / 2.0, G_DOTS_Y) };
+        let (x0, dy) = if mode == Mode::M { (M_COL_X + r, M_DOTS_Y) } else { (W / 2.0 - (every - 1) as f32 * spacing / 2.0, G_DOTS_Y) };
         let focus = Phase::Foco.color();
         for i in 0..every {
             let x = x0 + i as f32 * spacing;
@@ -468,7 +471,7 @@ impl Kind for Pomodoro {
             c.text(cx, cy + 20.0, label, Face::Semibold, 10.5, color, Anchor::MM, Some(diameter - 24.0));
             c.text(M_COL_X - 2.0, 10.0, &clock, Face::Light, 32.0, FG, Anchor::LA, None);
             c.text(M_COL_X, 52.0, &util::short_date(&t), Face::Regular, 11.0, MUTED, Anchor::LA, None);
-            c.text(W - 16.0, 84.0, &format!("hoje: {}", stats.1), Face::Regular, 10.5, MUTED, Anchor::RM, None);
+            c.text(W - 16.0, M_DOTS_Y, &format!("hoje: {}", stats.1), Face::Regular, 10.5, MUTED, Anchor::RM, None);
             return;
         }
 
@@ -478,13 +481,20 @@ impl Kind for Pomodoro {
         let n = stats.1;
         c.text(W - PAD, 46.0, &format!("{n} pomodoro{} hoje", if n != 1 { "s" } else { "" }), Face::Semibold, 13.0, FG, Anchor::RA, None);
         c.text(W - PAD, 66.0, &format!("{} de foco", fmt_minutes(stats.2 as f64)), Face::Regular, 11.0, MUTED, Anchor::RA, None);
-        c.hline_px(PAD, W - PAD, 92.0, DIVIDER);
+        c.hline_px(PAD, W - PAD, G_HEAD_LINE, DIVIDER);
         if paused {
-            c.text(cx, cy - 34.0, "PAUSADO", Face::Semibold, 9.0, MUTED, Anchor::MM, None);
+            c.text(cx, cy - 40.0, "PAUSADO", Face::Semibold, 9.5, MUTED, Anchor::MM, None);
         }
-        let size = if timer.len() <= 5 { 34.0 } else { 26.0 };
+        let size = if timer.len() <= 5 { 42.0 } else { 32.0 };
         c.text(cx, cy - 6.0, &timer, Face::Light, size, digits, Anchor::MM, None);
-        c.text(cx, cy + 24.0, label, Face::Semibold, 11.5, color, Anchor::MM, Some(diameter - 30.0));
+        c.text(cx, cy + 30.0, label, Face::Semibold, 12.5, color, Anchor::MM, Some(diameter - 40.0));
+        // no pé: o que vem depois desta fase
+        let next = self.upcoming(wcfg);
+        c.hline_px(PAD, W - PAD, G_FOOT_Y - 20.0, DIVIDER);
+        let text = format!("A seguir: {} de {} min", next.label().to_lowercase(), duration(wcfg, next));
+        let tw = c.text_width(&text, Face::Regular, 11.5);
+        c.fill_circle(W / 2.0 - tw / 2.0 - 9.0, G_FOOT_Y, 3.5, next.color());
+        c.text(W / 2.0 + 5.0, G_FOOT_Y, &text, Face::Regular, 11.5, MUTED, Anchor::MM, None);
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {

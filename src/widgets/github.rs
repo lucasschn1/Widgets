@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Request, Status, SMALL, SMALL_RADIUS};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Request, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::*;
@@ -388,15 +388,15 @@ fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookup
 
 // ---------- o widget ----------
 
-const W: f32 = 320.0;
+const W: f32 = WIDE;
 const PAD: f32 = 18.0;
 const ROW_H: f32 = 40.0;
 /// atividades no grande (a roda do mouse rola as outras)
-const ROWS: usize = 5;
+const ROWS: usize = 7;
 const MAX_ROWS: usize = 20; // carregadas; a roda do mouse rola a lista
 const ICON_D: f32 = 26.0;
-// pequeno, com a mesma largura dos outros: os últimos 6 meses, e a altura que der
-const WEEKS: i64 = 26;
+// médio e grande: as últimas 28 semanas, na largura toda
+const WEEKS: i64 = 28;
 const GAP: f32 = 2.0;
 const C_PAD: f32 = 14.0;
 const STEP: f32 = (W - 2.0 * C_PAD + GAP) / WEEKS as f32;
@@ -407,21 +407,18 @@ const P_STEP: f32 = (SMALL - 24.0 + GAP) / P_WEEKS as f32;
 const P_GRID_Y: f32 = SMALL - 12.0 - (7.0 * P_STEP - GAP);
 // médio e grande: cabeçalho, o placar (número grande) e o mapa; no grande, as atividades
 const HEAD_Y: f32 = 13.0;
-const NUM_Y: f32 = 30.0;
-const GRID_Y: f32 = 72.0;
+const NUM_Y: f32 = 29.0;
+/// o mapa fica no pé do médio, com a mesma margem dos lados
+const GRID_Y: f32 = MEDIUM_H - C_PAD - heat_h();
 
-fn heat_h() -> f32 {
+const fn heat_h() -> f32 {
     7.0 * STEP - GAP
 }
-fn medium_h() -> f32 {
-    (GRID_Y + heat_h() + 14.0).round()
+/// as atividades do grande ocupam o que sobra embaixo do mapa
+const fn list_y() -> f32 {
+    LARGE_H - ROW_H * ROWS as f32 - 4.0
 }
-fn list_y() -> f32 {
-    (GRID_Y + heat_h() + 24.0).round()
-}
-fn large_h() -> f32 {
-    list_y() + ROW_H * ROWS as f32 + 4.0
-}
+const _: () = assert!(list_y() >= GRID_Y + heat_h() + 20.0, "as atividades não cabem embaixo do mapa");
 
 const FETCH_EVERY: Duration = Duration::from_secs(10 * 60);
 const RETRY: Duration = Duration::from_secs(2 * 60);
@@ -790,17 +787,9 @@ impl Kind for GitHub {
         "GitHub"
     }
 
-    fn layout(&self, mode: Mode) -> Layout {
-        match mode {
-            Mode::P => Layout { w: SMALL, h: SMALL, radius: SMALL_RADIUS },
-            Mode::M => Layout { w: W, h: medium_h(), radius: RADIUS_M },
-            Mode::G => Layout { w: W, h: large_h(), radius: RADIUS_G },
-        }
-    }
-
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         let Some(d) = &self.data else {
-            let h = self.layout(mode).h;
+            let h = Layout::of(mode).h;
             if mode == Mode::G {
                 c.text(PAD, 19.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
@@ -898,7 +887,7 @@ impl Kind for GitHub {
             return Some((PAD - 6.0, 10.0, W - PAD + 6.0, 30.0, 8.0));
         }
         if self.on_message(x) {
-            let l = self.layout(mode);
+            let l = Layout::of(mode);
             return Some((8.0, 8.0, l.w - 8.0, l.h - 8.0, 14.0));
         }
         None

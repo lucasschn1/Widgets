@@ -20,7 +20,7 @@ use crate::widgets::media::Media;
 use crate::widgets::pomodoro::Pomodoro;
 use crate::widgets::system::System;
 use crate::widgets::tempo::Tempo;
-use crate::widgets::{Env, Kind, Mode};
+use crate::widgets::{Env, Kind, Layout, Mode};
 
 /// escala das imagens (125%, como num notebook comum)
 const S: f32 = 1.25;
@@ -58,7 +58,7 @@ fn wallpaper(w: u32, h: u32) -> Image {
 
 /// O conteúdo do widget (sem o vidro) e o raio dos cantos, em pixels.
 fn content(kind: &dyn Kind, mode: Mode, cfg: &Value) -> (Image, f32) {
-    let l = kind.layout(mode);
+    let l = Layout::of(mode);
     let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
     kind.draw(&mut c, mode, &Env { cfg, key: kind.key() });
     (c.finish(), l.radius * S)
