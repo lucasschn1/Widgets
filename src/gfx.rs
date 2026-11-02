@@ -616,6 +616,10 @@ impl Canvas {
     pub fn wrap(&self, text: &str, face: Face, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
         // o espaço que não quebra (\u{a0}) mantém as palavras juntas ("12 h")
         let words: Vec<&str> = text.split(|c: char| c.is_whitespace() && c != '\u{a0}').filter(|w| !w.is_empty()).collect();
+        // numa linha só, vai tudo nela (quem escreve corta com "…" o que passar)
+        if max_lines <= 1 {
+            return if words.is_empty() { Vec::new() } else { vec![words.join(" ")] };
+        }
         let mut lines = Vec::new();
         let mut current = String::new();
         let mut i = 0;
@@ -851,6 +855,24 @@ mod digit_tests {
             let (a, b) = (c.text_width("11:11", face, 40.0), c.text_width("00:00", face, 40.0));
             assert!((a - b).abs() < 0.5, "{face:?}: 11:11 = {a}, 00:00 = {b}");
         }
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    #[test]
+    fn wrap_keeps_the_line_limit() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        let text = "O ponto de orvalho está em dezesseis graus agora";
+        assert_eq!(c.wrap(text, Face::Regular, 11.0, 60.0, 1), vec![text.to_string()]);
+        assert_eq!(c.wrap(text, Face::Regular, 11.0, 60.0, 2).len(), 2);
+        assert!(c.wrap(text, Face::Regular, 11.0, 60.0, 9).len() > 2);
+        assert!(c.wrap("", Face::Regular, 11.0, 60.0, 1).is_empty());
     }
 }
 
