@@ -269,6 +269,19 @@ impl App {
     pub(super) fn panel_key(&mut self, i: usize, vk: u32) {
         if vk == 0x1B && self.panels[i].win.focus.is_none() {
             self.close_panel(i);
+        } else if vk == 0x0D {
+            self.welcome_enter(i);
+        }
+    }
+
+    /// Enter nas boas-vindas: o botão azul (continuar ou começar a usar).
+    fn welcome_enter(&mut self, i: usize) {
+        if let PanelKind::Welcome(st) = &self.panels[i].kind {
+            let action = if st.last() { A::Finish } else { A::Next };
+            self.panel_action(i, action);
+            if let Some(p) = self.panels.get_mut(i) {
+                p.win.dirty = true;
+            }
         }
     }
 
@@ -342,6 +355,14 @@ impl App {
         match (&self.panels[i].kind, vk) {
             (PanelKind::Prompt(_), 0x0D) => self.panel_action(i, A::Ok),
             (PanelKind::Prompt(_), 0x1B) => self.close_panel(i),
+            (PanelKind::Welcome(_), 0x0D) => {
+                if id == "usuario" {
+                    if let PanelKind::Welcome(st) = &mut self.panels[i].kind {
+                        st.user = text.trim().into();
+                    }
+                }
+                self.welcome_enter(i);
+            }
             (PanelKind::Settings(_), 0x0D) if id == "cidade" => {
                 if !text.trim().is_empty() {
                     self.apply_city(text.trim(), None);
@@ -446,6 +467,12 @@ impl App {
             A::Back => {
                 if let PanelKind::Welcome(st) = &mut self.panels[i].kind {
                     st.step = st.step.saturating_sub(1);
+                    st.city.clear();
+                }
+            }
+            A::Step(n) => {
+                if let PanelKind::Welcome(st) = &mut self.panels[i].kind {
+                    st.step = n.min(st.step);
                     st.city.clear();
                 }
             }

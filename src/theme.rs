@@ -105,6 +105,10 @@ pub fn icon(name: &str) -> &'static str {
         "undo" => "\u{e7a7}",
         "pin" => "\u{e718}",
         "location" => "\u{e81d}",
+        "mover" => "\u{e7c2}",
+        "tamanho" => "\u{e740}",
+        "mouse" => "\u{e962}",
+        "menu" => "\u{e712}",
         _ => "\u{e946}",
     }
 }

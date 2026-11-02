@@ -60,6 +60,8 @@ pub enum A {
     Tile(&'static str),
     Next,
     Back,
+    /// boas-vindas: volta direto para um passo já visto
+    Step(usize),
     Finish,
 }
 
@@ -128,9 +130,21 @@ impl Anims {
 
 // ---------- a janela ----------
 
+/// Escala do desenho de um painel de `w` × `h` (lógicos): a do monitor (`dpi`), reduzida se
+/// preciso para caber no espaço livre da tela (em pixels), mas nunca menor que 3/4 dela.
+pub fn fit_scale(dpi: f32, w: f32, h: f32, free_w: f32, free_h: f32) -> f32 {
+    let fit = (free_w / w).min(free_h / h);
+    // em passos de 1/32, para as linhas finas continuarem caindo bem nos pixels
+    let fit = (fit * 32.0).floor() / 32.0;
+    dpi.min(fit).max(dpi * 0.75)
+}
+
 pub struct PanelWin {
     pub hwnd: HWND,
+    /// escala do desenho: a do monitor, ou menor se a janela não caberia na tela
     pub s: f32,
+    /// escala do monitor (a moldura da janela segue sempre esta)
+    dpi: f32,
     pub w: f32,
     pub h: f32,
     pub frameless: bool,
@@ -153,16 +167,26 @@ impl PanelWin {
         // sem posição: no meio do monitor onde está o mouse
         let screen = win::area_at_pointer();
         let anchor = pos.unwrap_or(((screen.0 + screen.2) / 2, (screen.1 + screen.3) / 2));
-        let s = win::scale_at(anchor.0, anchor.1);
-        let (pw, ph) = ((w * s).round() as i32, (h * s).round() as i32);
+        let dpi = win::scale_at(anchor.0, anchor.1);
         let (style, ex) = if frameless {
             (WS_POPUP, WS_EX_TOOLWINDOW)
         } else {
             (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, WINDOW_EX_STYLE(0))
         };
+        // com escala alta numa tela baixa (ex.: 175% em 1080p), a janela inteira não caberia:
+        // o desenho todo fica um pouco menor, em vez de o rodapé sair da tela
+        let mut frame = RECT::default();
+        unsafe {
+            let _ = AdjustWindowRectExForDpi(&mut frame, style, false, ex, (dpi * 96.0) as u32);
+        }
+        let room = (12.0 * dpi) as i32;
+        let free_w = (screen.2 - screen.0 - (frame.right - frame.left) - 2 * room) as f32;
+        let free_h = (screen.3 - screen.1 - (frame.bottom - frame.top) - 2 * room) as f32;
+        let s = fit_scale(dpi, w, h, free_w, free_h);
+        let (pw, ph) = ((w * s).round() as i32, (h * s).round() as i32);
         let mut r = RECT { left: 0, top: 0, right: pw, bottom: ph };
         unsafe {
-            let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex, (s * 96.0) as u32);
+            let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex, (dpi * 96.0) as u32);
         }
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
         let (x, y) = match pos {
@@ -177,6 +201,7 @@ impl PanelWin {
         PanelWin {
             hwnd,
             s,
+            dpi,
             w,
             h,
             frameless,
@@ -265,7 +290,7 @@ impl PanelWin {
         unsafe {
             let style = WINDOW_STYLE(GetWindowLongW(self.hwnd, GWL_STYLE) as u32);
             let ex = WINDOW_EX_STYLE(GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32);
-            let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex, (self.s * 96.0) as u32);
+            let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex, (self.dpi * 96.0) as u32);
             let _ = SetWindowPos(self.hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         self.dirty = true;
