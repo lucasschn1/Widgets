@@ -708,3 +708,19 @@ impl Suggest {
         h
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fit_scale;
+
+    #[test]
+    fn panels_fit_the_screen() {
+        // boas-vindas (760 × 580) num notebook 1080p a 125%: cabe na escala do monitor
+        assert_eq!(fit_scale(1.25, 760.0, 580.0, 1896.0, 940.0), 1.25);
+        // a 175% numa tela de 1080p, não caberia (1015 px de altura): fica menor, e cabe
+        let s = fit_scale(1.75, 760.0, 580.0, 1880.0, 930.0);
+        assert!(s < 1.75 && 580.0 * s <= 930.0, "{s}");
+        // nunca menor que 3/4 da escala do monitor
+        assert_eq!(fit_scale(2.0, 760.0, 580.0, 600.0, 300.0), 1.5);
+    }
+}

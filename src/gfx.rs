@@ -853,3 +853,67 @@ mod digit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod picture_tests {
+    use super::*;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Imagem w×h de uma cor, com um quadrado de outra cor no meio.
+    fn target(w: u32, h: u32, mark: u32) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let inside = x.abs_diff(w / 2) < mark && y.abs_diff(h / 2) < mark;
+                img.px[i..i + 4].copy_from_slice(if inside { &[0, 0, 255, 255] } else { &[255, 160, 60, 255] });
+            }
+        }
+        img
+    }
+
+    fn red_box(img: &Image) -> (u32, u32, u32, u32) {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..img.h {
+            for x in 0..img.w {
+                let i = ((y * img.w + x) * 4) as usize;
+                if img.px[i + 2] > 200 && img.px[i] < 60 {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+            }
+        }
+        (x0, y0, x1, y1)
+    }
+
+    #[test]
+    fn cover_keeps_the_middle_centered() {
+        com();
+        // 16:9 para uma área quadrada e para uma larga: o meio continua no meio
+        for (w, h) in [(158, 158), (360, 250), (250, 360)] {
+            let out = fit_cover(&target(1280, 720, 60), w, h);
+            assert_eq!((out.w, out.h), (w, h));
+            let (x0, y0, x1, y1) = red_box(&out);
+            assert!((x0 + x1).abs_diff(w - 1) <= 2 && (y0 + y1).abs_diff(h - 1) <= 2, "{w}x{h}: {:?}", (x0, y0, x1, y1));
+        }
+    }
+
+    #[test]
+    fn letterbox_bars_are_trimmed() {
+        // um vídeo 16:9 (480 × 270) no meio de uma miniatura 4:3 (480 × 360) com faixas pretas
+        let mut img = Image::new(480, 360);
+        img.over(&target(480, 270, 20), 0, 45);
+        for p in img.px.chunks_mut(4) {
+            p[3] = 255;
+        }
+        let t = trim_bars(&img);
+        assert_eq!((t.w, t.h), (480, 270));
+        // sem faixas: fica igual
+        let plain = target(300, 300, 30);
+        assert_eq!((trim_bars(&plain).w, trim_bars(&plain).h), (300, 300));
+    }
+}

@@ -1966,3 +1966,20 @@ fn stack_in(rects: &[Rect], i: usize, top: Rect, limit: i32) -> Vec<usize> {
     }
     stack
 }
+
+#[cfg(test)]
+mod tests {
+    use super::stack_in;
+
+    #[test]
+    fn stack_follows_the_chain_below() {
+        // uma coluna (0, 1, 2) e um widget de outra coluna (3)
+        let rects = [(0, 0, 400, 193), (0, 208, 400, 401), (0, 416, 400, 609), (500, 208, 900, 401)];
+        assert_eq!(stack_in(&rects, 0, rects[0], 25), vec![1, 2]);
+        // medindo com a altura antiga do primeiro (mais alta), o vão até o segundo fica pequeno
+        // demais e a pilha continua a mesma
+        assert_eq!(stack_in(&rects, 0, (0, 0, 400, 204), 25), vec![1, 2]);
+        // longe demais: não está encaixado
+        assert!(stack_in(&rects, 0, (0, 0, 400, 150), 25).is_empty());
+    }
+}

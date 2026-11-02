@@ -288,3 +288,29 @@ fn join_names(names: &[&str]) -> String {
         [rest @ .., last] => format!("{} e {last}", rest.join(", ")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn welcome_steps_fit_between_header_and_footer() {
+        assert!(CONTENT_Y + CONTENT_H <= FOOT_LINE - 12.0);
+        assert!(BUTTONS_Y + 32.0 <= WELCOME_H - 12.0, "os botões cabem embaixo da linha do rodapé");
+        // passo 1: todos os widgets em cartões com espaço para a miniatura, o nome e a descrição
+        let rows = widgets::KEYS.len().div_ceil(3) as f32;
+        let tile_h = (CONTENT_H - 14.0 * (rows - 1.0)) / rows;
+        assert!(tile_h - 74.0 >= 80.0, "miniatura de {} px", tile_h - 74.0);
+        // passo 2: as três linhas e o aviso
+        assert!(CONTENT_Y + 3.0 * (ROW_H + ROW_GAP) + 20.0 <= FOOT_LINE);
+        // passo 3: as dicas (2 × 2) e a lista dos widgets
+        assert!(CONTENT_Y + 2.0 * 112.0 + 14.0 + 26.0 + 2.0 * 17.0 <= FOOT_LINE);
+    }
+
+    #[test]
+    fn names_in_a_sentence() {
+        assert_eq!(join_names(&["Tempo"]), "Tempo");
+        assert_eq!(join_names(&["Tempo", "Sistema"]), "Tempo e Sistema");
+        assert_eq!(join_names(&["Tempo", "Sistema", "GitHub"]), "Tempo, Sistema e GitHub");
+    }
+}

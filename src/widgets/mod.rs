@@ -359,3 +359,57 @@ pub fn store_size(w: &mut serde_json::Map<String, Value>, mode: Mode) {
 pub fn num(v: &Value, key: &str) -> Option<f64> {
     v.f64_of(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::WIDGET_GAP;
+
+    #[test]
+    fn sizes_are_shared() {
+        let (p, m, g) = (Layout::of(Mode::P), Layout::of(Mode::M), Layout::of(Mode::G));
+        assert_eq!((p.w, p.h), (154.0, 154.0), "o pequeno é um quadrado");
+        assert_eq!((m.w, m.h), (320.0, 154.0));
+        assert_eq!((g.w, g.h), (320.0, 448.0));
+        // pequenos e médios se encaixam em linhas: dois pequenos e o encaixe = um médio
+        assert_eq!(2.0 * p.w + WIDGET_GAP, m.w);
+        assert_eq!(m.h, p.h);
+        assert_eq!(g.w, m.w);
+        assert!(p.radius < m.radius && m.radius < g.radius);
+    }
+
+    #[test]
+    fn store_size_records_the_height() {
+        let mut w = serde_json::Map::new();
+        store_size(&mut w, Mode::G);
+        assert_eq!(w["tamanho"], "g");
+        assert_eq!(w["altura"], 448.0);
+        assert_eq!(w["altura_tamanho"], "g");
+        store_size(&mut w, Mode::M);
+        assert_eq!((w["tamanho"].as_str(), w["altura"].as_f64()), (Some("m"), Some(154.0)));
+    }
+
+    #[test]
+    fn first_layout_has_every_widget_once() {
+        let mut placed: Vec<&str> = FIRST_LAYOUT.iter().flat_map(|c| c.iter().copied()).collect();
+        placed.sort();
+        let mut keys = KEYS.to_vec();
+        keys.sort();
+        assert_eq!(placed, keys);
+        assert_eq!(first_column("sistema"), 0);
+        assert_eq!(first_column("midia"), 1);
+        assert_eq!(DEFAULT_MODE, Mode::M);
+    }
+
+    #[test]
+    fn every_widget_starts_medium() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}});
+        for key in KEYS {
+            let kind = sample(key, &cfg, &serde_json::json!({})).unwrap();
+            assert_eq!(kind.default_mode(), Mode::M, "{key}");
+        }
+    }
+}

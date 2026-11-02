@@ -718,6 +718,14 @@ impl Media {
         Media::with(tx, Arc::new(Mutex::new(None)), Arc::new(Mutex::new("auto".into())), Some(snap), 0, later)
     }
 
+    /// Exemplo sem nada tocando (o equalizador cochilando).
+    #[cfg(test)]
+    pub fn sample_idle() -> Media {
+        let mut m = Media::sample();
+        m.media = None;
+        m
+    }
+
     /// Exemplo com uma música e capa quaisquer (imagens do README).
     #[cfg(test)]
     pub fn sample_song(kind: &'static str, title: &str, artist: &str, art: Arc<Image>, key: &str, position: f64, duration: f64) -> Media {
@@ -1561,3 +1569,139 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// Lista as sessões de mídia abertas no Windows e salva a capa de cada uma, para ver de onde
+    /// ela vem e em que resolução (%TEMP%\capa_sessao_N.png):
+    ///   cargo test sessoes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sessoes() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let manager = Manager::RequestAsync().unwrap().join().unwrap();
+        for (i, session) in manager.GetSessions().unwrap().into_iter().enumerate() {
+            let app = session.SourceAppUserModelId().map(|s| s.to_string()).unwrap_or_default();
+            let props = session.TryGetMediaPropertiesAsync().unwrap().join().unwrap();
+            let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
+            let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
+            let Some(img) = read_art(&props) else {
+                println!("{i}: [{}] {app} | {title} | {artist} | sem capa", media_kind(&app));
+                continue;
+            };
+            let path = std::env::temp_dir().join(format!("capa_sessao_{i}.png"));
+            gfx::save_png(&img, &path).unwrap();
+            println!("{i}: [{}] {app} | {title} | {artist} | capa {}x{} -> {}", media_kind(&app), img.w, img.h, path.display());
+            let small = gfx::trim_bars(&img);
+            let mut arts = vec![("navegador", small.clone())];
+            if media_kind(&app) == "youtube" && youtube::worth_upgrading(&small) {
+                match youtube::hd_thumbnail(&title, &artist, &small) {
+                    Some(hd) => {
+                        println!("   em alta: {}x{}", hd.w, hd.h);
+                        arts.push(("alta", hd));
+                    }
+                    None => println!("   em alta: não achou"),
+                }
+            }
+            // o widget nos três tamanhos com cada capa
+            for (name, art) in arts {
+                let art = Arc::new(art);
+                for mode in Mode::ALL {
+                    let mut m = Media::sample();
+                    if let Some(snap) = &mut m.media {
+                        (snap.title, snap.artist, snap.kind) = (title.clone(), artist.clone(), media_kind(&app));
+                        snap.art = Some(art.clone());
+                        snap.art_key = Some(name.into());
+                    }
+                    let l = Layout::of(mode);
+                    let mut c = Canvas::new((l.w * 1.25).round() as u32, (l.h * 1.25).round() as u32, 1.25);
+                    c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
+                    Kind::draw(&m, &mut c, mode, &Env { cfg: &json!({"midia": {}, "app": {}}), key: "midia" });
+                    let out = std::env::temp_dir().join(format!("capa_sessao_{i}_{name}_{}.png", mode.code()));
+                    gfx::save_png(&c.finish(), &out).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Degradê com um ponto claro no meio (uma "miniatura" qualquer).
+    fn picture(w: u32, h: u32, seed: u32) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let v = |k: u32| ((x * (k + seed) / w.max(1) * 40 + y * (3 + k * seed) / h.max(1) * 30) % 256) as u8;
+                img.px[i..i + 4].copy_from_slice(&[v(1), v(2), v(3), 255]);
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn video_in_a_square_is_shown_whole_and_centered() {
+        com();
+        // um vídeo 16:9 todo verde: no quadrado, a faixa verde clara é ele inteiro (158 × 89), no
+        // meio; em cima e embaixo fica o fundo (ele mesmo desfocado e mais escuro)
+        let mut art = Image::new(1280, 720);
+        for p in art.px.chunks_mut(4) {
+            p.copy_from_slice(&[40, 220, 40, 255]);
+        }
+        let out = cover_image(&art, 158, 158);
+        assert_eq!((out.w, out.h), (158, 158));
+        let bright: Vec<u32> = (0..out.h).filter(|&y| out.px[((y * out.w + 79) * 4 + 1) as usize] > 200).collect();
+        let (y0, y1) = (bright[0], *bright.last().unwrap());
+        assert_eq!(y1 - y0 + 1, 89, "a faixa tem a altura do vídeo inteiro");
+        assert!((y0 + y1).abs_diff(157) <= 1, "faixa centralizada: {y0}..{y1}");
+        assert!(out.px[((5 * out.w + 79) * 4 + 1) as usize] < 140, "fundo mais escuro");
+    }
+
+    #[test]
+    fn square_cover_fills_square_area() {
+        com();
+        let art = picture(300, 300, 2);
+        let direct = gfx::fit_cover(&art, 158, 158);
+        assert_eq!(cover_image(&art, 158, 158).px, direct.px, "capa quadrada num quadrado: só redimensiona");
+    }
+
+    #[test]
+    fn tiny_cover_is_not_blown_up() {
+        com();
+        // a miniatura do Edge (150 × 83) no grande, a 125% (360 × 250): no máximo 1,6 vez maior
+        let out = cover_image(&picture(150, 83, 3), 360, 250);
+        assert_eq!((out.w, out.h), (360, 250));
+        assert!(!youtube::worth_upgrading(&picture(1280, 720, 1)), "já está em alta");
+        assert!(youtube::worth_upgrading(&picture(150, 83, 1)));
+        assert!(!youtube::worth_upgrading(&picture(300, 300, 1)), "capa quadrada de música");
+    }
+
+    #[test]
+    fn video_ids_from_search_page() {
+        let html = r#"..."videoRenderer":{"videoId":"dQw4w9WgXcQ","x":1}..."videoRenderer":{"videoId":"dQw4w9WgXcQ"}
+            ..."videoRenderer":{"videoId":"LQ4w9xiHkrY"}..."videoRenderer":{"videoId":"curto"}..."videoRenderer":{"videoId":"udTd_rpa1kA"}"#;
+        assert_eq!(youtube::video_ids(html, 3), vec!["dQw4w9WgXcQ", "LQ4w9xiHkrY", "udTd_rpa1kA"]);
+        assert_eq!(youtube::video_ids(html, 1), vec!["dQw4w9WgXcQ"]);
+    }
+
+    #[test]
+    fn same_picture_in_any_size() {
+        com();
+        let big = picture(1280, 720, 4);
+        let small = gfx::resize(&big, 150, 83);
+        assert!(youtube::same_picture(&small, &big));
+        assert!(!youtube::same_picture(&small, &picture(1280, 720, 9)));
+    }
+}

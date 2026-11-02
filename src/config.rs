@@ -204,3 +204,75 @@ impl Get for Value {
         map.get_mut(key).unwrap().as_object_mut().unwrap()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loaded(text: &str) -> Value {
+        let mut cfg: Value = serde_json::from_str(text).unwrap();
+        let map = cfg.as_object_mut().unwrap();
+        let existing = !map.is_empty();
+        split_weather(map);
+        for key in crate::widgets::KEYS {
+            map.entry(key.to_string()).or_insert(json!({}));
+        }
+        map.entry("app").or_insert(json!({}));
+        keep_old_defaults(map, existing);
+        cfg
+    }
+
+    #[test]
+    fn new_install_gets_new_defaults() {
+        let cfg = loaded("{}");
+        assert_eq!(setting_f64(&cfg, "desfoque"), 12.0);
+        assert_eq!(setting_f64(&cfg, "escurecimento"), 0.57);
+        assert!(!setting_bool(&cfg, "esmaecer"));
+        assert_eq!(setting_str(&cfg, "animacoes"), "sempre");
+        // nada gravado além da marca: os padrões continuam vindo do código
+        assert_eq!(cfg["app"], json!({"padroes": DEFAULTS_VERSION}));
+        for key in crate::widgets::KEYS {
+            assert_eq!(cfg[*key], json!({}), "{key}");
+        }
+    }
+
+    #[test]
+    fn existing_install_keeps_old_look() {
+        // quem nunca mexeu nas opções (nada gravado) e tem o GitHub e o Tocando agora no
+        // tamanho de antes (grande, sem "tamanho" gravado)
+        let cfg = loaded(r#"{"tempo": {"x": 10, "y": 20}, "midia": {"x": 10, "y": 300}, "github": {}, "app": {"dicas_vistas": true}}"#);
+        assert_eq!(setting_f64(&cfg, "desfoque"), 26.0);
+        assert_eq!(setting_f64(&cfg, "escurecimento"), 0.40);
+        assert!(setting_bool(&cfg, "esmaecer"));
+        assert_eq!(setting_str(&cfg, "animacoes"), "auto");
+        assert_eq!(cfg["midia"]["tamanho"], "g");
+        assert_eq!(cfg["github"]["tamanho"], "g");
+        assert!(cfg["tempo"].get("tamanho").is_none(), "o Tempo já nascia médio");
+        assert_eq!(cfg["tempo"]["x"], 10);
+    }
+
+    #[test]
+    fn personal_choices_are_untouched() {
+        let text = r#"{"app": {"desfoque": 18, "escurecimento": 0.3, "esmaecer": false, "animacoes": "nunca", "texto": 1.1},
+                       "midia": {"tamanho": "p", "ilha": true}, "github": {"compact": true, "usuario": "alguem"},
+                       "tempo": {"city": "Curitiba", "tamanho": "g"}}"#;
+        let before: Value = serde_json::from_str(text).unwrap();
+        let cfg = loaded(text);
+        for name in ["desfoque", "escurecimento", "esmaecer", "animacoes", "texto"] {
+            assert_eq!(cfg["app"][name], before["app"][name], "{name}");
+        }
+        assert_eq!(cfg["midia"], before["midia"]);
+        assert_eq!(cfg["github"], before["github"], "o \"compact\" antigo ainda decide o tamanho");
+        assert_eq!(cfg["tempo"], before["tempo"]);
+    }
+
+    #[test]
+    fn old_defaults_are_kept_only_once() {
+        let mut cfg = loaded(r#"{"app": {}}"#);
+        // depois da migração, o usuário volta uma opção para o padrão novo (que não é gravado)
+        cfg["app"].as_object_mut().unwrap().remove("desfoque");
+        let map = cfg.as_object_mut().unwrap();
+        keep_old_defaults(map, true);
+        assert_eq!(setting_f64(&cfg, "desfoque"), 12.0);
+    }
+}

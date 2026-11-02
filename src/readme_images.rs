@@ -456,3 +456,54 @@ fn crop(img: &Image, w: u32, h: u32, x: i32, y: i32) -> Image {
     out.over(img, -x, -y);
     out
 }
+
+/// Folha de conferência: os cinco widgets nos três tamanhos (e algumas vistas extras), lado a
+/// lado e alinhados pelo topo, para ver de uma vez se todos têm as mesmas medidas e se nada
+/// fica cortado. Vai para %TEMP%\widgets-tamanhos.png:
+///
+///   cargo test sizes_sheet -- --ignored --nocapture
+#[test]
+#[ignore]
+fn sizes_sheet() {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+    }
+    let cfg = empty_cfg();
+    let pomodoro = pomodoro_cfg();
+    type Make = Box<dyn Fn(Mode) -> (Box<dyn Kind>, Value)>;
+    let rows: Vec<(&str, Make)> = vec![
+        ("Tempo", Box::new(|m| (Box::new(Tempo::sample("inicio", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tempo: detalhes", Box::new(|m| (Box::new(Tempo::sample("detalhes", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tempo: um dia", Box::new(|m| (Box::new(Tempo::sample("dia3", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Sistema", Box::new(|m| (Box::new(System::sample_flipped(None, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Sistema: virado", Box::new(|m| (Box::new(System::sample_flipped(Some(1), m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tocando agora", Box::new(|m| (Box::new(song(0, 0.0)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tocando agora: nada", Box::new(|_| (Box::new(Media::sample_idle()) as Box<dyn Kind>, empty_cfg()))),
+        ("GitHub", Box::new(|_| (Box::new(GitHub::sample(&empty_cfg(), &json!({}))) as Box<dyn Kind>, empty_cfg()))),
+        ("Pomodoro", Box::new(move |_| (Box::new(Pomodoro::new(&pomodoro)) as Box<dyn Kind>, pomodoro.clone()))),
+    ];
+    let (margin, gap, label_w) = (40, 40, 220);
+    let mut items = Vec::new();
+    let mut labels = Vec::new();
+    let mut y = margin;
+    let mut width = 0;
+    for (name, make) in &rows {
+        let mut x = margin + label_w;
+        let mut row_h = 0;
+        for mode in Mode::ALL {
+            let (kind, c) = make(mode);
+            let (img, radius) = content(kind.as_ref(), mode, &c);
+            let (iw, ih) = (img.w as i32, img.h as i32);
+            items.push(Item { img, radius, x, y });
+            x += iw + gap;
+            row_h = row_h.max(ih);
+        }
+        labels.push(Label { text: name.to_string(), x: (margin + label_w / 2) as f32, y: (y + 24) as f32 });
+        width = width.max(x - gap + margin);
+        y += row_h + gap;
+    }
+    let _ = cfg;
+    let wall = wallpaper(width as u32, (y - gap + margin) as u32);
+    let bd = Backdrop::from_picture(&wall, BLUR, S);
+    save(&compose(&wall, &bd, &items, &labels), &std::env::temp_dir().join("widgets-tamanhos.png"));
+}
