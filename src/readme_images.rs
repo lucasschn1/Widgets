@@ -389,8 +389,10 @@ fn readme() {
         let (card_img, radius) = content(&song(0, 0.0), Mode::M, &cfg);
         let (cx, cy) = ((w - 40 - card_img.w) as i32, (h - 40 - card_img.h) as i32);
         let card_geo = (cx as f32, cy as f32, card_img.w as f32, card_img.h as f32, radius);
+        // o cartão como aparece na tela: a ilha se transforma nele (e a partir dele)
+        let face = bd.glass(&card_img, radius, cx, cy, GLASS_TINT);
         let with_card = compose(&wall, &bd, &[Item { img: card_img, radius, x: cx, y: cy }], &[]);
-        let frames = crate::app::island::readme_frames(&info, card_geo, (w as f32 / 2.0, 14.0), S);
+        let frames = crate::app::island::readme_frames(&info, card_geo, &face, (w as f32 / 2.0, 14.0), S);
         let mut list = String::new();
         for (k, (pill, ms)) in frames.into_iter().enumerate() {
             let img = match pill {

@@ -72,6 +72,15 @@ pub const HOVER_FADE_MS: u64 = 120;
 pub const STALE_DOT: Rgba = Rgba(255, 184, 0, 255); // aviso de dados desatualizados
 pub const STALE_XY: (f32, f32) = (12.0, 12.0);
 
+/// Movimento que sai devagar, acelera e assenta suave no ponto, sem passar dele (uma mola
+/// "criticamente amortecida"): para voos longos, em que o passo além do ponto pareceria um tranco.
+pub fn ease_settle(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    const W: f32 = 8.0;
+    let f = |t: f32| 1.0 - (1.0 + W * t) * (-W * t).exp();
+    f(t) / f(1.0)
+}
+
 pub fn ease_in_out(t: f32) -> f32 {
     if t < 0.5 {
         4.0 * t * t * t

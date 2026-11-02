@@ -20,7 +20,8 @@ const KEY: &str = "midia";
 /// margem transparente em volta da pílula (a sombra curta)
 const PAD: f32 = 8.0;
 const STATE_MS: f32 = 480.0;
-const MORPH_MS: f32 = 560.0;
+/// cartão virando ilha e ilha voltando a ser o cartão
+const MORPH_MS: f32 = 420.0;
 /// o mouse precisa ficar um instante em cima para a ilha esticar (e um pouco fora para recolher)
 const HOVER_IN: Duration = Duration::from_millis(140);
 const HOVER_OUT: Duration = Duration::from_millis(320);
@@ -150,6 +151,8 @@ pub struct Island {
     card_color: Rgba,
     /// capa já reduzida: (endereço da imagem, pixels, imagem)
     art_cache: Option<(usize, u32, Image)>,
+    /// o cartão como aparece na tela, para a transformação (de ida e de volta)
+    card_face: Option<Image>,
 }
 
 impl Island {
@@ -163,7 +166,26 @@ impl Island {
 
     fn geo(&self) -> Geo {
         let t = self.progress();
-        if t >= 1.0 { self.to } else { Geo::lerp(self.from, self.to, ease_spring(t)) }
+        if t >= 1.0 {
+            return self.to;
+        }
+        // entre as formas da ilha, mola (estica e volta, como uma ilha de verdade); voando entre
+        // a ilha e o cartão, sem passar do ponto
+        let e = if self.morph == Morph::None { ease_spring(t) } else { ease_settle(t) };
+        Geo::lerp(self.from, self.to, e)
+    }
+
+    /// Opacidade do cartão desenhado por cima da pílula, na transformação.
+    fn face_alpha(&self) -> f32 {
+        let p = self.progress();
+        match self.morph {
+            // indo para a ilha: o cartão some enquanto a ilha aparece
+            Morph::In => 1.0 - ease_in_out(((p - 0.1) / 0.45).clamp(0.0, 1.0)),
+            // voltando: o cartão aparece enquanto a ilha some (sem caixa vazia no meio) e
+            // termina inteiro, no lugar dele
+            Morph::Out => ease_in_out(((p - 0.08) / 0.42).clamp(0.0, 1.0)),
+            Morph::None => 0.0,
+        }
     }
 
     /// Onde fica a pílula na forma dada: centrada na âncora; na metade de baixo da tela cresce
@@ -209,8 +231,8 @@ impl Island {
     /// quando a pílula já está quase no tamanho novo.
     fn layer_alpha(&self) -> (f32, f32) {
         match self.morph {
-            Morph::In => (0.0, ((self.progress() - 0.55) / 0.45).clamp(0.0, 1.0)),
-            Morph::Out => (0.0, (1.0 - self.progress() * 3.0).clamp(0.0, 1.0)),
+            Morph::In => (0.0, ((self.progress() - 0.4) / 0.45).clamp(0.0, 1.0)),
+            Morph::Out => (0.0, 1.0 - ease_in_out((self.progress() / 0.38).clamp(0.0, 1.0))),
             Morph::None => {
                 let p = self.shape_at.elapsed().as_secs_f32() * 1000.0 / 420.0;
                 ((1.0 - p / 0.3).clamp(0.0, 1.0), ((p - 0.25) / 0.5).clamp(0.0, 1.0))
@@ -273,6 +295,16 @@ impl Island {
         }
         if a_cur > 0.01 {
             self.draw_layer(&mut c, self.shape, info, ox, oy, lw, lh, a_cur);
+        }
+        // o cartão de verdade, esticado na forma de agora: na volta, termina exatamente como o
+        // cartão que reaparece no lugar
+        let fa = self.face_alpha();
+        if let (Some(face), true) = (&self.card_face, fa > 0.01) {
+            // sem deformar: o cartão cobre a pílula (que vai virando o cartão), centralizado
+            let (bw, bh) = (lw * s, lh * s);
+            let k = (bw / face.w as f32).max(bh / face.h as f32);
+            let (fw, fh) = (face.w as f32 * k, face.h as f32 * k);
+            c.image_px(face, (ox * s + (bw - fw) / 2.0).round(), (oy * s + (bh - fh) / 2.0).round(), fw.round(), fh.round(), fa);
         }
         c.pop_clip();
         (c.finish(), ((g.x - pad).round() as i32, (g.y - pad).round() as i32))
@@ -444,6 +476,7 @@ impl App {
         let s = win::scale_at(anchor.0 as i32, (anchor.1 + 10.0) as i32);
         let info = self.cards[j].kind.island();
         let card_color = info.as_ref().map(|i| i.colors[0].mix(BLACK, 0.55)).unwrap_or(Rgba::rgb(40, 30, 60));
+        let card_face = (animate && self.sh.animations).then(|| self.cards[j].face(&self.sh));
         let hwnd = events::create_layered(CARD_CLASS, false);
         let now = Instant::now();
         let mut isl = Island {
@@ -454,8 +487,8 @@ impl App {
             from: Geo { x: 0.0, y: 0.0, w: 1.0, h: 1.0, r: 0.0 },
             to: Geo { x: 0.0, y: 0.0, w: 1.0, h: 1.0, r: 0.0 },
             anim_at: now,
-            anim_ms: if animate { MORPH_MS } else { 0.0 },
-            morph: if animate { Morph::In } else { Morph::None },
+            anim_ms: if animate && self.sh.animations { MORPH_MS } else { 0.0 },
+            morph: if animate && self.sh.animations { Morph::In } else { Morph::None },
             anchor,
             s,
             press: None,
@@ -470,6 +503,7 @@ impl App {
             next_frame: now,
             card_color,
             art_cache: None,
+            card_face,
         };
         isl.to = isl.target(Shape::Compact);
         isl.from = if animate {
@@ -498,14 +532,16 @@ impl App {
         };
         let card_rect = self.cards[j].card_rect();
         let r = self.cards[j].radius_px(self.cards[j].mode);
-        let Some(isl) = &mut self.island else { return };
-        if !animate || isl.hidden {
+        if !animate || !self.sh.animations || self.island.as_ref().is_some_and(|i| i.hidden) {
             self.finish_close();
             return;
         }
-        if isl.morph == Morph::Out {
+        if self.island.as_ref().is_some_and(|i| i.morph == Morph::Out) {
             return;
         }
+        let face = self.cards[j].face(&self.sh);
+        let Some(isl) = &mut self.island else { return };
+        isl.card_face = Some(face);
         isl.from = isl.geo();
         isl.to = Geo { x: card_rect.0 as f32, y: card_rect.1 as f32, w: (card_rect.2 - card_rect.0) as f32, h: (card_rect.3 - card_rect.1) as f32, r };
         isl.anim_at = Instant::now();
@@ -771,7 +807,7 @@ impl App {
 /// Quadros da ilha para a animação do README (sem janela): None é "o cartão no lugar"; Some, a
 /// pílula e onde ela fica. `card`: retângulo do cartão (x, y, w, h, raio) em pixels.
 #[cfg(test)]
-pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), anchor: (f32, f32), s: f32) -> Vec<(Option<(Image, (i32, i32))>, u32)> {
+pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), face: &Image, anchor: (f32, f32), s: f32) -> Vec<(Option<(Image, (i32, i32))>, u32)> {
     let now = Instant::now();
     let card_geo = Geo { x: card.0, y: card.1, w: card.2, h: card.3, r: card.4 };
     let mut isl = Island {
@@ -798,6 +834,7 @@ pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), 
         next_frame: now,
         card_color: info.colors[0].mix(BLACK, 0.55),
         art_cache: None,
+        card_face: Some(face.clone()),
     };
     isl.to = isl.target(Shape::Compact);
     let mut out: Vec<(Option<(Image, (i32, i32))>, u32)> = vec![(None, 1100)];
@@ -876,6 +913,7 @@ pub(crate) fn readme_shapes(info: &IslandInfo, s: f32) -> Vec<Image> {
                 next_frame: now,
                 card_color: BLACK,
                 art_cache: None,
+                card_face: None,
             };
             isl.render(Some(info)).0
         })
@@ -912,6 +950,7 @@ mod tests {
             next_frame: now,
             card_color: Rgba::rgb(110, 30, 70),
             art_cache: None,
+            card_face: None,
         };
         let card = Geo { x: 500.0, y: 300.0, w: 400.0, h: 188.0, r: 32.0 };
         let pill = Geo { x: 0.0, y: 0.0, w: shape.size().0 * 1.25, h: shape.size().1 * 1.25, r: shape.size().2 * 1.25 };

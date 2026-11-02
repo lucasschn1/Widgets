@@ -340,6 +340,14 @@ impl Card {
         true
     }
 
+    /// O cartão como aparece na tela (vidro com o conteúdo de agora, sem a margem nem a sombra),
+    /// em pixels: a ilha usa para se transformar nele (e a partir dele) sem pulo.
+    pub fn face(&self, sh: &Shared) -> Image {
+        let content = self.render(self.mode, sh);
+        let m = self.margin;
+        sh.backdrop.glass(&content, self.radius_px(self.mode), self.pos.0 + m, self.pos.1 + m, sh.tint)
+    }
+
     /// Opacidade da janela: os widgets esmaecem quando o mouse não está em cima.
     pub fn opacity(&self, sh: &Shared) -> u8 {
         let idle = sh.idle_opacity;
