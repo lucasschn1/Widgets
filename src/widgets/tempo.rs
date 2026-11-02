@@ -448,6 +448,11 @@ pub struct Tempo {
     view: Cell<View>,
     /// quando a vista (ou a página) mudou: os painéis entram um depois do outro
     view_at: Cell<Instant>,
+    /// próximo quadro das animações (um prazo fixo: "agora + 16 ms" calculado a cada pergunta
+    /// ficaria sempre no futuro, e a animação nunca andaria)
+    frame_at: Cell<Instant>,
+    /// estava animando no último tick (para desenhar o quadro final)
+    was_animating: Cell<bool>,
     /// página dos detalhes (pequeno e médio)
     page: Cell<usize>,
     /// roda do mouse acumulada para virar a página (o touchpad manda passos pequenos)
@@ -478,6 +483,8 @@ impl Tempo {
             started: Instant::now(),
             view: Cell::new(View::Main),
             view_at: Cell::new(Instant::now() - Duration::from_secs(5)),
+            frame_at: Cell::new(Instant::now()),
+            was_animating: Cell::new(false),
             page: Cell::new(0),
             page_wheel: 0.0,
             hour_wheel: 0.0,
@@ -750,6 +757,7 @@ impl Tempo {
     /// Começa a entrada dos painéis (abriu os detalhes, um dia ou outra página).
     fn mark_view(&self) {
         self.view_at.set(Instant::now());
+        self.frame_at.set(Instant::now());
     }
 
     /// Opacidade do painel `i` entrando (0 a 1).
@@ -1635,8 +1643,8 @@ impl Kind for Tempo {
         if self.pending.is_some() {
             next = Some(next.map_or(self.poll_at, |n| n.min(self.poll_at)));
         }
-        if self.animating() {
-            let frame = Instant::now() + Duration::from_millis(16);
+        if self.animating() || self.was_animating.get() {
+            let frame = self.frame_at.get();
             next = Some(next.map_or(frame, |n| n.min(frame)));
         }
         next
@@ -1644,7 +1652,13 @@ impl Kind for Tempo {
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
         let now = Instant::now();
-        let mut changed = self.animating();
+        // anima a cada 16 ms e desenha mais uma vez quando acaba (o quadro final)
+        let animating = self.animating();
+        let mut changed = animating || self.was_animating.get();
+        self.was_animating.set(animating);
+        if animating {
+            self.frame_at.set(now + Duration::from_millis(16));
+        }
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
@@ -1833,6 +1847,28 @@ mod tests {
         assert!(matches!(tiles[2].visual, Visual::Wind(..)));
         assert!(matches!(tiles[3].visual, Visual::Uv(_)));
         assert!(matches!(tiles[4].visual, Visual::Sun(..)));
+    }
+
+    #[test]
+    fn entry_animation_reaches_the_end() {
+        // ao abrir os detalhes, o próximo quadro já está na hora (e não foge para o futuro),
+        // e os ticks seguem até o quadro final, com os painéis inteiros
+        let mut t = Tempo::sample("inicio", 0, 0.0, Mode::M);
+        t.next_weather = None; // sem buscar a previsão no teste
+        t.view.set(View::Details);
+        t.mark_view();
+        let first = t.next_tick().unwrap();
+        assert!(first <= Instant::now(), "o primeiro quadro tem de estar na hora");
+        assert_eq!(t.next_tick(), Some(first), "o prazo não pode andar sozinho");
+        let (mut cfg, mut cache, mut out) = (json!({"tempo": {}, "app": {}}), json!({}), Vec::new());
+        let mut ctx = Ctx { cfg: &mut cfg, cache: &mut cache, key: "tempo", out: &mut out };
+        assert!(t.tick(&mut ctx), "redesenha durante a entrada");
+        assert!(t.next_tick().unwrap() > Instant::now() - Duration::from_millis(1));
+        // depois que a entrada acaba: um último quadro, e então para
+        t.view_at.set(Instant::now() - Duration::from_secs(2));
+        assert!(t.tick(&mut ctx), "quadro final");
+        assert!(!t.tick(&mut ctx));
+        assert_eq!(t.tile_in(5), 1.0);
     }
 
     #[test]
