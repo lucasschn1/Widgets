@@ -113,8 +113,13 @@ pub fn fetch_json_with(url: &str, headers: &[(&str, &str)]) -> Result<serde_json
 
 /// Baixa uma página: (código HTTP, texto). Erros de rede viram Err.
 pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), String> {
-    // TLS do próprio Windows (Schannel): executável menor e usa os certificados do sistema
-    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
+    // TLS do próprio Windows (Schannel): executável menor e usa os certificados do sistema (sem
+    // PlatformVerifier, o ureq usaria só a lista da Mozilla, e sites como o YouTube, cuja cadeia o
+    // Windows monta por outra raiz, falhariam)
+    let tls = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))
         .tls_config(tls)
