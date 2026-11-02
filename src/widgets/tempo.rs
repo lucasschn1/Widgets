@@ -1471,6 +1471,10 @@ impl Kind for Tempo {
         }
     }
 
+    fn hover_style(&self, x: f32, y: f32, mode: Mode, env: &Env) -> super::HoverStyle {
+        if self.hit(x, y, mode, env) == Some(DETAILS) && y < HOURS_Y { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+    }
+
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let Some(wx) = &self.weather else {
             return self.status.error.as_ref().map(|_| "Clique para tentar de novo".to_string());

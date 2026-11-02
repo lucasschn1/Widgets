@@ -554,6 +554,10 @@ impl Kind for Pomodoro {
         None
     }
 
+    fn hover_style(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> super::HoverStyle {
+        if self.control_at(x, y, mode).is_none() { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+    }
+
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let wcfg = env.wcfg();
         if let Some((control, ..)) = self.control_at(x, y, mode) {

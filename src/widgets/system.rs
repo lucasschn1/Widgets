@@ -621,6 +621,10 @@ impl Kind for System {
         None
     }
 
+    fn hover_style(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> super::HoverStyle {
+        if self.ring_at(x, y, mode).is_some() { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+    }
+
     fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
         if mode == Mode::G && y >= SEG_Y {
             return None;

@@ -760,10 +760,11 @@ impl App {
         let hot = if action.is_some() && !card.animating() { card.hot_at(x, y, sh) } else { None };
         let tip = if !card.animating() && !on_badge && config::setting_bool(&sh.cfg, "dicas") { card.tooltip_at(x, y, sh) } else { None };
         events::set_cursor(card.hwnd, cursor);
-        let changed = hot != card.hot || close_hot != card.close_hot;
+        let changed = hot.map(|h| h.0) != card.hot.map(|h| h.0) || close_hot != card.close_hot;
+        let animations = sh.animations;
         let card = &mut self.cards[i];
         card.close_hot = close_hot;
-        card.hot = hot;
+        card.set_hot(hot, animations);
         if changed {
             card.present(&self.sh, false);
         }
@@ -776,7 +777,7 @@ impl App {
         card.set_hover(false);
         card.expand_at = None;
         let changed = card.hot.is_some() || card.close_hot;
-        card.hot = None;
+        card.set_hot(None, self.sh.animations);
         card.close_hot = false;
         if changed {
             card.present(&self.sh, false);

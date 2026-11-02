@@ -168,6 +168,16 @@ impl Layout {
 /// Área a destacar sob o mouse: (x0, y0, x1, y1, raio), em unidades lógicas do cartão.
 pub type Hot = (f32, f32, f32, f32, f32);
 
+/// Como o hover aparece numa área clicável.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HoverStyle {
+    /// botões e linhas: a superfície fica um pouco mais clara, com um fio de contorno
+    Surface,
+    /// áreas grandes de conteúdo (capa, anéis, relógio, o topo do Tempo): nada por cima; o
+    /// cursor de mãozinha já diz que dá para clicar
+    Quiet,
+}
+
 /// O que o desenho e os cliques podem consultar.
 pub struct Env<'a> {
     pub cfg: &'a Value,
@@ -313,6 +323,9 @@ pub trait Kind {
     }
     fn tooltip(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<String> {
         None
+    }
+    fn hover_style(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> HoverStyle {
+        HoverStyle::Surface
     }
     fn wheel(&mut self, _x: f32, _y: f32, _steps: f32, _mode: Mode, _ctx: &mut Ctx) {}
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {

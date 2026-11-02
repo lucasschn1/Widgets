@@ -10,7 +10,7 @@ use windows::Win32::Foundation::HWND;
 use crate::gfx::{Canvas, Image};
 use crate::shared::Shared;
 use crate::theme::*;
-use crate::widgets::{Env, Hot, Kind, Layout, Mode, Status};
+use crate::widgets::{Env, Hot, HoverStyle, Kind, Layout, Mode, Status};
 use crate::win;
 
 /// Ação de um clique, decidida ao apertar e executada ao soltar.
@@ -98,7 +98,11 @@ pub struct Card {
     pub temp_home: Option<(i32, i32)>,
     pub hover: f32,
     pub hover_target: f32,
-    pub hot: Option<Hot>,
+    /// o que está sob o mouse, e desde quando (o destaque aparece aos poucos)
+    pub hot: Option<(Hot, HoverStyle)>,
+    hot_since: Instant,
+    /// o destaque anterior, sumindo: (área, estilo, desde quando)
+    hot_prev: Option<(Hot, HoverStyle, Instant)>,
     pub pressing: bool,
     /// o botão apertado afunda e volta com mola: (quando, true = apertou / false = soltou)
     pub press_anim: Option<(Instant, bool)>,
@@ -140,6 +144,8 @@ impl Card {
             hover: 0.0,
             hover_target: 0.0,
             hot: None,
+            hot_since: Instant::now(),
+            hot_prev: None,
             pressing: false,
             press_anim: None,
             press: None,
@@ -379,14 +385,58 @@ impl Card {
         self.last_frame = Instant::now();
     }
 
+    /// O destaque de quem está sob o mouse (área em unidades do cartão, canto do cartão em (ox, oy)),
+    /// com a opacidade `a` (0 a 1) da entrada ou da saída.
+    pub fn paint_hover(c: &mut Canvas, (x0, y0, x1, y1, r): Hot, style: HoverStyle, pressing: bool, ox: f32, oy: f32, a: f32) {
+        let fade = |col: Rgba| col.with_a((col.3 as f32 * a.clamp(0.0, 1.0)) as u8);
+        match (style, pressing) {
+            (_, true) => c.fill_round_rect(ox + x0, oy + y0, ox + x1, oy + y1, r, fade(PRESS_SURFACE)),
+            (HoverStyle::Surface, false) => {
+                c.fill_round_rect(ox + x0, oy + y0, ox + x1, oy + y1, r, fade(HOVER_SURFACE));
+                c.stroke_round_rect(ox + x0 + 0.5, oy + y0 + 0.5, ox + x1 - 0.5, oy + y1 - 0.5, r, fade(HOVER_EDGE), 1.0 / c.s);
+            }
+            // áreas grandes de conteúdo: nada por cima (o cursor de mãozinha basta)
+            (HoverStyle::Quiet, false) => {}
+        }
+    }
+
+    /// Muda o que está sob o mouse: o destaque novo entra e o antigo sai aos poucos.
+    pub fn set_hot(&mut self, hot: Option<(Hot, HoverStyle)>, animations: bool) {
+        if hot.map(|h| h.0) == self.hot.map(|h| h.0) {
+            self.hot = hot;
+            return;
+        }
+        self.hot_prev = match (self.hot.take(), animations) {
+            (Some((area, style)), true) => Some((area, style, Instant::now())),
+            _ => None,
+        };
+        self.hot = hot;
+        self.hot_since = if animations { Instant::now() } else { Instant::now() - Duration::from_millis(HOVER_FADE_MS) };
+    }
+
+    /// Opacidade de um destaque que começou (ou começou a sumir) em `since`.
+    fn hover_progress(since: Instant) -> f32 {
+        (since.elapsed().as_secs_f32() * 1000.0 / HOVER_FADE_MS as f32).min(1.0)
+    }
+
+    fn hover_fading(&self) -> bool {
+        (self.hot.is_some() && Self::hover_progress(self.hot_since) < 1.0) || self.hot_prev.is_some_and(|p| Self::hover_progress(p.2) < 1.0)
+    }
+
     /// Detalhes por cima do vidro: destaque do mouse, aviso de erro, "carregando" e botões.
     fn decorate(&self, c: &mut Canvas, sh: &Shared) {
         let m = MARGIN;
-        if let (Some((x0, y0, x1, y1, r)), None) = (self.hot, self.drag) {
-            if x1 - x0 >= 2.0 && y1 - y0 >= 2.0 {
-                // apertado, o realce encolhe um pouco; solto, volta passando um tico do tamanho
-                let k = self.press_inset().min((x1 - x0).min(y1 - y0) / 4.0);
-                c.fill_round_rect(m + x0 + k, m + y0 + k, m + x1 - k, m + y1 - k, (r - k).max(0.0), if self.pressing { PRESS_FILL } else { HOT_FILL });
+        if self.drag.is_none() {
+            if let Some((area, style, since)) = self.hot_prev {
+                Self::paint_hover(c, area, style, false, m, m, 1.0 - Self::hover_progress(since));
+            }
+            if let Some(((x0, y0, x1, y1, r), style)) = self.hot {
+                if x1 - x0 >= 2.0 && y1 - y0 >= 2.0 {
+                    // apertado, o realce encolhe um pouco; solto, volta passando um tico do tamanho
+                    let k = self.press_inset().min((x1 - x0).min(y1 - y0) / 4.0);
+                    let area = (x0 + k, y0 + k, x1 - k, y1 - k, (r - k).max(0.0));
+                    Self::paint_hover(c, area, style, self.pressing, m, m, Self::hover_progress(self.hot_since));
+                }
             }
         }
         if self.status.error.is_some() && !sh.editing {
@@ -444,15 +494,17 @@ impl Card {
         let (cx, cy) = self.badge_center();
         let r = BADGE_D / 2.0;
         let fade = |col: Rgba| col.with_a((col.3 as f32 * alpha) as u8);
-        c.fill_circle(cx, cy, r, fade(Rgba::rgb(78, 78, 84)));
-        c.stroke_circle(cx, cy, r - 0.5, fade(Rgba::rgb(110, 110, 118)), 1.0);
-        let arm = 4.5;
-        c.line(&[(cx - arm, cy), (cx + arm, cy)], fade(FG), 1.8);
+        // vidro escuro com um fio claro (sem o círculo cinza sólido)
+        let r = r - 1.0;
+        c.fill_circle(cx, cy, r, fade(Rgba(28, 28, 34, 190)));
+        c.stroke_circle(cx, cy, r - 0.5, fade(WHITE.with_a(46)), 1.0);
+        let arm = 4.0;
+        c.line(&[(cx - arm, cy), (cx + arm, cy)], fade(FG.alpha(0.9)), 1.5);
         // "+" quando o próximo tamanho é maior (ou para fixar aberto), "−" quando volta ao menor
         let sizes = self.kind.sizes();
         let bigger = self.temp || sizes.iter().position(|&m| m == self.next_mode()) > sizes.iter().position(|&m| m == self.mode);
         if bigger {
-            c.line(&[(cx, cy - arm), (cx, cy + arm)], fade(FG), 1.8);
+            c.line(&[(cx, cy - arm), (cx, cy + arm)], fade(FG.alpha(0.9)), 1.5);
         }
     }
 
@@ -503,14 +555,15 @@ impl Card {
         self.kind.hit(lx, ly, self.mode, &env).map(Act::Kind)
     }
 
-    pub fn hot_at(&self, x: i32, y: i32, sh: &Shared) -> Option<Hot> {
+    pub fn hot_at(&self, x: i32, y: i32, sh: &Shared) -> Option<(Hot, HoverStyle)> {
         let (lx, ly) = self.logical(x, y);
         if self.on_stale_dot(lx, ly) {
             let (sx, sy) = STALE_XY;
-            return Some((sx - 8.0, sy - 8.0, sx + 8.0, sy + 8.0, 8.0));
+            return Some(((sx - 8.0, sy - 8.0, sx + 8.0, sy + 8.0, 8.0), HoverStyle::Surface));
         }
         let env = Env { cfg: &sh.cfg, key: self.key() };
-        self.kind.hot_rect(lx, ly, self.mode, &env)
+        let area = self.kind.hot_rect(lx, ly, self.mode, &env)?;
+        Some((area, self.kind.hover_style(lx, ly, self.mode, &env)))
     }
 
     pub fn tooltip_at(&self, x: i32, y: i32, sh: &Shared) -> Option<String> {
@@ -623,7 +676,7 @@ impl Card {
     }
 
     pub fn next_frame(&self) -> Option<Instant> {
-        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() {
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
         }
         let mut wait = None;

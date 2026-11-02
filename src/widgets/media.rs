@@ -1368,6 +1368,10 @@ impl Kind for Media {
         None
     }
 
+    fn hover_style(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> super::HoverStyle {
+        if self.control_at(x, y, mode).is_none() && self.on_art(x, y, mode) { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+    }
+
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let m = self.media.as_ref().filter(|m| !m.empty)?;
         if let Some((ctl, ..)) = self.control_at(x, y, mode) {

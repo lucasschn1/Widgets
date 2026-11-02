@@ -63,8 +63,12 @@ pub fn ease_spring(t: f32) -> f32 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
-pub const HOT_FILL: Rgba = Rgba(255, 255, 255, 42); // destaque do que está sob o mouse
-pub const PRESS_FILL: Rgba = Rgba(0, 0, 0, 80); // o que está sendo apertado "afunda"
+// o que está sob o mouse fica só um pouco mais claro que o vidro, com um fio de contorno; o que
+// está sendo apertado escurece um pouco
+pub const HOVER_SURFACE: Rgba = Rgba(255, 255, 255, 20);
+pub const HOVER_EDGE: Rgba = Rgba(255, 255, 255, 40);
+pub const PRESS_SURFACE: Rgba = Rgba(0, 0, 0, 34);
+pub const HOVER_FADE_MS: u64 = 120;
 pub const STALE_DOT: Rgba = Rgba(255, 184, 0, 255); // aviso de dados desatualizados
 pub const STALE_XY: (f32, f32) = (12.0, 12.0);
 

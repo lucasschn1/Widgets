@@ -893,6 +893,10 @@ impl Kind for GitHub {
         None
     }
 
+    fn hover_style(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> super::HoverStyle {
+        if Self::on_header(x, y, mode) || self.on_message(x) { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+    }
+
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         if let Some((day, count)) = self.day_at(x, y, mode) {
             let amount = match count {
