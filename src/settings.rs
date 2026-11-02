@@ -371,8 +371,8 @@ fn page_aparencia(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View)
     let cfg = &v.sh.cfg;
     let blur = config::setting_f64(cfg, "desfoque");
     let tint = config::setting_f64(cfg, "escurecimento");
-    draw_preview(st, ui, x, 4.0, w, 150.0, v, blur, tint);
-    let y = section(ui, x, 4.0 + 150.0 + 26.0, "Vidro");
+    draw_preview(st, ui, x, 4.0, w, PREVIEW_H, v, blur, tint);
+    let y = section(ui, x, 4.0 + PREVIEW_H + 26.0, "Vidro");
     let y = rows(ui, x, y, w, vec![
         Row("Desfoque".into(), Some("Quanto o papel de parede fica borrado atrás dos widgets".into()),
             Control::Slider("desfoque", blur.round(), 8.0, 40.0, 1.0, format!("{} px", blur.round()))),
@@ -403,7 +403,11 @@ fn page_aparencia(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View)
     restore(ui, x, y, w, "aparencia")
 }
 
-/// Um widget de verdade sobre o papel de parede, com o vidro das opções atuais.
+/// Altura da prévia: um widget médio (154) com folga em cima e embaixo.
+const PREVIEW_H: f32 = 214.0;
+
+/// Widgets de verdade sobre o papel de parede, com o vidro das opções atuais: um médio e um
+/// pequeno lado a lado (os primeiros que estão na tela), no meio do palco.
 fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: f32, v: &View, blur: f64, tint: f64) {
     let s = ui.s();
     let sx = v.origin.0 + ((ui.ox + x) * s).round() as i32;
@@ -411,13 +415,23 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
     let (pw, ph) = ((w * s).round() as u32, (h * s).round() as u32);
     let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version);
     if st.preview.as_ref().map(|p| p.0) != Some(key) {
-        let which = ["pomodoro", "tempo", "sistema", "midia", "github"].into_iter().find(|k| v.visible.contains(k)).unwrap_or("tempo");
-        if let Some((content, radius)) = (v.render)(which, Mode::P, s) {
+        let order = ["tempo", "sistema", "pomodoro", "midia", "github"];
+        let mut shown: Vec<&'static str> = order.into_iter().filter(|k| v.visible.contains(k)).take(2).collect();
+        if shown.is_empty() {
+            shown.push("tempo");
+        }
+        let cards: Vec<(Image, f32)> = shown.iter().zip([Mode::M, Mode::P]).filter_map(|(k, m)| (v.render)(k, m, s)).collect();
+        if !cards.is_empty() {
             let mut stage = v.sh.backdrop.region(sx, sy, pw, ph, true).to_image();
-            let cx = (pw as i32 - content.w as i32) / 2;
-            let cy = (ph as i32 - content.h as i32) / 2;
-            let glass = v.sh.backdrop.glass_with(&content, radius, sx + cx, sy + cy, blur, tint);
-            stage.over(&glass, cx, cy);
+            let gap = (16.0 * s).round() as i32;
+            let total: i32 = cards.iter().map(|c| c.0.w as i32).sum::<i32>() + gap * (cards.len() as i32 - 1);
+            let mut cx = (pw as i32 - total) / 2;
+            for (content, radius) in &cards {
+                let cy = (ph as i32 - content.h as i32) / 2;
+                let glass = v.sh.backdrop.glass_with(content, *radius, sx + cx, sy + cy, blur, tint);
+                stage.over(&glass, cx, cy);
+                cx += content.w as i32 + gap;
+            }
             // cantos arredondados do palco
             let mut c = crate::gfx::Canvas::new(pw, ph, s);
             c.push_round_clip(0.0, 0.0, w, h, 12.0);
@@ -431,7 +445,7 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
         ui.image(&img, x, y);
     }
     ui.rect(x, y, x + w, y + h, 12.0, None, Some(WHITE.with_a(30)), 1.0);
-    ui.text(x + 14.0, y + h - 14.0, "Prévia ao vivo", 10.5, WHITE.with_a(200), Face::Semibold, Anchor::LS, None);
+    ui.text(x + 14.0, y + h - 10.0, "Prévia ao vivo", 10.5, WHITE.with_a(200), Face::Semibold, Anchor::LS, None);
 }
 
 fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
@@ -469,7 +483,9 @@ fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
         }
         ui.button(&format!("opcoes:{key}"), tx + 10.0, ty + tile_h - 40.0, "Opções", A::Go(key), "ghost", 'l', None, None);
     }
-    y + 2.0 * (tile_h + gap)
+    // todas as linhas de cartões (com 5 widgets são 3): senão a rolagem para antes da última
+    let rows = widgets::KEYS.len().div_ceil(2) as f32;
+    y + rows * (tile_h + gap)
 }
 
 /// O widget em vidro, cabendo no palco da galeria.
@@ -640,3 +656,83 @@ fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
             Control::Button("restaurar_tudo", "Restaurar".into(), A::ResetAll, "danger", None)),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::panel::Anims;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Desenha uma página das Configurações (como a janela desenha) e devolve a imagem e a altura
+    /// do conteúdo. `scroll`: quanto a página está rolada.
+    fn page(name: &'static str, scroll: f32, s: f32) -> (Image, f32, f32) {
+        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}});
+        let sh = Shared::new(cfg, serde_json::json!({}), s);
+        let render = |key: &'static str, mode: Mode, scale: f32| {
+            let kind = widgets::sample(key, &sh.cfg, &sh.cache)?;
+            Some((crate::card::render_kind(kind.as_ref(), mode, scale, &sh), widgets::Layout::of(mode).radius * scale))
+        };
+        let view = View {
+            sh: &sh,
+            visible: widgets::KEYS.to_vec(),
+            modes: HashMap::new(),
+            origin: (0, 0),
+            render: &render,
+            startup: false,
+            update_status: String::new(),
+            update_version: None,
+        };
+        let mut st = SettingsState::new(name);
+        st.scrolls.insert(name, scroll);
+        let mut c = crate::gfx::Canvas::new((W * s) as u32, (H * s) as u32, s);
+        c.fill_round_rect(0.0, 0.0, W, H, 0.0, Rgba::rgb(28, 28, 34));
+        let mut anims = Anims::default();
+        let mut ui = Ui {
+            c: &mut c,
+            regions: Vec::new(),
+            entries: Vec::new(),
+            hover: None,
+            pressed: None,
+            focus: None,
+            anims: &mut anims,
+            animations: false,
+            ox: 0.0,
+            oy: 0.0,
+            clip: (0.0, 0.0, W, H),
+        };
+        draw(&mut st, &mut ui, &view);
+        let max_scroll = (st.content_h - (H - TOP)).max(0.0);
+        (c.finish(), st.content_h, max_scroll)
+    }
+
+    #[test]
+    fn gallery_scrolls_to_every_widget() {
+        com();
+        let (_, content_h, max_scroll) = page("widgets", 0.0, 1.0);
+        // a galeria tem um cartão por widget, 2 por linha, com 262 de altura e 16 entre eles
+        let rows = widgets::KEYS.len().div_ceil(2) as f32;
+        assert!(content_h >= 56.0 + rows * (262.0 + 16.0), "altura {content_h}");
+        assert!(max_scroll > 0.0, "a página precisa rolar até o último cartão");
+    }
+
+    /// As páginas de Aparência e da Galeria (no alto e rolada até o fim) num PNG:
+    ///   cargo test settings_pages -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn settings_pages() {
+        com();
+        for (name, end) in [("aparencia", false), ("widgets", false), ("widgets", true)] {
+            let (_, _, max_scroll) = page(name, 0.0, 1.25);
+            let (img, _, _) = page(name, if end { max_scroll } else { 0.0 }, 1.25);
+            let path = std::env::temp_dir().join(format!("config_{name}{}.png", if end { "_fim" } else { "" }));
+            crate::gfx::save_png(&img, &path).unwrap();
+            println!("{}", path.display());
+        }
+    }
+}
+
