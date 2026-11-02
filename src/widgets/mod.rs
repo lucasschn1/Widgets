@@ -414,6 +414,52 @@ mod tests {
         assert_eq!(DEFAULT_MODE, Mode::M);
     }
 
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    #[test]
+    fn content_areas_have_a_quiet_hover() {
+        com();
+        let cfg = serde_json::json!({"midia": {}, "app": {}, "pomodoro": {}, "sistema": {}});
+        let env = |key| Env { cfg: &cfg, key };
+        let media = media::Media::sample();
+        // a capa: nada por cima; o botão de tocar: a superfície
+        assert_eq!(media.hover_style(77.0, 77.0, Mode::M, &env("midia")), HoverStyle::Quiet);
+        let play = media.hover_style(230.0, 96.0, Mode::M, &env("midia"));
+        assert_eq!(play, HoverStyle::Surface);
+        let pomodoro = pomodoro::Pomodoro::new(&cfg);
+        assert_eq!(pomodoro.hover_style(77.0, 30.0, Mode::M, &env("pomodoro")), HoverStyle::Quiet);
+        let system = system::System::sample();
+        assert_eq!(system.hover_style(76.0, 22.0, Mode::M, &env("sistema")), HoverStyle::Quiet);
+    }
+
+    #[test]
+    fn tooltips_only_say_what_is_not_written() {
+        com();
+        let cfg = serde_json::json!({"tempo": {}, "midia": {}, "app": {}, "pomodoro": {}, "sistema": {}, "github": {}});
+        let env = |key| Env { cfg: &cfg, key };
+        // tudo o que a dica do Tempo e do Sistema dizia já está no cartão
+        let tempo = tempo::Tempo::sample("inicio", 0, 0.0, Mode::G);
+        for (x, y) in [(70.0, 48.0), (88.0, 108.0), (150.0, 240.0)] {
+            assert_eq!(tempo.tooltip(x, y, Mode::G, &env("tempo")), None);
+        }
+        assert_eq!(system::System::sample().tooltip(76.0, 22.0, Mode::M, &env("sistema")), None);
+        // os botões do Tocando agora não têm legenda; a capa também não (o título cabe)
+        let media = media::Media::sample();
+        assert_eq!(media.tooltip(230.0, 96.0, Mode::M, &env("midia")), None);
+        assert_eq!(media.tooltip(77.0, 77.0, Mode::M, &env("midia")), None);
+        // nenhuma dica manda clicar
+        let github = github::GitHub::sample(&cfg, &serde_json::json!({}));
+        for (x, y) in [(150.0, 182.0), (150.0, 20.0)] {
+            if let Some(tip) = github.tooltip(x, y, Mode::G, &env("github")) {
+                assert!(!tip.contains("Clique"), "{tip}");
+            }
+        }
+    }
+
     #[test]
     fn every_widget_starts_medium() {
         unsafe {

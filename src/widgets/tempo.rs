@@ -1809,6 +1809,42 @@ mod tests {
     }
 
     #[test]
+    fn details_pages_draw_in_every_size() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let cfg = json!({"tempo": {}, "app": {}});
+        for mode in Mode::ALL {
+            for page in 0..Tempo::pages(mode) {
+                for view in ["detalhes", "dia1"] {
+                    let t = Tempo::sample(view, page, 0.0, mode);
+                    let l = Layout::of(mode);
+                    let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
+                    t.draw(&mut c, mode, &Env { cfg: &cfg, key: "tempo" });
+                    let img = c.finish();
+                    assert!(img.px.chunks(4).any(|p| p[3] > 0), "{mode:?} {view} página {page}");
+                }
+            }
+        }
+        // os painéis de agora têm cada um o seu desenho
+        let t = Tempo::sample("detalhes", 0, 0.0, Mode::G);
+        let tiles = t.now_tiles();
+        assert!(matches!(tiles[0].visual, Visual::Feels(..)));
+        assert!(matches!(tiles[2].visual, Visual::Wind(..)));
+        assert!(matches!(tiles[3].visual, Visual::Uv(_)));
+        assert!(matches!(tiles[4].visual, Visual::Sun(..)));
+    }
+
+    #[test]
+    fn short_names() {
+        assert_eq!(short_city("São José dos Pinhais, Paraná"), "São José dos Pinhais");
+        assert_eq!(short_city("Florianópolis"), "Florianópolis");
+        assert_eq!(capitalize("ter"), "Ter");
+        assert_eq!(capitalize("sáb"), "Sáb");
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
     fn small_helpers() {
         assert_eq!(hhmm("2026-11-01T05:07"), "5:07");
         assert_eq!(wind_from(317.0), "noroeste");
