@@ -82,10 +82,26 @@ fn main() {
     startup::refresh();
     let mut app = app::App::new();
     let mut msg = MSG::default();
+    let mut fine_timer = false;
     loop {
         let t0 = std::time::Instant::now();
         let wait = app.next_deadline().saturating_duration_since(std::time::Instant::now());
-        let ms = (wait.as_millis() as u32).min(1000);
+        // o relógio do Windows anda de 15,6 em 15,6 ms: esperar "16 ms" virava 31 e as animações
+        // ficavam a uns 32 quadros por segundo. Enquanto algo anima (próximo quadro em menos de
+        // 50 ms), o relógio passa a ser de 1 ms; parado, volta ao normal (sem gastar bateria).
+        let animating = wait < std::time::Duration::from_millis(50);
+        if animating != fine_timer {
+            fine_timer = animating;
+            unsafe {
+                if animating {
+                    windows::Win32::Media::timeBeginPeriod(1);
+                } else {
+                    windows::Win32::Media::timeEndPeriod(1);
+                }
+            }
+        }
+        // arredonda para cima: acordar 1 ms antes do prazo custaria uma espera inteira a mais
+        let ms = (wait.as_micros().div_ceil(1000) as u32).min(1000);
         unsafe {
             MsgWaitForMultipleObjectsEx(None, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
