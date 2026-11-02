@@ -2,7 +2,7 @@
 
 <p align="center">
   Widgets de vidro para a área de trabalho do Windows: clima, sistema, a música que está tocando,
-  seu GitHub e um relógio Pomodoro.
+  seu GitHub, um relógio Pomodoro e o uso do Claude.
 </p>
 
 <p align="center">
@@ -99,6 +99,15 @@ soma quanto você focou no dia, e começa ou pausa com um clique (ou pelo clique
   <img src="docs/images/pomodoro.webp" width="300" alt="O Pomodoro rodando">
 </p>
 
+**Uso do Claude** mostra quanto da sessão de 5 horas e da semana do seu plano você já usou no
+[Claude Code](https://code.claude.com), em dois medidores: a sessão por fora, a semana por dentro.
+Um tracinho em cada medidor marca quanto do período já passou, e o widget avisa se, no ritmo de
+agora, a sessão acaba antes de reiniciar. Os números vêm do próprio Claude Code: ao clicar em
+"Conectar", o widget vira a linha de status dele (só se ainda não houver outra; uma cópia das
+configurações do Claude Code fica em `settings.json.antes-do-widgets`). Funciona nos planos Pro e
+Max, a partir da primeira resposta de cada conversa. Ele chega oculto para quem já usava o app:
+mostre-o na Galeria de widgets.
+
 ## Do tamanho que você quiser
 
 Cada widget tem três tamanhos. Clique no botão que aparece no canto, ou dê dois cliques no
@@ -159,6 +168,7 @@ AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no �
 | Modo foco | Esconde os widgets por 30 min, 1 h, 2 h ou até você desligar |
 | Layouts | Guarda e troca arrumações dos widgets |
 | No Pomodoro | Começar, pausar, pular de fase e mudar as durações |
+| No Uso do Claude | Conectar ou desconectar do Claude Code e ver o uso no claude.ai |
 
 ---
 
@@ -209,7 +219,8 @@ src/
   win.rs, util.rs, imgops.rs, drawing.rs
   widgets/
     mod.rs            a lista de widgets e o trait `Kind`, que todo widget implementa
-    tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs
+    tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs, claude.rs
+  claude_usage.rs     o uso do Claude Code: a linha de status e o arquivo com os números
   app_screens.rs      vários monitores: o lugar dos widgets em cada combinação de telas
   app_island.rs       a ilha flutuante do Tocando agora
   readme_images.rs    gera as imagens do README (cargo test readme -- --ignored)

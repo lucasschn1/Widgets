@@ -4,6 +4,7 @@
 //! Para criar um widget novo: um módulo aqui com um tipo que implemente `Kind`, e uma linha em
 //! `create` e em `KEYS`.
 
+pub mod claude;
 pub mod github;
 pub mod media;
 pub mod pomodoro;
@@ -43,7 +44,7 @@ pub const DEFAULT_MODE: Mode = Mode::M;
 
 /// Arrumação da primeira vez: colunas a partir da borda direita da tela, cada uma de cima para
 /// baixo. Um widget aberto depois vai para baixo dos da coluna dele (ou começa a coluna dele).
-pub const FIRST_LAYOUT: &[&[&str]] = &[&["sistema", "pomodoro", "github", "tempo"], &["midia"]];
+pub const FIRST_LAYOUT: &[&[&str]] = &[&["sistema", "pomodoro", "github", "tempo"], &["midia", "claude"]];
 
 /// Coluna do widget na arrumação da primeira vez.
 pub fn first_column(key: &str) -> usize {
@@ -51,7 +52,10 @@ pub fn first_column(key: &str) -> usize {
 }
 
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
-pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro"];
+pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro", "claude"];
+
+/// Widgets que chegaram depois: quem já usava o app não os vê aparecer sozinhos (ficam na galeria).
+pub const ADDED_LATER: &[&str] = &["claude"];
 
 /// Nome do widget `key` (sem criar o widget).
 pub fn title(key: &str) -> &'static str {
@@ -61,6 +65,7 @@ pub fn title(key: &str) -> &'static str {
         "midia" => "Tocando agora",
         "github" => "GitHub",
         "pomodoro" => "Pomodoro",
+        "claude" => "Uso do Claude",
         _ => "Widget",
     }
 }
@@ -73,6 +78,7 @@ pub fn description(key: &str) -> &'static str {
         "midia" => "A música ou o vídeo tocando no Windows, com capa e controles.",
         "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
         "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
+        "claude" => "Quanto da sessão de 5 horas e da semana do seu plano você já usou no Claude Code.",
         _ => "",
     }
 }
@@ -85,6 +91,7 @@ pub fn icon_name(key: &str) -> &'static str {
         "midia" => "midia",
         "github" => "github",
         "pomodoro" => "pomodoro",
+        "claude" => "claude",
         _ => "widgets",
     }
 }
@@ -95,6 +102,7 @@ pub fn sample(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
         "midia" => Some(Box::new(media::Media::sample())),
         "sistema" => Some(Box::new(system::System::sample())),
         "github" => Some(Box::new(github::GitHub::sample(cfg, cache))),
+        "claude" => Some(Box::new(claude::Claude::sample())),
         _ => create(key, cfg, cache),
     }
 }
@@ -107,6 +115,7 @@ pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
         "midia" => Some(Box::new(media::Media::new(cfg))),
         "github" => Some(Box::new(github::GitHub::new(cfg, cache))),
         "pomodoro" => Some(Box::new(pomodoro::Pomodoro::new(cfg))),
+        "claude" => Some(Box::new(claude::Claude::new())),
         _ => None,
     }
 }

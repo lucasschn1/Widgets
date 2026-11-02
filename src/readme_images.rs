@@ -509,3 +509,35 @@ fn sizes_sheet() {
     let bd = Backdrop::from_picture(&wall, BLUR, S);
     save(&compose(&wall, &bd, &items, &labels), &std::env::temp_dir().join("widgets-tamanhos.png"));
 }
+
+/// O widget "Uso do Claude" nos três tamanhos (uso normal, perto do limite e ainda sem
+/// conectar), cada caso numa imagem: grande à esquerda, médio e pequeno à direita.
+///   MOCK_OUT=pasta cargo test claude_widget_images -- --ignored
+#[test]
+#[ignore]
+fn claude_widget_images() {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+    }
+    use crate::widgets::claude::Claude;
+    let out = std::env::var("MOCK_OUT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    std::fs::create_dir_all(&out).unwrap();
+    let cfg = empty_cfg();
+    let gap = (WIDGET_GAP * S).round() as i32;
+    let cases = [("claude", Claude::sample as fn() -> Claude), ("claude_limite", Claude::sample_limit), ("claude_conectar", Claude::sample_unlinked)];
+    for (name, make) in cases {
+        let (g, gr) = content(&make(), Mode::G, &cfg);
+        let (m, mr) = content(&make(), Mode::M, &cfg);
+        let (p, pr) = content(&make(), Mode::P, &cfg);
+        let x2 = 40 + g.w as i32 + gap;
+        let (gh, mh, ph, mw) = (g.h as i32, m.h as i32, p.h as i32, m.w as i32);
+        let (w, h) = ((x2 + mw + 40) as u32, (40 + gh.max(mh + gap + ph) + 40) as u32);
+        let items = vec![Item { img: g, radius: gr, x: 40, y: 40 }, Item { img: m, radius: mr, x: x2, y: 40 }, Item { img: p, radius: pr, x: x2, y: 40 + mh + gap }];
+        let wall = wallpaper(w, h);
+        let bd = Backdrop::from_picture(&wall, BLUR, S);
+        let path = out.join(format!("{name}.png"));
+        gfx::save_png(&compose(&wall, &bd, &items, &[]), &path).unwrap();
+        println!("{}", path.display());
+    }
+}
+

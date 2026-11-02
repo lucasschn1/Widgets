@@ -37,16 +37,23 @@ pub fn load_config(widget_keys: &[&str]) -> Value {
     // instalação nova: ainda não há nada guardado (as opções e posições nascem dos padrões)
     let existing = !map.is_empty();
     split_weather(map);
-    for key in widget_keys {
-        if !map.get(*key).is_some_and(Value::is_object) {
-            map.insert(key.to_string(), json!({}));
-        }
-    }
+    add_sections(map, widget_keys, existing);
     if !map.get("app").is_some_and(Value::is_object) {
         map.insert("app".into(), json!({}));
     }
     keep_old_defaults(map, existing);
     cfg
+}
+
+/// Uma seção para cada widget. Um widget que chegou numa versão nova não aparece sozinho para
+/// quem já usava o app (fica oculto, na galeria).
+fn add_sections(map: &mut Map<String, Value>, widget_keys: &[&str], existing: bool) {
+    for key in widget_keys {
+        if !map.get(*key).is_some_and(Value::is_object) {
+            let added = existing && crate::widgets::ADDED_LATER.contains(key);
+            map.insert(key.to_string(), if added { json!({"visible": false}) } else { json!({}) });
+        }
+    }
 }
 
 /// Versão dos padrões das opções (ver `default_setting` e widgets::DEFAULT_MODE).
@@ -214,9 +221,7 @@ mod tests {
         let map = cfg.as_object_mut().unwrap();
         let existing = !map.is_empty();
         split_weather(map);
-        for key in crate::widgets::KEYS {
-            map.entry(key.to_string()).or_insert(json!({}));
-        }
+        add_sections(map, crate::widgets::KEYS, existing);
         map.entry("app").or_insert(json!({}));
         keep_old_defaults(map, existing);
         cfg
@@ -248,6 +253,8 @@ mod tests {
         assert_eq!(cfg["midia"]["tamanho"], "g");
         assert_eq!(cfg["github"]["tamanho"], "g");
         assert!(cfg["tempo"].get("tamanho").is_none(), "o Tempo já nascia médio");
+        // o Uso do Claude chegou depois: fica oculto para quem já usava
+        assert_eq!(cfg["claude"]["visible"], false);
         assert_eq!(cfg["tempo"]["x"], 10);
     }
 

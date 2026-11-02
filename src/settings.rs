@@ -572,6 +572,21 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Avisar pedidos de revisão".into(), Some(NOTIFY[4].2.into()), notify("github")),
             ])
         }
+        "claude" => {
+            use crate::claude_usage::{self as usage, Link};
+            use widgets::claude::{CONNECT, DISCONNECT};
+            let (state, control) = match usage::link() {
+                Link::Connected => ("Conectado: os números chegam a cada resposta do Claude Code", btn("claude_desconectar", "Desconectar", A::Widget("claude", DISCONNECT))),
+                Link::Off => ("Ainda não conectado", Control::Button("claude_conectar", "Conectar".into(), A::Widget("claude", CONNECT), "primary", None)),
+                Link::Other => ("O Claude Code já usa outra linha de status; tire-a para conectar", Control::None),
+                Link::Missing => ("O Claude Code não foi encontrado neste computador", Control::None),
+            };
+            let y = section(ui, x, y, "Claude Code");
+            rows(ui, x, y, w, vec![
+                Row("Conexão".into(), Some(state.into()), control),
+                Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana".into()), Control::None),
+            ])
+        }
         _ => {
             let durations = &wcfg["duracoes"];
             let mut r = Vec::new();
@@ -610,6 +625,7 @@ pub fn size_id(key: &str) -> &'static str {
         "sistema" => "tamanho:sistema",
         "midia" => "tamanho:midia",
         "github" => "tamanho:github",
+        "claude" => "tamanho:claude",
         _ => "tamanho:pomodoro",
     }
 }

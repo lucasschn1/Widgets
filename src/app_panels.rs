@@ -431,6 +431,12 @@ impl App {
             A::Widget(key, n) => {
                 if let Some(j) = self.find(key) {
                     self.run_action(j, Act::Kind(n));
+                } else if key == "claude" {
+                    // o widget está oculto: liga ou desliga direto
+                    let result = if n == widgets::claude::CONNECT { crate::claude_usage::connect() } else { crate::claude_usage::disconnect() };
+                    if let Err(e) = result {
+                        self.toast(&e, None, "close", WHITE, None);
+                    }
                 } else if key == "pomodoro" && n == widgets::pomodoro::RESET_DAY {
                     self.sh.cfg.obj_mut("pomodoro").remove("hoje");
                     self.sh.save();
