@@ -25,17 +25,21 @@ use crate::win;
 const W: f32 = WIDE;
 const PAD: f32 = 16.0;
 const M_H: f32 = MEDIUM_H;
-const HOURS_Y: f32 = 78.0;
 /// colunas de horas visíveis na faixa
 const HOURS: usize = 6;
 /// horas na faixa da tela principal (rolando)
 const NEXT_HOURS: usize = 24;
 const STRIP_H: f32 = 66.0;
-const G_LINE_Y: f32 = 150.0;
-const G_DAYS_Y: f32 = 186.0;
-/// no grande, a semana inteira (a previsão tem 7 dias), dividindo a altura que sobra
-const G_DAYS: usize = 7;
-const DAY_H: f32 = (LARGE_H - G_DAYS_Y - 12.0) / G_DAYS as f32;
+// tela principal, com respiro (como o Tempo da Apple): margem maior, a temperatura solta das
+// horas e, no grande, 5 dias em linhas altas
+const M_PAD: f32 = 18.0;
+const G_PAD: f32 = 20.0;
+const M_HOURS_Y: f32 = 88.0;
+const G_HOURS_Y: f32 = 110.0;
+/// grande: a linha que separa as horas dos dias, o aviso de chuva e os dias
+const G_RULE_Y: f32 = 194.0;
+const G_RAIN: (f32, f32) = (200.0, 226.0);
+const G_DAYS: usize = 5;
 /// painéis de detalhe no grande: 3 linhas de 2, ocupando a altura toda
 const G_TILE_GAP: f32 = 8.0;
 const G_TILES_Y: f32 = 46.0;
@@ -909,25 +913,6 @@ impl Tempo {
         }
     }
 
-    /// Cidade, temperatura grande e, à direita, ícone, condição e máxima/mínima.
-    fn draw_top(&self, c: &mut Canvas, env: &Env) {
-        // esquerda: cidade e temperatura; direita: ícone, condição e máx./mín., alinhados pela
-        // mesma margem
-        c.text(PAD, 14.0, &short_city(&self.city(env)), Face::Semibold, 13.0, FG, Anchor::LA, Some(170.0));
-        c.text(PAD - 3.0, 28.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
-        match &self.weather {
-            Some(wx) => {
-                let size = 28.0;
-                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), W - PAD - size, 9.0);
-                c.text(W - PAD, 41.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.5, FG, Anchor::RA, Some(150.0));
-                c.text(W - PAD, 58.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::RA, None);
-            }
-            None => {
-                c.text(W - PAD, 41.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
-            }
-        }
-    }
-
     /// Faixa de horas que rola (`off` em colunas), com as setinhas nas pontas quando há mais.
     fn draw_strip(&self, c: &mut Canvas, list: &[Value], y: f32, off: f32) {
         if list.is_empty() {
@@ -964,52 +949,113 @@ impl Tempo {
         }
     }
 
-    /// Lista de dias com a faixa de mínima a máxima (e o ponto de agora em "Hoje").
-    fn draw_days(&self, c: &mut Canvas, y0: f32, count: usize) {
+    // ---------- tela principal ----------
+
+    /// Cabeçalho do médio e do grande: cidade e temperatura à esquerda; ícone, condição e
+    /// máx./mín. à direita. `big`: grande (tudo um pouco maior e mais solto).
+    fn draw_top(&self, c: &mut Canvas, env: &Env, big: bool) {
+        let pad = if big { G_PAD } else { M_PAD };
+        let (city_y, temp_y, temp_size) = if big { (18.0, 30.0, 54.0) } else { (16.0, 29.0, 40.0) };
+        c.text(pad, city_y, &short_city(&self.city(env)), Face::Semibold, if big { 14.0 } else { 13.0 }, FG, Anchor::LA, Some(170.0));
+        c.text(pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), Face::Light, temp_size, FG, Anchor::LA, None);
+        match &self.weather {
+            Some(wx) => {
+                let size = if big { 26.0 } else { 22.0 };
+                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), W - pad - size, city_y - 2.0);
+                let (dy, my) = if big { (48.0, 67.0) } else { (40.0, 57.0) };
+                c.text(W - pad, dy, wx.str_of("desc").unwrap_or(""), Face::Semibold, if big { 13.5 } else { 12.5 }, FG, Anchor::RA, Some(150.0));
+                c.text(W - pad, my, &self.minmax(), Face::Regular, if big { 12.0 } else { 11.0 }, MUTED, Anchor::RA, None);
+            }
+            None => {
+                c.text(W - pad, 40.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
+            }
+        }
+    }
+
+    /// Faixa de horas com colunas largas: hora, ícone e temperatura (no grande, a chance de chuva
+    /// pequena e azul embaixo do ícone, só quando relevante).
+    fn draw_hours(&self, c: &mut Canvas, mode: Mode) {
+        let list = self.next_hours();
+        if list.is_empty() {
+            return;
+        }
+        let (big, y) = (mode == Mode::G, main_hours_y(mode));
+        let off = self.main_scroll.shown();
+        let (x0, x1) = main_strip_bounds(mode);
+        let col = (x1 - x0) / HOURS as f32;
+        let icon = if big { 24.0 } else { 22.0 };
+        let (icon_y, temp_y) = if big { (17.0, 52.0) } else { (16.0, 43.0) };
+        c.push_round_clip(x0, y - 2.0, x1, y + temp_y + 18.0, 0.0);
+        let first = (off.floor() as usize).saturating_sub(1);
+        for (i, h) in list.iter().enumerate().skip(first).take(HOURS + 2) {
+            let cx = x0 + col * (i as f32 - off + 0.5);
+            let label = h[0].as_str().unwrap_or("");
+            c.text(cx, y, label, if label == "Agora" { Face::Semibold } else { Face::Regular }, 10.5, if label == "Agora" { FG } else { MUTED }, Anchor::MA, None);
+            c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + icon_y);
+            let pop = h[4].as_i64().unwrap_or(0);
+            if big && pop >= 20 {
+                c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
+            }
+            c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None);
+        }
+        c.pop_clip();
+    }
+
+    /// Dias do grande: linhas altas, com o ícone (e a chance de chuva) numa coluna própria.
+    fn draw_days(&self, c: &mut Canvas) {
         let days = self.weather.as_ref().and_then(|w| w["days"].as_array().cloned()).unwrap_or_default();
-        let days: Vec<Value> = days.into_iter().take(count).collect();
+        let infos = self.list("day_info");
+        let days: Vec<Value> = days.into_iter().take(G_DAYS).collect();
         if days.is_empty() {
             return;
         }
+        let pad = G_PAD;
+        let (y0, row) = self.days_geom();
         let lo = days.iter().filter_map(|d| d[2].as_i64()).min().unwrap_or(0) as f32;
         let hi = days.iter().filter_map(|d| d[3].as_i64()).max().unwrap_or(1) as f32;
         let span = (hi - lo).max(1.0);
-        let (bx0, bx1) = (128.0, W - PAD - 34.0);
+        let (bx0, bx1) = (146.0, W - pad - 40.0);
         for (i, d) in days.iter().enumerate() {
-            let y = y0 + DAY_H * i as f32;
-            let cy = y + DAY_H / 2.0;
-            c.hline_px(PAD, W - PAD, y, WHITE.alpha(0.12));
+            let cy = y0 + row * i as f32 + row / 2.0;
+            if i > 0 {
+                c.hline_px(pad, W - pad, y0 + row * i as f32, WHITE.alpha(0.09));
+            }
             let name = capitalize(d[0].as_str().unwrap_or(""));
-            c.text(PAD, cy, &name, if i == 0 { Face::Semibold } else { Face::Regular }, 12.5, FG, Anchor::LM, None);
-            let icon = 22.0;
-            c.image(&weather_art(d[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), 76.0 - icon / 2.0, cy - icon / 2.0);
+            c.text(pad, cy, &name, if i == 0 { Face::Semibold } else { Face::Regular }, 13.5, FG, Anchor::LM, None);
+            let icon = 24.0;
+            let pop = infos.get(i).and_then(|x| x.i64_of("pop")).unwrap_or(0);
+            let icon_cy = if pop >= 30 { cy - 5.0 } else { cy };
+            c.image(&weather_art(d[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), 88.0 - icon / 2.0, icon_cy - icon / 2.0);
+            if pop >= 30 {
+                c.text(88.0, icon_cy + icon / 2.0 + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
+            }
             let (mn, mx) = (d[2].as_i64().unwrap_or(0) as f32, d[3].as_i64().unwrap_or(0) as f32);
-            c.text(bx0 - 8.0, cy, &format!("{mn}°"), Face::Regular, 12.5, MUTED, Anchor::RM, None);
-            c.text(W - PAD, cy, &format!("{mx}°"), Face::Semibold, 12.5, FG, Anchor::RM, None);
-            c.fill_round_rect(bx0, cy - 2.5, bx1, cy + 2.5, 2.5, Rgba(0, 0, 0, 60));
+            c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Regular, 13.0, MUTED, Anchor::RM, None);
+            c.text(W - pad, cy, &format!("{mx}°"), Face::Semibold, 13.0, FG, Anchor::RM, None);
+            c.fill_round_rect(bx0, cy - 2.5, bx1, cy + 2.5, 2.5, Rgba(0, 0, 0, 55));
             let (a, b) = (bx0 + (bx1 - bx0) * (mn - lo) / span, bx0 + (bx1 - bx0) * (mx - lo) / span);
             c.gradient_h(a, cy - 2.5, b.max(a + 5.0), cy + 2.5, 2.5, &[(0.0, Rgba::rgb(90, 200, 250)), (0.6, Rgba::rgb(255, 214, 10)), (1.0, Rgba::rgb(255, 159, 10))], bx0, bx1);
             if i == 0 {
                 if let Some(t) = self.weather.as_ref().and_then(|w| w.i64_of("temp")) {
                     let x = bx0 + (bx1 - bx0) * ((t as f32 - lo) / span).clamp(0.0, 1.0);
-                    c.fill_circle(x, cy, 4.5, Rgba(0, 0, 0, 90));
-                    c.fill_circle(x, cy, 3.2, WHITE);
+                    c.fill_circle(x, cy, 5.0, Rgba(0, 0, 0, 90));
+                    c.fill_circle(x, cy, 3.4, WHITE);
                 }
             }
         }
     }
 
-    /// Pequeno (quadrado): cidade, temperatura grande e, embaixo, ícone, condição e máx./mín.
+    /// Pequeno: a mesma ordem, com mais ar entre a temperatura e a condição.
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
-        let (x, w) = (14.0, SMALL - 28.0);
-        c.text(x, 14.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 30.0));
-        c.text(x - 3.0, 28.0, &self.temp_text(), Face::Light, 42.0, FG, Anchor::LA, None);
+        let (x, w) = (16.0, SMALL - 32.0);
+        c.text(x, 16.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 28.0));
+        c.text(x - 3.0, 29.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
-                let size = 26.0;
-                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), SMALL - 14.0 - size, 10.0);
+                let size = 22.0;
+                c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), SMALL - 16.0 - size, 14.0);
                 c.text(x, 104.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
-                c.text(x, 122.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
+                c.text(x, 121.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
             }
             None => {
                 for (k, line) in c.wrap(&self.weather_msg, Face::Semibold, 12.0, w, 3).iter().enumerate() {
@@ -1017,6 +1063,40 @@ impl Tempo {
                 }
             }
         }
+    }
+
+    fn draw_main(&self, c: &mut Canvas, mode: Mode, env: &Env) {
+        match mode {
+            Mode::P => self.draw_compact(c, env),
+            Mode::M => {
+                self.draw_top(c, env, false);
+                self.draw_hours(c, mode);
+            }
+            Mode::G => {
+                self.draw_top(c, env, true);
+                self.draw_hours(c, mode);
+                c.hline_px(G_PAD, W - G_PAD, G_RULE_Y, WHITE.alpha(0.14));
+                // o aviso de chuva, quando há, numa linha discreta (sem caixa)
+                if let Some(text) = self.rain_line() {
+                    let cy = (G_RAIN.0 + G_RAIN.1) / 2.0;
+                    c.text(G_PAD, cy, "\u{e753}", Face::Icons, 11.0, RAIN_BLUE, Anchor::LM, None);
+                    c.text(G_PAD + 18.0, cy, &text, Face::Regular, 11.5, FG.alpha(0.85), Anchor::LM, Some(W - 2.0 * G_PAD - 18.0));
+                    c.hline_px(G_PAD, W - G_PAD, G_RAIN.1, WHITE.alpha(0.09));
+                }
+                self.draw_days(c);
+            }
+        }
+    }
+
+    /// O aviso de chuva das próximas horas, quando há.
+    fn rain_line(&self) -> Option<String> {
+        self.weather.as_ref().and_then(|w| w.str_of("rain_line").map(String::from))
+    }
+
+    /// Grande: onde começam os dias e a altura de cada linha (abaixo do aviso de chuva, se houver).
+    fn days_geom(&self) -> (f32, f32) {
+        let top = if self.rain_line().is_some() { G_RAIN.1 + 2.0 } else { G_RULE_Y + 8.0 };
+        (top, (LARGE_H - 14.0 - top) / G_DAYS as f32)
     }
 
     fn draw_button(c: &mut Canvas, r: Rect4, left: bool, enabled: bool) {
@@ -1342,6 +1422,20 @@ impl Tempo {
     }
 }
 
+/// Tela principal: onde fica a faixa de horas, a altura dela e as pontas das colunas.
+fn main_hours_y(mode: Mode) -> f32 {
+    if mode == Mode::G { G_HOURS_Y } else { M_HOURS_Y }
+}
+
+fn main_strip_h(mode: Mode) -> f32 {
+    if mode == Mode::G { 70.0 } else { 60.0 }
+}
+
+fn main_strip_bounds(mode: Mode) -> (f32, f32) {
+    let pad = if mode == Mode::G { G_PAD } else { M_PAD };
+    (pad - 2.0, W - pad + 2.0)
+}
+
 /// "São José dos Pinhais" de "São José dos Pinhais, Paraná".
 fn short_city(city: &str) -> String {
     city.split(',').next().unwrap_or(city).trim().to_string()
@@ -1390,23 +1484,7 @@ impl Kind for Tempo {
             View::Day(d) if self.navigable() => return self.draw_day(c, mode, d),
             _ => {}
         }
-        match mode {
-            Mode::P => self.draw_compact(c, env),
-            Mode::M => {
-                self.draw_top(c, env);
-                self.draw_strip(c, &self.next_hours(), HOURS_Y, self.main_scroll.shown());
-            }
-            Mode::G => {
-                self.draw_top(c, env);
-                self.draw_strip(c, &self.next_hours(), HOURS_Y, self.main_scroll.shown());
-                let line = self.weather.as_ref().and_then(|w| w.str_of("rain_line").map(String::from).or(w.str_of("details").map(String::from)));
-                if let Some(text) = line {
-                    c.fill_round_rect(PAD - 4.0, G_LINE_Y, W - PAD + 4.0, G_LINE_Y + 26.0, 9.0, Rgba(0, 0, 0, 46));
-                    c.text(PAD + 6.0, G_LINE_Y + 13.0, &text, Face::Regular, 11.5, FG, Anchor::LM, Some(W - 2.0 * PAD - 12.0));
-                }
-                self.draw_days(c, G_DAYS_Y, G_DAYS);
-            }
-        }
+        self.draw_main(c, mode, env);
     }
 
     /// Chuva ou neve caindo por cima do céu (as gotas são calculadas pela hora: sem estado).
@@ -1463,19 +1541,23 @@ impl Kind for Tempo {
                 if mode == Mode::P {
                     return Some(DETAILS);
                 }
-                let hours = self.next_hours();
-                if let Some(a) = self.strip_hit(x, y, HOURS_Y, hours.len(), self.main_scroll.shown(), true) {
-                    return Some(a);
-                }
-                if y < HOURS_Y - 4.0 {
+                let hy = main_hours_y(mode);
+                if y < hy - 4.0 {
                     return Some(DETAILS);
                 }
+                if y < hy + main_strip_h(mode) {
+                    let (x0, x1) = main_strip_bounds(mode);
+                    let i = ((x - x0) / ((x1 - x0) / HOURS as f32) + self.main_scroll.shown()).floor();
+                    let len = self.next_hours().len();
+                    return (x >= x0 && x <= x1 && i >= 0.0 && (i as usize) < len).then_some(HOUR + i as u32);
+                }
                 if mode == Mode::G {
-                    if (G_LINE_Y..G_LINE_Y + 26.0).contains(&y) {
+                    if self.rain_line().is_some() && (G_RAIN.0..G_RAIN.1).contains(&y) {
                         return Some(DETAILS);
                     }
-                    if y >= G_DAYS_Y {
-                        let i = ((y - G_DAYS_Y) / DAY_H) as usize;
+                    let (top, row) = self.days_geom();
+                    if y >= top {
+                        let i = ((y - top) / row) as usize;
                         return (i < G_DAYS.min(self.day_count())).then_some(DAY + i as u32);
                     }
                 }
@@ -1554,7 +1636,7 @@ impl Kind for Tempo {
         }
         match self.view_for(mode) {
             // na tela principal, a roda rola as horas (no grande, só em cima da faixa)
-            View::Main if mode == Mode::M || (mode == Mode::G && y < G_LINE_Y) => self.wheel_hours(steps),
+            View::Main if mode == Mode::M || (mode == Mode::G && y < G_RULE_Y) => self.wheel_hours(steps),
             View::Day(_) => self.wheel_hours(steps),
             View::Details if Self::pages(mode) > 1 => {
                 self.page_wheel -= steps;
@@ -1585,22 +1667,20 @@ impl Kind for Tempo {
         let action = self.hit(x, y, mode, env)?;
         match self.view_for(mode) {
             View::Main if mode != Mode::P => match action {
-                DETAILS if y < HOURS_Y => hot((PAD - 8.0, 6.0, W - PAD + 8.0, HOURS_Y - 4.0), 14.0),
-                DETAILS => hot((PAD - 4.0, G_LINE_Y, W - PAD + 4.0, G_LINE_Y + 26.0), 9.0),
+                DETAILS if y < main_hours_y(mode) => hot((8.0, 6.0, W - 8.0, main_hours_y(mode) - 4.0), 14.0),
+                DETAILS => hot((G_PAD - 6.0, G_RAIN.0 + 1.0, W - G_PAD + 6.0, G_RAIN.1 - 1.0), 8.0),
                 a if (DAY..DAY + 10).contains(&a) => {
-                    let y0 = G_DAYS_Y + DAY_H * (a - DAY) as f32;
-                    hot((PAD - 8.0, y0 + 1.0, W - PAD + 8.0, y0 + DAY_H - 1.0), 8.0)
+                    let (top, row) = self.days_geom();
+                    let y0 = top + row * (a - DAY) as f32;
+                    hot((G_PAD - 8.0, y0 + 2.0, W - G_PAD + 8.0, y0 + row - 2.0), 10.0)
                 }
                 a if (HOUR..HOUR + NEXT_HOURS as u32).contains(&a) => {
-                    let (x0, x1) = Self::strip_bounds();
+                    let (x0, x1) = main_strip_bounds(mode);
                     let col = (x1 - x0) / HOURS as f32;
                     let i = (a - HOUR) as f32;
                     let cx = x0 + col * (i - self.main_scroll.shown() + 0.5);
-                    hot((cx - col / 2.0 + 2.0, HOURS_Y - 3.0, cx + col / 2.0 - 2.0, HOURS_Y + STRIP_H - 2.0), 10.0)
-                }
-                SCROLL_BACK | SCROLL_FWD => {
-                    let (l, r) = Self::chevron_rects(HOURS_Y);
-                    hot(if action == SCROLL_BACK { l } else { r }, 6.0)
+                    let hy = main_hours_y(mode);
+                    hot((cx - col / 2.0 + 2.0, hy - 4.0, cx + col / 2.0 - 2.0, hy + main_strip_h(mode) - 2.0), 10.0)
                 }
                 _ => None,
             },
@@ -1623,7 +1703,7 @@ impl Kind for Tempo {
     }
 
     fn hover_style(&self, x: f32, y: f32, mode: Mode, env: &Env) -> super::HoverStyle {
-        if self.hit(x, y, mode, env) == Some(DETAILS) && y < HOURS_Y { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
+        if self.hit(x, y, mode, env) == Some(DETAILS) && y < main_hours_y(mode) { super::HoverStyle::Quiet } else { super::HoverStyle::Surface }
     }
 
     fn tooltip(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<String> {
@@ -1869,6 +1949,30 @@ mod tests {
         assert!(t.tick(&mut ctx), "quadro final");
         assert!(!t.tick(&mut ctx));
         assert_eq!(t.tile_in(5), 1.0);
+    }
+
+    #[test]
+    fn clicks_match_the_drawing() {
+        let cfg = json!({"tempo": {"city": "Florianópolis"}, "app": {"atalhos_clique": true}});
+        let env = Env { cfg: &cfg, key: "tempo" };
+        for mode in [Mode::M, Mode::G] {
+            let t = Tempo::sample("inicio", 0, 0.0, mode);
+            // o topo abre os detalhes; cada coluna da faixa é a sua hora
+            assert_eq!(t.hit(60.0, 40.0, mode, &env), Some(DETAILS), "{mode:?}");
+            let (x0, x1) = main_strip_bounds(mode);
+            let col = (x1 - x0) / HOURS as f32;
+            for i in 0..HOURS {
+                let x = x0 + col * (i as f32 + 0.5);
+                assert_eq!(t.hit(x, main_hours_y(mode) + 30.0, mode, &env), Some(HOUR + i as u32), "{mode:?} hora {i}");
+            }
+        }
+        // grande: cada linha desenhada é o seu dia
+        let t = Tempo::sample("inicio", 0, 0.0, Mode::G);
+        let (top, row) = t.days_geom();
+        assert!(top + row * G_DAYS as f32 <= LARGE_H - 12.0);
+        for i in 0..G_DAYS {
+            assert_eq!(t.hit(160.0, top + row * (i as f32 + 0.5), Mode::G, &env), Some(DAY + i as u32), "dia {i}");
+        }
     }
 
     #[test]
