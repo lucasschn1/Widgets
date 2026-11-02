@@ -391,26 +391,41 @@ impl App {
                 (_, Mode::G) => Some(448.0),
             }
         };
-        for i in 0..self.cards.len() {
-            let (key, mode) = (self.cards[i].key(), self.cards[i].mode);
-            if self.cards[i].temp {
-                continue;
-            }
-            let now_h = self.cards[i].layout(mode).h;
-            let w = &self.sh.cfg[key];
-            let old_h = match (w.f64_of("altura"), w.str_of("altura_tamanho")) {
-                (Some(h), Some(m)) if m == mode.code() => Some(h as f32),
-                (Some(_), Some(_)) => v36(key, mode),
-                // antes da 3.6, os que não estão na lista já tinham a altura da 3.6
-                _ => legacy(key, mode).or(v36(key, mode)),
-            };
-            if let Some(old_h) = old_h.filter(|h| (h - now_h).abs() > 0.5) {
-                let card = &self.cards[i];
-                let (cw, _) = card.card_size();
-                let old = card.card_rect_at(card.pos, Some((cw, (old_h * card.s).round() as i32)));
-                let new = card.card_rect();
-                let start = self.stack_below(i, Some(old)).into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + new.3 - old.3))).collect();
+        // a altura de antes de cada um (None: não mudou, ou não havia)
+        let olds: Vec<Option<f32>> = (0..self.cards.len())
+            .map(|i| {
+                let (key, mode) = (self.cards[i].key(), self.cards[i].mode);
+                let w = &self.sh.cfg[key];
+                let old_h = match (w.f64_of("altura"), w.str_of("altura_tamanho")) {
+                    // nunca esteve na tela (instalação nova ou widget aberto agora): não havia altura antes
+                    _ if self.cards[i].temp || w.get("x").is_none() => None,
+                    (Some(h), Some(m)) if m == mode.code() => Some(h as f32),
+                    (Some(_), Some(_)) => v36(key, mode),
+                    // antes da 3.6, os que não estão na lista já tinham a altura da 3.6
+                    _ => legacy(key, mode).or(v36(key, mode)),
+                };
+                old_h.filter(|h| (h - self.cards[i].layout(mode).h).abs() > 0.5)
+            })
+            .collect();
+        // onde cada um estava, com a altura de antes: quem está encaixado embaixo de quem se mede
+        // assim, até cada um ser acertado
+        let mut was: Vec<Rect> = self
+            .cards
+            .iter()
+            .zip(&olds)
+            .map(|(c, h)| c.card_rect_at(c.pos, h.map(|h| (c.card_size().0, (h * c.s).round() as i32))))
+            .collect();
+        // de cima para baixo: quem está em cima abre espaço primeiro e leva junto os de baixo
+        let mut order: Vec<usize> = (0..self.cards.len()).collect();
+        order.sort_by_key(|&i| (self.cards[i].pos.1, self.cards[i].pos.0));
+        for i in order {
+            if olds[i].is_some() {
+                let (old, new) = (was[i], self.cards[i].card_rect());
+                let limit = ((WIDGET_GAP + 8.0) * self.cards[i].s) as i32;
+                let start = stack_in(&was, i, old, limit).into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + new.3 - old.3))).collect();
                 for (j, to) in self.make_room(i, old, new, start) {
+                    let (dx, dy) = (to.0 - self.cards[j].pos.0, to.1 - self.cards[j].pos.1);
+                    was[j] = (was[j].0 + dx, was[j].1 + dy, was[j].2 + dx, was[j].3 + dy);
                     self.cards[j].pos = to;
                     self.cards[j].present(&self.sh, true);
                     let k = self.cards[j].key();
@@ -418,8 +433,12 @@ impl App {
                     wj.insert("x".into(), json!(to.0));
                     wj.insert("y".into(), json!(to.1));
                 }
+                was[i] = new;
             }
-            widgets::store_size(self.sh.cfg.obj_mut(key), mode);
+            if !self.cards[i].temp {
+                let (key, mode) = (self.cards[i].key(), self.cards[i].mode);
+                widgets::store_size(self.sh.cfg.obj_mut(key), mode);
+            }
         }
     }
 
@@ -490,22 +509,8 @@ impl App {
     /// Widgets empilhados embaixo do retângulo (encaixados um no outro), em cadeia.
     fn stack_below(&self, i: usize, rect: Option<Rect>) -> Vec<usize> {
         let limit = ((WIDGET_GAP + 8.0) * self.cards[i].s) as i32;
-        let mut stack = Vec::new();
-        let mut frontier = vec![rect.unwrap_or_else(|| self.cards[i].card_rect())];
-        while let Some(top_rect) = frontier.pop() {
-            for (j, other) in self.cards.iter().enumerate() {
-                if j == i || stack.contains(&j) {
-                    continue;
-                }
-                let r = other.card_rect();
-                let gap = r.1 - top_rect.3;
-                if (0..=limit).contains(&gap) && win::overlap(top_rect, r).0 > 0 {
-                    stack.push(j);
-                    frontier.push(r);
-                }
-            }
-        }
-        stack
+        let rects: Vec<Rect> = self.cards.iter().map(|c| c.card_rect()).collect();
+        stack_in(&rects, i, rect.unwrap_or(rects[i]), limit)
     }
 
     /// Depois de mudar de lugar: guarda a posição e confere a escala do monitor.
@@ -1920,3 +1925,23 @@ impl App {
 
 #[allow(dead_code)]
 fn unused(_: HWND, _: Value) {}
+
+/// Os cartões (dos retângulos `rects`) empilhados embaixo de `top`, que é o do cartão `i`:
+/// encaixados um no outro (a até `limit` pixels), em cadeia.
+fn stack_in(rects: &[Rect], i: usize, top: Rect, limit: i32) -> Vec<usize> {
+    let mut stack = Vec::new();
+    let mut frontier = vec![top];
+    while let Some(top_rect) = frontier.pop() {
+        for (j, &r) in rects.iter().enumerate() {
+            if j == i || stack.contains(&j) {
+                continue;
+            }
+            let gap = r.1 - top_rect.3;
+            if (0..=limit).contains(&gap) && win::overlap(top_rect, r).0 > 0 {
+                stack.push(j);
+                frontier.push(r);
+            }
+        }
+    }
+    stack
+}
