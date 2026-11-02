@@ -23,6 +23,7 @@ macro_rules! debug_log {
 
 pub(crate) mod app;
 mod backdrop;
+mod claude_usage;
 mod card;
 mod config;
 mod drawing;
@@ -71,6 +72,11 @@ fn already_running() -> bool {
 }
 
 fn main() {
+    // chamado pelo Claude Code como linha de status: responde e sai (sem abrir os widgets)
+    if std::env::args().nth(1).as_deref() == Some(claude_usage::FLAG) {
+        claude_usage::run_status_line();
+        return;
+    }
     if already_running() {
         return;
     }
