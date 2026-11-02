@@ -540,9 +540,6 @@ impl Kind for System {
     fn title(&self) -> &'static str {
         "Sistema"
     }
-    fn default_mode(&self) -> Mode {
-        Mode::M
-    }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         if self.mode_seen.get() != mode {

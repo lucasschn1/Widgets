@@ -498,7 +498,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
         ui.button("mostrar", x + w - 14.0, y + 12.0, "Mostrar na tela", A::Visible(key, true), "primary", 'r', None, None);
         y += 56.0 + 22.0;
     }
-    let current = v.modes.get(key).copied().or_else(|| wcfg.str_of("tamanho").and_then(Mode::from_code)).unwrap_or(Mode::G);
+    let current = v.modes.get(key).copied().or_else(|| wcfg.str_of("tamanho").and_then(Mode::from_code)).unwrap_or(widgets::DEFAULT_MODE);
     let sizes: Vec<(String, String)> = Mode::ALL.iter().map(|m| (m.code().to_string(), m.name().to_string())).collect();
     let y = section(ui, x, y, "Visual");
     let y = rows(ui, x, y, w, vec![Row(

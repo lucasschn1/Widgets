@@ -49,10 +49,10 @@ pub const HOVER_COLLAPSE_MS: u64 = 350; // e fecha pouco depois de o mouse sair
 pub const REORDER_MS: u64 = 180;
 
 // vidro: o papel de parede atrás do cartão, desfocado, mais saturado e escurecido
-pub const BLUR: f64 = 26.0;
+pub const BLUR: f64 = 12.0;
 pub const SATURATION: f32 = 1.6;
 pub const TINT: (u8, u8, u8) = (18, 18, 24);
-pub const TINT_AMOUNT: f64 = 0.40;
+pub const TINT_AMOUNT: f64 = 0.57;
 pub const SHEEN: f32 = 0.12; // reflexo branco no topo do vidro
 pub const EDGE: (f32, f32) = (0.42, 0.07); // opacidade da borda clara, no topo e na base
 

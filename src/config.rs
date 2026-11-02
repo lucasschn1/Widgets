@@ -34,6 +34,8 @@ pub fn load_config(widget_keys: &[&str]) -> Value {
     }
     let mut cfg = read_json(&dir.join("config.json"));
     let map = cfg.as_object_mut().unwrap();
+    // instalação nova: ainda não há nada guardado (as opções e posições nascem dos padrões)
+    let existing = !map.is_empty();
     split_weather(map);
     for key in widget_keys {
         if !map.get(*key).is_some_and(Value::is_object) {
@@ -43,7 +45,41 @@ pub fn load_config(widget_keys: &[&str]) -> Value {
     if !map.get("app").is_some_and(Value::is_object) {
         map.insert("app".into(), json!({}));
     }
+    keep_old_defaults(map, existing);
     cfg
+}
+
+/// Versão dos padrões das opções (ver `default_setting` e widgets::DEFAULT_MODE).
+const DEFAULTS_VERSION: i64 = 2;
+
+/// Versão 3.7: os padrões mudaram (vidro com 12 px de desfoque e 57% de escurecimento, sem
+/// esmaecer, animações sempre ligadas e todos os widgets no tamanho médio). Uma opção que o
+/// usuário deixou no padrão não fica gravada, então quem já usava o app passaria a ver os padrões
+/// novos sem ter mudado nada: para essas instalações, os padrões antigos são gravados como
+/// escolhas, uma vez só. Instalações novas ficam com os padrões novos.
+fn keep_old_defaults(map: &mut Map<String, Value>, existing: bool) {
+    let app = map.get_mut("app").and_then(Value::as_object_mut).unwrap();
+    if app.get("padroes").and_then(Value::as_i64).unwrap_or(0) >= DEFAULTS_VERSION {
+        return;
+    }
+    app.insert("padroes".into(), json!(DEFAULTS_VERSION));
+    if !existing {
+        return;
+    }
+    let old = [("desfoque", json!(26.0)), ("escurecimento", json!(0.40)), ("esmaecer", json!(true)), ("animacoes", json!("auto"))];
+    for (name, value) in old {
+        if app.get(name).is_none_or(Value::is_null) {
+            app.insert(name.into(), value);
+        }
+    }
+    // até a 3.6, só o Tempo, o Sistema e o Pomodoro nasciam no tamanho médio
+    for key in ["midia", "github"] {
+        if let Some(w) = map.get_mut(key).and_then(Value::as_object_mut) {
+            if !w.contains_key("tamanho") && !w.contains_key("compact") {
+                w.insert("tamanho".into(), json!("g"));
+            }
+        }
+    }
 }
 
 /// Versão 3.1: o "Clima e Sistema" virou dois widgets. O Tempo fica no lugar dele, com a cidade;
@@ -97,15 +133,16 @@ pub fn save_cache(cache: &Value) {
     }
 }
 
-/// Valores padrão das opções gerais (cfg["app"]).
+/// Valores padrão das opções gerais (cfg["app"]): os de uma instalação nova.
 pub fn default_setting(name: &str) -> Value {
     match name {
         "desfoque" => json!(crate::theme::BLUR),
         "escurecimento" => json!(crate::theme::TINT_AMOUNT),
         "texto" => json!(0.0), // 0 = seguir o Windows
-        "esmaecer" | "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
+        "esmaecer" => json!(false),
+        "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
         "opacidade_ociosa" => json!(0.8),
-        "animacoes" => json!("auto"),
+        "animacoes" => json!("sempre"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true}),
         _ => Value::Null,
     }

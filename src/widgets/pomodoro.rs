@@ -393,9 +393,6 @@ impl Kind for Pomodoro {
     fn title(&self) -> &'static str {
         "Pomodoro"
     }
-    fn default_mode(&self) -> Mode {
-        Mode::M
-    }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         let wcfg = env.wcfg();

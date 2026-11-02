@@ -38,6 +38,18 @@ pub const LARGE_RADIUS: f32 = 28.0;
 /// Altura da antiga "pílula" pequena (até a versão 3.1), para acertar os layouts.
 pub const OLD_SMALL_H: f32 = 64.0;
 
+/// Tamanho com que um widget aparece pela primeira vez.
+pub const DEFAULT_MODE: Mode = Mode::M;
+
+/// Arrumação da primeira vez: colunas a partir da borda direita da tela, cada uma de cima para
+/// baixo. Um widget aberto depois vai para baixo dos da coluna dele (ou começa a coluna dele).
+pub const FIRST_LAYOUT: &[&[&str]] = &[&["sistema", "pomodoro", "github", "tempo"], &["midia"]];
+
+/// Coluna do widget na arrumação da primeira vez.
+pub fn first_column(key: &str) -> usize {
+    FIRST_LAYOUT.iter().position(|col| col.contains(&key)).unwrap_or(0)
+}
+
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
 pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro"];
 
@@ -280,7 +292,7 @@ pub trait Kind {
         &Mode::ALL
     }
     fn default_mode(&self) -> Mode {
-        Mode::G
+        DEFAULT_MODE
     }
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);

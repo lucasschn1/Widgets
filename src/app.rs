@@ -193,8 +193,14 @@ impl App {
             quit: false,
         };
         let screens_change = app.begin_screens_startup();
-        let visible: Vec<&str> =
-            widgets::KEYS.iter().copied().filter(|k| app.sh.cfg[*k].bool_of("visible").unwrap_or(true)).collect();
+        // na ordem da arrumação da primeira vez (para quem ainda não tem posição guardada)
+        let order = widgets::FIRST_LAYOUT.iter().flat_map(|col| col.iter().copied()).chain(widgets::KEYS.iter().copied());
+        let mut visible: Vec<&str> = Vec::new();
+        for key in order.filter(|k| widgets::KEYS.contains(k) && app.sh.cfg[*k].bool_of("visible").unwrap_or(true)) {
+            if !visible.contains(&key) {
+                visible.push(key);
+            }
+        }
         for key in visible {
             app.create_card(key, true);
         }
@@ -480,7 +486,8 @@ impl App {
         }
     }
 
-    /// Onde um widget novo aparece: embaixo do mais baixo, ou numa coluna nova à esquerda.
+    /// Onde um widget novo aparece: embaixo do mais baixo da coluna dele na arrumação da primeira
+    /// vez (widgets::FIRST_LAYOUT), ou numa coluna nova à esquerda.
     fn default_pos(&self, card: &Card) -> (i32, i32) {
         let s = card.s;
         let (w, h) = card.size();
@@ -490,14 +497,28 @@ impl App {
             let edge = (EDGE_GAP * s).round() as i32;
             return (right - edge - (w - 2 * m) - m, top + edge - m);
         }
-        let lowest = self.cards.iter().max_by_key(|c| c.card_rect().3).unwrap();
+        let col = widgets::first_column(card.key());
+        let bottom_of = |c: &&Card| c.card_rect().3;
+        let lowest = match self.cards.iter().filter(|c| widgets::first_column(c.key()) == col).max_by_key(bottom_of) {
+            Some(c) => c,
+            // o primeiro da coluna dele: começa uma coluna nova
+            None if col > 0 => return self.new_column_pos(card),
+            None => self.cards.iter().max_by_key(bottom_of).unwrap(),
+        };
         let (x, y) = card.below(lowest);
-        let (_, top, _, bottom) = win::area_for(lowest.card_rect());
+        let (_, _, _, bottom) = win::area_for(lowest.card_rect());
         if y + h - m <= bottom - (EDGE_GAP * s) as i32 {
             return (x, y);
         }
-        let left = self.cards.iter().map(|c| c.card_rect().0).min().unwrap();
-        (left - (WIDGET_GAP * s).round() as i32 - (w - 2 * m) - m, top + (EDGE_GAP * s).round() as i32 - m)
+        self.new_column_pos(card)
+    }
+
+    /// No alto de uma coluna nova, à esquerda de todos os widgets.
+    fn new_column_pos(&self, card: &Card) -> (i32, i32) {
+        let (s, (w, _), m) = (card.s, card.size(), card.margin);
+        let leftmost = self.cards.iter().min_by_key(|c| c.card_rect().0).unwrap();
+        let (_, top, _, _) = win::area_for(leftmost.card_rect());
+        (leftmost.card_rect().0 - (WIDGET_GAP * s).round() as i32 - (w - 2 * m) - m, top + (EDGE_GAP * s).round() as i32 - m)
     }
 
     fn send_to_back(&self, i: usize) {
@@ -1276,7 +1297,7 @@ impl App {
                 continue;
             }
             let (mut x, mut y) = (state.i64_of("x").unwrap_or(0) as i32, state.i64_of("y").unwrap_or(0) as i32);
-            let mode = state.str_of("tamanho").and_then(Mode::from_code).unwrap_or(Mode::G);
+            let mode = state.str_of("tamanho").and_then(Mode::from_code).unwrap_or(widgets::DEFAULT_MODE);
             if let Some(&(_, pos, s)) = moves.iter().find(|m| m.0 == key) {
                 (x, y) = pos;
                 if let Some(i) = self.find(key) {

@@ -1225,9 +1225,6 @@ impl Kind for Tempo {
     fn title(&self) -> &'static str {
         "Tempo"
     }
-    fn default_mode(&self) -> Mode {
-        Mode::M
-    }
 
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         if self.mode_seen.get() != mode {
