@@ -541,3 +541,36 @@ fn claude_widget_images() {
     }
 }
 
+
+/// Quadros da animação do "Uso do Claude": os arcos subindo até passar de 90% e o pulso da
+/// ponta, a cada 40 ms (para montar um GIF).
+///   MOCK_OUT=pasta cargo test claude_widget_anim -- --ignored
+#[test]
+#[ignore]
+fn claude_widget_anim() {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+    }
+    use crate::widgets::claude::Claude;
+    let out = std::env::var("MOCK_OUT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("anim");
+    std::fs::create_dir_all(&out).unwrap();
+    let cfg = empty_cfg();
+    let gap = (WIDGET_GAP * S).round() as i32;
+    let mut wall = None;
+    for (k, ms) in (0..=2200u64).step_by(40).enumerate() {
+        let (g, gr) = content(&Claude::sample_growing(0.35, ms), Mode::G, &cfg);
+        let (m, mr) = content(&Claude::sample_growing(0.35, ms), Mode::M, &cfg);
+        let (p, pr) = content(&Claude::sample_growing(0.35, ms), Mode::P, &cfg);
+        let x2 = 40 + g.w as i32 + gap;
+        let (gh, mh, ph, mw) = (g.h as i32, m.h as i32, p.h as i32, m.w as i32);
+        let (w, h) = ((x2 + mw + 40) as u32, (40 + gh.max(mh + gap + ph) + 40) as u32);
+        let items = vec![Item { img: g, radius: gr, x: 40, y: 40 }, Item { img: m, radius: mr, x: x2, y: 40 }, Item { img: p, radius: pr, x: x2, y: 40 + mh + gap }];
+        let (wall, bd) = wall.get_or_insert_with(|| {
+            let wall = wallpaper(w, h);
+            let bd = Backdrop::from_picture(&wall, BLUR, S);
+            (wall, bd)
+        });
+        gfx::save_png(&compose(wall, bd, &items, &[]), &out.join(format!("{k:03}.png"))).unwrap();
+    }
+    println!("{}", out.display());
+}

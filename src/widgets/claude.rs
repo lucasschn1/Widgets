@@ -1,32 +1,28 @@
-//! Widget "Uso do Claude": quanto da sessão de 5 horas e da semana do Claude já foi usado, em
-//! dois medidores de 270° (a sessão por fora, a semana por dentro) com o símbolo do Claude na
-//! abertura de baixo. Os números vêm do Claude Code (ver `claude_usage`).
+//! Widget "Uso do Claude": quanto do limite diário (a sessão de 5 horas) e do semanal do Claude
+//! já foi usado, em medidores de 3/4 de volta com a porcentagem no meio. O pequeno mostra só o
+//! diário; o médio, os dois; o grande, os dois e os dias da semana em que mais se usa. Os números
+//! vêm do Claude Code (ver `claude_usage`).
 //!
-//! Cores próprias, claras: fundo areia, a sessão em caramelo, a semana em quase preto e o texto
-//! em marrom.
+//! No vidro, como os outros widgets, na fonte Outfit e com os medidores em laranja. O arco cresce
+//! aos poucos quando o uso sobe; ao passar de 90%, fica vermelho e a bolinha da ponta dá um pulo.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Status, SMALL, WIDE};
-use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS, SEVEN_DAYS};
+use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS, HISTORY_DAYS};
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::Rgba;
+use crate::theme::{Rgba, FG, MUTED, WHITE};
 use crate::win;
 
 // ---------- cores ----------
-/// fundo
-pub const BG: Rgba = Rgba::rgb(0xE8, 0xD5, 0xB0);
-/// destaque: a sessão e o símbolo
+/// o símbolo do Claude e o botão de conectar
 pub const ACCENT: Rgba = Rgba::rgb(0xD4, 0x95, 0x5A);
-/// a semana e os números
-pub const SECONDARY: Rgba = Rgba::rgb(0x1A, 0x1A, 0x1A);
-/// textos
-pub const BODY: Rgba = Rgba::rgb(0x5A, 0x45, 0x35);
-/// perto do limite (85%) e no limite (95%)
-const ALERT: Rgba = Rgba::rgb(0xB8, 0x4A, 0x2A);
-const ALERT_STRONG: Rgba = Rgba::rgb(0x9E, 0x2A, 0x1E);
-const TRACK: Rgba = Rgba(0x5A, 0x45, 0x35, 36);
+/// os medidores, os ícones e o gráfico dos dias
+pub const ORANGE: Rgba = Rgba::rgb(0xF2, 0x8C, 0x28);
+/// avisos em texto ("Acaba às..."): claro o bastante para ler no vidro
+const ALERT: Rgba = Rgba::rgb(255, 122, 92);
+const TRACK: Rgba = Rgba(255, 255, 255, 30);
 
 // ---------- ações ----------
 pub const CONNECT: u32 = 1;
@@ -34,35 +30,116 @@ pub const DISCONNECT: u32 = 2;
 const OPEN_USAGE: u32 = 3;
 const USAGE_URL: &str = "https://claude.ai/settings/usage";
 
-/// Os medidores vão de 135° (embaixo à esquerda) até 405° (embaixo à direita), pelo alto.
+/// Os medidores são 3/4 de volta, abertos embaixo: de 135° (embaixo à esquerda) a 405°, pelo alto.
 const START: f32 = 135.0;
 const SWEEP: f32 = 270.0;
+/// A partir de quanto o medidor fica vermelho.
+const HOT: f64 = 0.9;
+/// Quanto dura o arco crescendo até o número novo, e a passagem do laranja para o vermelho.
+const GROW_MS: f32 = 900.0;
+const TURN_MS: f32 = 450.0;
+/// O arco acima de 90%.
+const RED: Rgba = Rgba::rgb(0xFF, 0x45, 0x3A);
 
-/// Geometria dos medidores em cada tamanho: centro, raio de fora, raio de dentro, espessura,
-/// tamanho do número e raio do símbolo.
+// ---------- fontes: a Outfit, embutida no app ----------
+/// a porcentagem
+const NUM: Face = Face::Custom("Outfit", 300);
+/// os textos
+const TEXT: Face = Face::Custom("Outfit", 400);
+/// os títulos e o botão
+const BOLD: Face = Face::Custom("Outfit", 600);
+
+/// Intervalo entre os quadros enquanto anima.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// O arco indo de `from` a `to` (uso de 0 a 1), desde `start`.
+#[derive(Clone, Copy, Debug)]
+struct Grow {
+    from: f64,
+    to: f64,
+    start: Instant,
+}
+
+impl Grow {
+    fn elapsed_ms(&self) -> f32 {
+        self.start.elapsed().as_secs_f32() * 1000.0
+    }
+
+    /// O valor agora: sai rápido e chega devagar (curva cúbica).
+    fn value(&self) -> f64 {
+        let t = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
+        self.from + (self.to - self.from) * ease(t)
+    }
+
+    /// Há quantos milissegundos o arco passou de 90%, se ele subiu passando por aí e já passou.
+    fn since_hot(&self) -> Option<f32> {
+        if !(self.from < HOT && self.to >= HOT) {
+            return None;
+        }
+        // quando a curva passa de 90%: o inverso de `ease`
+        let p = (HOT - self.from) / (self.to - self.from);
+        let cross = (1.0 - (1.0 - p).cbrt()) as f32 * GROW_MS;
+        let ms = self.elapsed_ms() - cross;
+        (ms >= 0.0).then_some(ms)
+    }
+
+    fn done(&self) -> bool {
+        self.elapsed_ms() >= GROW_MS + TURN_MS
+    }
+}
+
+/// Sai rápido e chega devagar.
+fn ease(t: f64) -> f64 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Os dois limites.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Limit {
+    /// a sessão de 5 horas: o limite do dia a dia, com o sol
+    Daily,
+    /// a semana, com o calendário
+    Weekly,
+}
+
+impl Limit {
+    fn name(self) -> &'static str {
+        match self {
+            Limit::Daily => "Uso diário",
+            Limit::Weekly => "Uso semanal",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Geometria dos medidores em cada tamanho: raio, espessura, tamanho do número, altura do
+/// centro e onde fica cada medidor (x do centro).
 struct Geom {
-    cx: f32,
-    cy: f32,
-    ro: f32,
-    ri: f32,
+    r: f32,
     w: f32,
     num: f32,
-    mark: f32,
+    cy: f32,
+    gauges: &'static [(Limit, f32)],
 }
+
+const WIDE_Q: f32 = WIDE / 4.0;
 
 fn geom(mode: Mode) -> Geom {
     match mode {
-        Mode::P => Geom { cx: SMALL / 2.0, cy: 78.0, ro: 54.0, ri: 40.0, w: 8.0, num: 26.0, mark: 9.0 },
-        Mode::M => Geom { cx: 80.0, cy: 74.0, ro: 57.0, ri: 42.0, w: 9.0, num: 24.0, mark: 10.0 },
-        Mode::G => Geom { cx: WIDE / 2.0, cy: 150.0, ro: 110.0, ri: 88.0, w: 13.0, num: 58.0, mark: 15.0 },
+        Mode::P => Geom { r: 55.0, w: 10.0, num: 38.0, cy: 79.0, gauges: &[(Limit::Daily, SMALL / 2.0)] },
+        Mode::M => Geom { r: 55.0, w: 10.0, num: 38.0, cy: 79.0, gauges: &[(Limit::Daily, WIDE_Q), (Limit::Weekly, 3.0 * WIDE_Q)] },
+        Mode::G => Geom { r: 57.0, w: 11.0, num: 40.0, cy: 132.0, gauges: &[(Limit::Daily, WIDE_Q), (Limit::Weekly, 3.0 * WIDE_Q)] },
     }
 }
 
 /// Botão "Conectar ao Claude Code" em cada tamanho: (x0, y0, x1, y1).
 fn connect_rect(mode: Mode) -> (f32, f32, f32, f32) {
     match mode {
-        Mode::P => (14.0, SMALL - 40.0, SMALL - 14.0, SMALL - 14.0),
-        Mode::M => (164.0, 96.0, WIDE - 18.0, 124.0),
+        Mode::P => (14.0, SMALL - 38.0, SMALL - 14.0, SMALL - 12.0),
+        Mode::M => (172.0, 96.0, WIDE - 18.0, 124.0),
         Mode::G => (60.0, 360.0, WIDE - 60.0, 394.0),
     }
 }
@@ -85,25 +162,37 @@ pub struct Claude {
     fixed_now: Option<f64>,
     /// minuto do último desenho (os textos de tempo mudam com o relógio)
     minute: RefCell<i64>,
+    /// o arco de cada limite (diário, semanal) crescendo até o número novo
+    grow: [Option<Grow>; 2],
 }
 
 impl Claude {
     pub fn new() -> Claude {
-        let mut c = Claude { view: View { usage: None, link: Link::Off }, seen: None, note: None, due: Instant::now(), fixed_now: None, minute: RefCell::new(0) };
+        let mut c = Claude { view: View { usage: None, link: Link::Off }, seen: None, note: None, due: Instant::now(), fixed_now: None, minute: RefCell::new(0), grow: [None; 2] };
         c.reload(true);
         c
     }
 
-    /// Com números de exemplo (galeria e imagens): sessão em 46% (reinicia em 2 h 15), semana
-    /// em 31% (reinicia daqui a 1 dia).
+    /// Com números de exemplo (galeria e imagens): diário em 46% (reinicia em 2 h 15), semanal
+    /// em 31% (reinicia daqui a 1 dia), e mais uso no meio da semana.
     pub fn sample() -> Claude {
         Claude::sample_with(0.46, 0.31, 2.25 * 3600.0)
     }
 
-    /// Perto do limite: sessão em 88% com 2 h pela frente, semana em 74%.
+    /// Perto do limite: diário em 93% (já com o brilho dos 90%) com 2 h pela frente, semanal em 74%.
     #[cfg(test)]
     pub fn sample_limit() -> Claude {
-        Claude::sample_with(0.88, 0.74, 2.0 * 3600.0)
+        Claude::sample_with(0.93, 0.74, 2.0 * 3600.0)
+    }
+
+    /// No meio da animação: os dois arcos subindo de `from` para 92% (diário) e 64% (semanal),
+    /// `ms` milissegundos depois de começar (para as imagens da animação).
+    #[cfg(test)]
+    pub fn sample_growing(from: f64, ms: u64) -> Claude {
+        let mut c = Claude::sample_with(0.92, 0.64, 2.0 * 3600.0);
+        let start = Instant::now() - Duration::from_millis(ms);
+        c.grow = [Some(Grow { from, to: 0.92, start }), Some(Grow { from: from * 0.7, to: 0.64, start })];
+        c
     }
 
     /// Ainda sem ligação com o Claude Code (o botão de conectar).
@@ -116,12 +205,23 @@ impl Claude {
 
     fn sample_with(session: f64, week: f64, session_left: f64) -> Claude {
         let now = win::now();
+        // quatro semanas de uso, mais forte de terça a quinta e quase nada no domingo
+        const WEEK: [f64; 7] = [1.1, 1.6, 1.9, 1.4, 0.9, 0.35, 0.15];
+        let today = usage::day_number(&win::local_time().iso_date()).unwrap_or(0);
+        let days = (0..HISTORY_DAYS)
+            .map(|k| {
+                let n = today - k;
+                let wobble = 0.9 + 0.2 * ((k * 7 % 5) as f64 / 4.0);
+                (usage::iso_of_day(n), WEEK[usage::weekday(n)] * wobble)
+            })
+            .collect();
         let usage = Usage {
             five_hour: Some(Window { used: session, resets_at: now + session_left }),
             seven_day: Some(Window { used: week, resets_at: now + 0.98 * 86400.0 }),
             updated: now,
+            days,
         };
-        Claude { view: View { usage: Some(usage), link: Link::Connected }, seen: None, note: None, due: Instant::now(), fixed_now: Some(now), minute: RefCell::new(0) }
+        Claude { view: View { usage: Some(usage), link: Link::Connected }, seen: None, note: None, due: Instant::now(), fixed_now: Some(now), minute: RefCell::new(0), grow: [None; 2] }
     }
 
     fn now(&self) -> f64 {
@@ -141,8 +241,32 @@ impl Claude {
             self.note = None;
         }
         let changed = view != self.view;
+        // o arco sai de onde está agora e cresce (ou desce) até o número novo
+        let now = self.now();
+        let before = [Limit::Daily, Limit::Weekly].map(|l| self.shown(l, now).unwrap_or(0.0));
         self.view = view;
+        if changed && self.fixed_now.is_none() && win::animations_enabled() {
+            for (l, from) in [Limit::Daily, Limit::Weekly].into_iter().zip(before) {
+                let to = self.window(l).map_or(0.0, |w| w.used_at(now));
+                if (to - from).abs() > 0.001 {
+                    self.grow[l.index()] = Some(Grow { from, to, start: Instant::now() });
+                }
+            }
+        }
         changed
+    }
+
+    /// O uso que o medidor mostra agora: o número, ou onde o arco está no caminho até ele.
+    fn shown(&self, limit: Limit, now: f64) -> Option<f64> {
+        let target = self.window(limit)?.used_at(now);
+        Some(match self.grow[limit.index()] {
+            Some(g) if g.elapsed_ms() < GROW_MS => g.value(),
+            _ => target,
+        })
+    }
+
+    fn animating(&self) -> bool {
+        self.grow.iter().any(Option::is_some)
     }
 
     fn session(&self) -> Option<Window> {
@@ -151,6 +275,13 @@ impl Claude {
 
     fn week(&self) -> Option<Window> {
         self.view.usage.as_ref().and_then(|u| u.seven_day)
+    }
+
+    fn window(&self, limit: Limit) -> Option<Window> {
+        match limit {
+            Limit::Daily => self.session(),
+            Limit::Weekly => self.week(),
+        }
     }
 
     fn has_data(&self) -> bool {
@@ -162,41 +293,14 @@ impl Claude {
         !self.has_data() && self.view.link != Link::Connected
     }
 
-    fn tone(v: f64, base: Rgba) -> Rgba {
-        if v >= 0.95 {
-            ALERT_STRONG
-        } else if v >= 0.85 {
-            ALERT
-        } else {
-            base
-        }
-    }
-
-    /// Começo do degradê de cada medidor (mais claro, puxado para o fundo).
-    fn light(color: Rgba) -> Rgba {
-        color.mix(BG, 0.42)
-    }
-
-    /// O limite mais perto de acabar: (nome, uso).
-    fn critical(&self, now: f64) -> Option<(&'static str, f64)> {
-        let s = self.session().map(|w| w.used_at(now));
-        let w = self.week().map(|w| w.used_at(now));
-        match (s, w) {
-            (Some(s), Some(w)) if w > s => Some(("semana", w)),
-            (Some(s), _) => Some(("sessão", s)),
-            (None, Some(w)) => Some(("semana", w)),
-            _ => None,
-        }
-    }
-
-    /// Nota da sessão: quando acaba (se acabar antes de reiniciar) ou quando reinicia.
+    /// Nota do diário: quando acaba (se acabar antes de reiniciar) ou quando reinicia.
     fn session_note(&self, now: f64) -> (String, bool) {
         let Some(w) = self.session() else { return ("Sem dados".into(), false) };
         if now >= w.resets_at {
-            return ("Livre: começa no próximo uso".into(), false);
+            return ("Livre até o próximo uso".into(), false);
         }
         match w.runs_out_at(now, FIVE_HOURS) {
-            Some(t) if t <= now => (format!("No limite · reinicia às {}", win::clock_at(w.resets_at)), true),
+            Some(t) if t <= now => (format!("No limite · volta às {}", win::clock_at(w.resets_at)), true),
             Some(t) => (format!("Acaba às {}", win::clock_at(t)), true),
             None => (format!("Reinicia às {}", win::clock_at(w.resets_at)), false),
         }
@@ -205,106 +309,104 @@ impl Claude {
     fn week_note(&self, now: f64) -> String {
         match self.week() {
             None => "Sem dados".into(),
-            Some(w) if now >= w.resets_at => "Renovada".into(),
+            Some(w) if now >= w.resets_at => "Renovado".into(),
             Some(w) => format!("Reinicia {}", day_and_time(w.resets_at, now)),
         }
     }
 
-    /// A frase do ritmo da sessão (e se é um aviso).
+    /// A frase do ritmo do diário (e se é um aviso).
     fn forecast(&self, now: f64) -> Option<(String, bool)> {
         let w = self.session()?;
         if now >= w.resets_at {
             return None;
         }
         Some(match w.runs_out_at(now, FIVE_HOURS) {
-            Some(t) if t <= now => (format!("Limite da sessão atingido · reinicia às {}", win::clock_at(w.resets_at)), true),
-            Some(t) => (format!("No ritmo atual, acaba às {}", win::clock_at(t)), true),
-            None => (format!("No ritmo atual, dura até reiniciar, às {}", win::clock_at(w.resets_at)), false),
+            Some(t) if t <= now => (format!("Limite diário atingido · volta às {}", win::clock_at(w.resets_at)), true),
+            Some(t) => (format!("No ritmo atual, o diário acaba às {}", win::clock_at(t)), true),
+            None => (format!("No ritmo atual, o diário dura até reiniciar, às {}", win::clock_at(w.resets_at)), false),
         })
     }
 
-    /// Linha de baixo: de onde vêm os números, ou há quanto tempo não chegam.
+    /// No alto à direita do grande: de onde vêm os números, ou há quanto tempo não chegam.
     fn source_line(&self, now: f64) -> String {
         match &self.view.usage {
-            Some(u) if now - u.updated > 15.0 * 60.0 => format!("Claude Code · atualizado às {}", win::clock_at(u.updated)),
+            Some(u) if now - u.updated > 15.0 * 60.0 => format!("atualizado às {}", win::clock_at(u.updated)),
             _ => "Claude Code".into(),
         }
     }
 
+    /// O uso em cada dia da semana (segunda a domingo), nas últimas semanas.
+    fn weekdays(&self) -> [f64; 7] {
+        self.view.usage.as_ref().map_or([0.0; 7], |u| u.by_weekday(&win::local_time().iso_date()))
+    }
+
     // ---------- desenho ----------
 
-    fn draw_background(c: &mut Canvas, mode: Mode) {
-        let l = super::Layout::of(mode);
-        c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, BG.alpha(0.96));
-        // um pouco de luz no alto
-        c.gradient_round_rect(0.0, 0.0, l.w, l.h, l.radius, &[(0.0, Rgba(255, 255, 255, 46)), (0.5, Rgba(255, 255, 255, 0))], 0.0, l.h);
-    }
-
-    /// Um medidor: trilho, o arco até `frac` em degradê e o tracinho de quanto da janela passou.
-    #[allow(clippy::too_many_arguments)]
-    fn gauge(c: &mut Canvas, cx: f32, cy: f32, r: f32, w: f32, frac: f32, elapsed: Option<f32>, color: Rgba) {
+    /// Um medidor: o trilho de 3/4 de volta, o arco até o uso com a bolinha na ponta, a
+    /// porcentagem no meio, o nome embaixo dela e o ícone na abertura de baixo. A partir de 90%
+    /// o arco fica vermelho; `since` é há quantos milissegundos ele acabou de passar de 90% (o
+    /// laranja vira vermelho e a bolinha cresce e volta); None: já estava assim.
+    fn gauge(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit, v: Option<f64>, since: Option<f32>) {
+        let (cy, r, w) = (g.cy, g.r, g.w);
         c.arc(cx, cy, r, START, START + SWEEP, TRACK, w);
-        let frac = frac.clamp(0.0, 1.0);
-        if frac > 0.0 {
-            let from = Self::light(color);
-            let steps = ((SWEEP * frac / 4.0).ceil() as usize).max(2);
-            for k in 0..steps {
-                let a0 = START + SWEEP * frac * k as f32 / steps as f32;
-                let a1 = START + SWEEP * frac * (k + 1) as f32 / steps as f32;
-                c.arc(cx, cy, r, a0, a1, from.mix(color, k as f32 / (steps - 1) as f32), w);
+        if let Some(v) = v {
+            let frac = v.clamp(0.0, 1.0) as f32;
+            let end = START + SWEEP * frac;
+            let a = end.to_radians();
+            let (dx, dy) = (cx + r * a.cos(), cy + r * a.sin());
+            let mut color = ORANGE;
+            let mut dot = w * 0.36;
+            if v >= HOT {
+                let k = since.map_or(1.0, |t| (t / TURN_MS).clamp(0.0, 1.0));
+                color = ORANGE.mix(RED, k);
+                c.fill_circle(dx, dy, w * 1.15, color.alpha(0.28));
+                dot *= 1.0 + 0.55 * (k * std::f32::consts::PI).sin();
             }
-        }
-        if let Some(e) = elapsed {
-            let a = (START + SWEEP * e).to_radians();
-            let (dx, dy) = (a.cos(), a.sin());
-            let (r0, r1) = (r + w / 2.0 + 2.0, r + w / 2.0 + 6.0);
-            c.line(&[(cx + dx * r0, cy + dy * r0), (cx + dx * r1, cy + dy * r1)], SECONDARY.alpha(0.55), 1.5);
-        }
-    }
-
-    fn draw_gauges(&self, c: &mut Canvas, mode: Mode, now: f64) {
-        let g = geom(mode);
-        let s = self.session();
-        let wk = self.week();
-        let sv = s.map_or(0.0, |w| w.used_at(now));
-        let wv = wk.map_or(0.0, |w| w.used_at(now));
-        let se = s.and_then(|w| w.elapsed_at(now, FIVE_HOURS)).map(|e| e as f32);
-        let we = wk.and_then(|w| w.elapsed_at(now, SEVEN_DAYS)).map(|e| e as f32);
-        Self::gauge(c, g.cx, g.cy, g.ro, g.w, sv as f32, se, Self::tone(sv, ACCENT));
-        Self::gauge(c, g.cx, g.cy, g.ri, g.w, wv as f32, we, Self::tone(wv, SECONDARY));
-        mark(c, g.cx, g.cy + g.ro * 0.92, g.mark, ACCENT);
-        match self.critical(now) {
-            Some((name, v)) => {
-                big(c, g.cx, g.cy - g.num * 0.66, v, g.num, 0.5);
-                c.text(g.cx, g.cy + g.num * 0.48, name, Face::Regular, (g.num * 0.38).clamp(10.0, 12.5), BODY, Anchor::MA, None);
+            if frac > 0.0 {
+                c.arc(cx, cy, r, START, end, color, w);
             }
-            None => {
-                c.text(g.cx, g.cy - g.num * 0.6, "–", Face::Light, g.num, BODY.alpha(0.6), Anchor::MA, None);
-            }
+            c.fill_circle(dx, dy + 0.8, dot * 1.17, Rgba(0, 0, 0, 70));
+            c.fill_circle(dx, dy, dot, FG);
         }
-    }
-
-    /// Linha de um limite: ponto da cor, nome, o número à direita e a nota embaixo.
-    #[allow(clippy::too_many_arguments)]
-    fn line(c: &mut Canvas, x: f32, y: f32, w: f32, name: &str, v: Option<f64>, note: &str, warn: bool, dot: Rgba) {
-        c.fill_circle(x + 3.5, y + 8.0, 3.2, dot);
-        c.text(x + 13.0, y, name, Face::Semibold, 12.5, SECONDARY, Anchor::LA, None);
+        // o número com o nome embaixo, os dois juntos no meio do círculo
+        let label = (g.num * 0.29).clamp(10.5, 12.0);
+        let cap = g.num * 0.7;
+        let base = cy + (cap - label - 8.0) / 2.0;
         match v {
-            Some(v) => {
-                big(c, x + w, y - 4.0, v, 20.0, 1.0);
-            }
+            Some(v) => percent(c, cx, base, v, g.num),
             None => {
-                c.text(x + w, y - 2.0, "–", Face::Light, 18.0, BODY.alpha(0.6), Anchor::RA, None);
+                c.text(cx, base, "–", NUM, g.num, FG.alpha(0.4), Anchor::MS, None);
             }
         }
-        c.text(x + 13.0, y + 18.0, note, Face::Regular, 10.5, if warn { ALERT } else { BODY }, Anchor::LA, Some(w - 13.0));
+        c.text(cx, base + 6.0, limit.name(), TEXT, label, MUTED, Anchor::MA, None);
+        let (iy, ir) = (cy + r * 0.86, w * 0.9);
+        match limit {
+            Limit::Daily => sun(c, cx, iy, ir, ORANGE),
+            Limit::Weekly => calendar(c, cx, iy, ir, ORANGE),
+        }
+    }
+
+    fn draw_gauges(&self, c: &mut Canvas, mode: Mode, now: f64, only: Option<Limit>) {
+        let g = geom(mode);
+        for &(limit, cx) in g.gauges {
+            if only.is_none_or(|o| o == limit) {
+                let since = self.grow[limit.index()].and_then(|g| g.since_hot());
+                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since);
+            }
+        }
+    }
+
+    /// O símbolo do Claude e o nome, no alto à esquerda.
+    fn brand(c: &mut Canvas, x: f32, y: f32, size: f32, text: &str) {
+        mark(c, x + size * 0.5, y + size * 0.62, size * 0.6, ACCENT);
+        c.text(x + size * 1.3, y, text, BOLD, size, FG, Anchor::LA, None);
     }
 
     fn draw_connect(&self, c: &mut Canvas, mode: Mode) {
         let (x0, y0, x1, y1) = connect_rect(mode);
-        c.fill_round_rect(x0, y0, x1, y1, (y1 - y0) / 2.0, SECONDARY);
-        let label = if mode == Mode::P { "Conectar" } else { "Conectar ao Claude Code" };
-        c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, label, Face::Semibold, 11.5, BG, Anchor::MM, None);
+        c.fill_round_rect(x0, y0, x1, y1, (y1 - y0) / 2.0, ACCENT);
+        let label = if mode == Mode::G { "Conectar ao Claude Code" } else { "Conectar" };
+        c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, label, BOLD, 11.5, WHITE, Anchor::MM, None);
     }
 
     /// O que dizer sem números: o que falta para eles aparecerem.
@@ -316,81 +418,103 @@ impl Claude {
             Link::Connected => ("Aguardando o Claude Code", "Os números aparecem depois da próxima resposta dele.".into()),
             Link::Missing => ("Claude Code não encontrado", "Instale o Claude Code para ver o uso do seu plano.".into()),
             Link::Other => ("Já há outra linha de status", "O Claude Code já usa outra linha de status; tire-a para conectar.".into()),
-            Link::Off => ("Uso do seu plano", "Sessão de 5 horas e semana, direto do Claude Code.".into()),
+            Link::Off => ("Uso do seu plano", "Limite diário e semanal, direto do Claude Code.".into()),
         }
     }
 
     fn draw_small(&self, c: &mut Canvas, now: f64) {
-        self.draw_gauges(c, Mode::P, now);
-        if self.needs_connect() && self.view.link != Link::Missing {
+        if self.needs_connect() && self.view.link == Link::Off {
+            // sem números: o símbolo, o nome e o botão
+            mark(c, SMALL / 2.0, 50.0, 20.0, ACCENT);
+            c.text(SMALL / 2.0, 82.0, "Uso do Claude", BOLD, 12.5, FG, Anchor::MA, None);
             self.draw_connect(c, Mode::P);
+            return;
         }
+        mark(c, 18.0, 18.0, 6.5, ACCENT);
+        self.draw_gauges(c, Mode::P, now, Some(Limit::Daily));
     }
 
     fn draw_medium(&self, c: &mut Canvas, now: f64) {
-        self.draw_gauges(c, Mode::M, now);
-        let (x, w) = (164.0, WIDE - 18.0 - 164.0);
+        mark(c, 18.0, 18.0, 6.5, ACCENT);
         if !self.has_data() {
+            self.draw_gauges(c, Mode::M, now, Some(Limit::Daily));
+            let (x, w) = (172.0, WIDE - 18.0 - 172.0);
             let (title, text) = self.waiting_text();
-            c.text(x, 26.0, title, Face::Semibold, 12.5, SECONDARY, Anchor::LA, Some(w));
-            let lines = c.wrap(&text, Face::Regular, 10.5, w, 3);
+            c.text(x, 26.0, title, BOLD, 12.5, FG, Anchor::LA, Some(w));
+            let lines = c.wrap(&text, TEXT, 10.5, w, 3);
             for (i, l) in lines.iter().enumerate() {
-                c.text(x, 46.0 + i as f32 * 14.0, l, Face::Regular, 10.5, BODY, Anchor::LA, None);
+                c.text(x, 46.0 + i as f32 * 14.0, l, TEXT, 10.5, MUTED, Anchor::LA, None);
             }
             if self.needs_connect() && self.view.link == Link::Off {
                 self.draw_connect(c, Mode::M);
             }
             return;
         }
-        let (s_note, s_warn) = self.session_note(now);
-        let sv = self.session().map(|w| w.used_at(now));
-        let wv = self.week().map(|w| w.used_at(now));
-        Self::line(c, x, 24.0, w, "Sessão", sv, &s_note, s_warn, Self::tone(sv.unwrap_or(0.0), ACCENT));
-        Self::line(c, x, 72.0, w, "Semana", wv, &self.week_note(now), false, Self::tone(wv.unwrap_or(0.0), SECONDARY));
-        c.text(x, 122.0, &self.source_line(now), Face::Regular, 10.5, BODY.alpha(0.8), Anchor::LA, Some(w));
+        self.draw_gauges(c, Mode::M, now, None);
     }
 
     fn draw_large(&self, c: &mut Canvas, now: f64) {
-        self.draw_gauges(c, Mode::G, now);
+        let pad = 22.0;
+        Self::brand(c, pad, 20.0, 14.0, "Uso do Claude");
+        self.draw_gauges(c, Mode::G, now, None);
         let g = geom(Mode::G);
-        let pad = 18.0;
         if !self.has_data() {
             let (title, text) = self.waiting_text();
-            let top = 292.0;
-            c.text(g.cx, top, title, Face::Semibold, 13.0, SECONDARY, Anchor::MA, Some(WIDE - 2.0 * pad));
-            for (i, l) in c.wrap(&text, Face::Regular, 11.0, WIDE - 2.0 * pad - 20.0, 3).iter().enumerate() {
-                c.text(g.cx, top + 22.0 + i as f32 * 15.0, l, Face::Regular, 11.0, BODY, Anchor::MA, None);
+            let top = 262.0;
+            c.text(WIDE / 2.0, top, title, BOLD, 13.0, FG, Anchor::MA, Some(WIDE - 2.0 * pad));
+            for (i, l) in c.wrap(&text, TEXT, 11.0, WIDE - 2.0 * pad, 3).iter().enumerate() {
+                c.text(WIDE / 2.0, top + 22.0 + i as f32 * 15.0, l, TEXT, 11.0, MUTED, Anchor::MA, None);
             }
             if self.needs_connect() && self.view.link == Link::Off {
                 self.draw_connect(c, Mode::G);
             }
             return;
         }
-        c.text(g.cx, g.cy + 48.0, &self.source_line(now), Face::Regular, 10.5, BODY.alpha(0.75), Anchor::MA, None);
-        let mid = WIDE / 2.0;
+        c.text(WIDE - pad, 22.0, &self.source_line(now), TEXT, 10.5, MUTED, Anchor::RA, Some(WIDE / 2.0));
+        // embaixo de cada medidor, quando ele reinicia
         let (s_note, s_warn) = self.session_note(now);
-        let sv = self.session().map(|w| w.used_at(now));
-        let wv = self.week().map(|w| w.used_at(now));
-        for (x0, x1, name, v, note, warn, base) in [
-            (pad, mid - 5.0, "Sessão", sv, s_note, s_warn, ACCENT),
-            (mid + 5.0, WIDE - pad, "Semana", wv, self.week_note(now), false, SECONDARY),
-        ] {
-            c.fill_round_rect(x0, 290.0, x1, 378.0, 16.0, BODY.alpha(0.07));
-            c.stroke_round_rect(x0 + 0.5, 290.5, x1 - 0.5, 377.5, 16.0, BODY.alpha(0.14), 1.0);
-            c.fill_circle(x0 + 17.0, 307.0, 3.2, Self::tone(v.unwrap_or(0.0), base));
-            c.text(x0 + 26.0, 299.0, name, Face::Semibold, 11.5, SECONDARY, Anchor::LA, None);
-            match v {
-                Some(v) => {
-                    big(c, x0 + 13.0, 318.0, v, 30.0, 0.0);
-                }
-                None => {
-                    c.text(x0 + 14.0, 318.0, "–", Face::Light, 28.0, BODY.alpha(0.6), Anchor::LA, None);
+        for (&(_, cx), (note, warn)) in g.gauges.iter().zip([(s_note, s_warn), (self.week_note(now), false)]) {
+            c.text(cx, 202.0, &note, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE / 2.0 - 16.0));
+        }
+        c.fill_round_rect(pad, 232.0, WIDE - pad, 233.0, 0.5, WHITE.alpha(0.1));
+        self.draw_weekdays(c, pad, 248.0, WIDE - pad, 394.0);
+        if let Some((text, warn)) = self.forecast(now) {
+            c.text(WIDE / 2.0, 416.0, &text, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE - 2.0 * pad));
+        }
+    }
+
+    /// Os dias da semana em que mais se usa: uma barra por dia (o de mais uso em laranja cheio,
+    /// com a parte dele no total em cima) e o dia de hoje com o nome em branco.
+    fn draw_weekdays(&self, c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32) {
+        const NAMES: [&str; 7] = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
+        let days = self.weekdays();
+        let total: f64 = days.iter().sum();
+        let top = (0..7).max_by(|&a, &b| days[a].total_cmp(&days[b])).filter(|_| total > 0.0);
+        c.text(x0, y0, "Dias em que você mais usa", BOLD, 12.0, FG, Anchor::LA, None);
+        let caption = match top {
+            Some(_) => format!("últimas {} semanas", HISTORY_DAYS / 7),
+            None => "aparecem conforme você usa".into(),
+        };
+        c.text(x1, y0 + 1.5, &caption, TEXT, 10.0, MUTED, Anchor::RA, None);
+        let today = win::local_time().weekday as usize;
+        let max = days.iter().cloned().fold(0.0, f64::max);
+        let (bars_top, base) = (y0 + 40.0, y1 - 20.0);
+        let slot = (x1 - x0) / 7.0;
+        let bw = 20.0;
+        for (i, name) in NAMES.iter().enumerate() {
+            let cx = x0 + slot * (i as f32 + 0.5);
+            let (bx0, bx1) = (cx - bw / 2.0, cx + bw / 2.0);
+            c.fill_round_rect(bx0, bars_top, bx1, base, 6.0, WHITE.alpha(0.06));
+            if max > 0.0 && days[i] > 0.0 {
+                let h = ((base - bars_top) * (days[i] / max) as f32).max(12.0);
+                let color = if Some(i) == top { ORANGE } else { ORANGE.mix(WHITE, 0.2).alpha(0.5) };
+                c.fill_round_rect(bx0, base - h, bx1, base, 6.0, color);
+                if Some(i) == top {
+                    let share = format!("{}%", (days[i] / total * 100.0).round());
+                    c.text(cx, base - h - 6.0, &share, TEXT, 10.5, FG, Anchor::MS, None);
                 }
             }
-            c.text(x0 + 14.0, 356.0, &note, Face::Regular, 10.0, if warn { ALERT } else { BODY }, Anchor::LA, Some(x1 - x0 - 24.0));
-        }
-        if let Some((text, warn)) = self.forecast(now) {
-            c.text(g.cx, 398.0, &text, Face::Regular, 11.0, if warn { ALERT } else { BODY }, Anchor::MA, Some(WIDE - 2.0 * pad));
+            c.text(cx, base + 7.0, name, TEXT, 10.0, if i == today { FG } else { MUTED }, Anchor::MA, None);
         }
     }
 }
@@ -401,18 +525,43 @@ impl Default for Claude {
     }
 }
 
-/// "46" grande e fino com o "%" pequeno; `ax`: 0 alinha pela esquerda, 0.5 centraliza, 1 pela
-/// direita.
-fn big(c: &mut Canvas, x: f32, y: f32, v: f64, size: f32, ax: f32) -> f32 {
+/// A porcentagem no meio do medidor: o número (na fonte dos números grandes dos outros widgets)
+/// centrado em `x` e apoiado na linha de base `y`, e o "%" menor logo depois dele.
+fn percent(c: &mut Canvas, x: f32, y: f32, v: f64, size: f32) {
     let num = format!("{}", (v * 100.0).round());
-    let small = size * 0.42;
-    let nw = c.text_width(&num, Face::Light, size);
-    let pw = c.text_width("%", Face::Light, small);
-    let total = nw + 1.0 + pw;
-    let x0 = x - total * ax;
-    c.text(x0, y, &num, Face::Light, size, SECONDARY, Anchor::LA, None);
-    c.text(x0 + nw + 1.0, y + size * 0.2, "%", Face::Light, small, BODY, Anchor::LA, None);
-    total
+    let nw = c.text_width(&num, NUM, size);
+    c.text(x - nw / 2.0, y, &num, NUM, size, FG, Anchor::LS, None);
+    c.text(x + nw / 2.0 + 1.0, y, "%", NUM, size * 0.42, FG.alpha(0.7), Anchor::LS, None);
+}
+
+/// Sol: um círculo e oito raios, cabendo num círculo de raio `r`.
+fn sun(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
+    c.fill_circle(cx, cy, r * 0.42, color);
+    for i in 0..8 {
+        let a = (i as f32 * 45.0).to_radians();
+        let (dx, dy) = (a.cos(), a.sin());
+        c.line(&[(cx + dx * r * 0.68, cy + dy * r * 0.68), (cx + dx * r, cy + dy * r)], color, r * 0.17);
+    }
+}
+
+/// Calendário: a folha com a faixa de cima cheia, as duas argolas e os dias em pontos, cabendo
+/// num quadrado de lado `2r`.
+fn calendar(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
+    let (x0, y0, x1, y1) = (cx - r * 0.95, cy - r * 0.78, cx + r * 0.95, cy + r * 0.95);
+    let lw = r * 0.16;
+    c.stroke_round_rect(x0, y0, x1, y1, r * 0.28, color, lw);
+    c.fill_round_rect(x0, y0, x1, y0 + r * 0.5, r * 0.28, color);
+    c.fill_round_rect(x0 + lw / 2.0, y0 + r * 0.3, x1 - lw / 2.0, y0 + r * 0.5, 0.0, color);
+    for x in [cx - r * 0.45, cx + r * 0.45] {
+        c.line(&[(x, cy - r), (x, cy - r * 0.62)], color, r * 0.2);
+    }
+    let d = r * 0.11;
+    for row in 0..2 {
+        for col in 0..3 {
+            let (px, py) = (cx + (col as f32 - 1.0) * r * 0.5, cy + r * 0.12 + row as f32 * r * 0.45);
+            c.fill_circle(px, py, d, color);
+        }
+    }
 }
 
 /// O símbolo do Claude: raios que afinam nas pontas, de comprimentos um pouco diferentes,
@@ -446,6 +595,12 @@ pub fn mark(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
     c.fill_circle(cx, cy, r * 0.2, color);
 }
 
+/// O centro (x) do medidor no ponto (x, y), se houver um ali. O pequeno só mostra o diário.
+fn gauge_at(x: f32, y: f32, mode: Mode) -> Option<f32> {
+    let g = geom(mode);
+    g.gauges.iter().map(|&(_, cx)| cx).find(|&cx| (x - cx).hypot(y - g.cy) <= g.r + g.w)
+}
+
 /// "seg., 09:00", "amanhã, 09:00" ou "hoje, 18:40" para um horário (segundos desde 1970).
 fn day_and_time(epoch: f64, now: f64) -> String {
     let t = win::local_time();
@@ -470,7 +625,6 @@ impl Kind for Claude {
     fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         let now = self.now();
         *self.minute.borrow_mut() = (now / 60.0) as i64;
-        Self::draw_background(c, mode);
         match mode {
             Mode::P => self.draw_small(c, now),
             Mode::M => self.draw_medium(c, now),
@@ -486,10 +640,7 @@ impl Kind for Claude {
             }
             return None;
         }
-        let g = geom(mode);
-        let r = g.ro + g.w;
-        let on_gauges = (x - g.cx).hypot(y - g.cy) <= r;
-        (self.has_data() && on_gauges && env.shortcuts()).then_some(OPEN_USAGE)
+        (self.has_data() && gauge_at(x, y, mode).is_some() && env.shortcuts()).then_some(OPEN_USAGE)
     }
 
     fn hot_rect(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<Hot> {
@@ -500,8 +651,9 @@ impl Kind for Claude {
             }
             _ => {
                 let g = geom(mode);
-                let r = g.ro + g.w;
-                Some((g.cx - r, g.cy - r, g.cx + r, g.cy + r, r))
+                let cx = gauge_at(x, y, mode)?;
+                let r = g.r + g.w;
+                Some((cx - r, g.cy - r, cx + r, g.cy + r, r))
             }
         }
     }
@@ -536,15 +688,25 @@ impl Kind for Claude {
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        Some(self.due)
+        // enquanto o arco anima, um quadro a cada 16 ms
+        Some(if self.animating() { self.due.min(Instant::now() + FRAME) } else { self.due })
     }
 
     fn tick(&mut self, _ctx: &mut Ctx) -> bool {
-        self.due = Instant::now() + Duration::from_secs(5);
-        let changed = self.reload(false);
-        // os textos de tempo ("acaba às", "atualizado às") mudam com o relógio
-        let minute = (self.now() / 60.0) as i64;
-        changed || minute != *self.minute.borrow()
+        // mais um quadro da animação (e um último, já parado, depois que ela acaba)
+        let mut redraw = self.animating();
+        for g in &mut self.grow {
+            if g.is_some_and(|g| g.done()) {
+                *g = None;
+            }
+        }
+        if Instant::now() >= self.due {
+            self.due = Instant::now() + Duration::from_secs(5);
+            redraw |= self.reload(false);
+            // os textos de tempo ("acaba às", "atualizado às") mudam com o relógio
+            redraw |= (self.now() / 60.0) as i64 != *self.minute.borrow();
+        }
+        redraw
     }
 
     fn status(&self) -> Status {
@@ -560,20 +722,23 @@ mod tests {
     fn critical_limit_and_notes() {
         let c = Claude::sample();
         let now = c.now();
-        assert_eq!(c.critical(now), Some(("sessão", 0.46)));
+        assert_eq!(c.window(Limit::Daily).map(|w| w.used_at(now)), Some(0.46));
+        assert_eq!(c.window(Limit::Weekly).map(|w| w.used_at(now)), Some(0.31));
         let (note, warn) = c.session_note(now);
         assert!(note.starts_with("Reinicia às "), "{note}");
         assert!(!warn);
         assert!(c.week_note(now).starts_with("Reinicia amanhã, ") || c.week_note(now).starts_with("Reinicia hoje, "), "{}", c.week_note(now));
         let (f, warn) = c.forecast(now).unwrap();
-        assert!(f.starts_with("No ritmo atual, dura até reiniciar"), "{f}");
+        assert!(f.starts_with("No ritmo atual, o diário dura até reiniciar"), "{f}");
         assert!(!warn);
         // perto do limite: o ritmo acaba antes do reinício
         let c = Claude::sample_limit();
         let (note, warn) = c.session_note(now);
         assert!(note.starts_with("Acaba às ") && warn, "{note}");
-        assert_eq!(Claude::tone(0.88, ACCENT), ALERT);
-        assert_eq!(Claude::tone(0.5, SECONDARY), SECONDARY);
+        // o exemplo usa mais no meio da semana: quarta é o dia de mais uso
+        let days = c.weekdays();
+        let top = (0..7).max_by(|&a, &b| days[a].total_cmp(&days[b])).unwrap();
+        assert_eq!(top, 2, "{days:?}");
     }
 
     #[test]
@@ -600,5 +765,41 @@ mod tests {
         }
         c.view.link = Link::Connected;
         assert!(!c.needs_connect(), "conectado: só espera os números");
+    }
+
+    #[test]
+    fn the_arc_grows_and_pulses_past_90() {
+        let start = Instant::now();
+        let g = Grow { from: 0.5, to: 0.95, start };
+        assert!((g.value() - 0.5).abs() < 0.01, "começa de onde estava");
+        assert_eq!(g.since_hot(), None, "o vermelho só vem quando passa de 90%");
+        let g = Grow { from: 0.5, to: 0.95, start: start - Duration::from_millis(GROW_MS as u64) };
+        assert!((g.value() - 0.95).abs() < 1e-9 && !g.done());
+        assert!(g.since_hot().is_some());
+        let g = Grow { from: 0.5, to: 0.95, start: start - Duration::from_millis((GROW_MS + TURN_MS) as u64 + 10) };
+        assert!(g.done());
+        // subir sem chegar a 90%, ou descer: sem pulso
+        let mid = start - Duration::from_millis(GROW_MS as u64);
+        assert_eq!(Grow { from: 0.2, to: 0.6, start: mid }.since_hot(), None);
+        assert_eq!(Grow { from: 0.95, to: 0.3, start: mid }.since_hot(), None);
+        // a curva passa de 90% no momento calculado
+        let p = (0.9 - 0.5) / (0.95 - 0.5);
+        let cross = 1.0 - (1.0f64 - p).cbrt();
+        assert!((0.5 + 0.45 * ease(cross) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gauges_fit_and_answer_clicks() {
+        for mode in Mode::ALL {
+            let g = geom(mode);
+            let l = super::super::Layout::of(mode);
+            for &(_, cx) in g.gauges {
+                let r = g.r + g.w / 2.0;
+                assert!(cx - r >= 0.0 && cx + r <= l.w && g.cy - r >= 0.0 && g.cy + r <= l.h, "{mode:?}");
+                assert_eq!(gauge_at(cx, g.cy - g.r, mode), Some(cx));
+            }
+        }
+        assert_eq!(geom(Mode::P).gauges.len(), 1, "o pequeno só tem o diário");
+        assert_eq!(gauge_at(2.0, 2.0, Mode::M), None);
     }
 }

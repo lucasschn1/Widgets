@@ -81,6 +81,9 @@ pub enum Face {
     Light,
     Symbol,
     Icons,
+    /// Qualquer família, no peso dado (100 a 900): primeiro entre as fontes embutidas no app
+    /// (a Outfit), senão entre as do Windows.
+    Custom(&'static str, u16),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,6 +127,29 @@ pub struct Gfx {
     display_family: &'static str,
     /// algarismos de largura igual (o relógio não "treme" quando os números mudam)
     tabular: Option<IDWriteTypography>,
+    /// as fontes embutidas no executável (None se o Windows não conseguir carregá-las)
+    embedded: Option<IDWriteFontCollection>,
+}
+
+/// As fontes embutidas: a Outfit, variável do peso 100 ao 900 (licença SIL Open Font License, ver
+/// res/fonts/OFL.txt).
+static EMBEDDED: [&[u8]; 1] = [include_bytes!("../res/fonts/Outfit.ttf")];
+
+/// Coleção com as fontes destes arquivos, lidos da memória (sem instalar nada no Windows; o
+/// DirectWrite guarda uma cópia dos bytes).
+fn memory_collection(dw: &IDWriteFactory, files: &[&[u8]]) -> windows::core::Result<IDWriteFontCollection> {
+    unsafe {
+        let f5: IDWriteFactory5 = dw.cast()?;
+        let loader = f5.CreateInMemoryFontFileLoader()?;
+        f5.RegisterFontFileLoader(&loader)?;
+        let builder = f5.CreateFontSetBuilder()?;
+        for data in files {
+            let file = loader.CreateInMemoryFontFileReference(dw, data.as_ptr() as *const _, data.len() as u32, None)?;
+            builder.AddFontFile(&file)?;
+        }
+        let set = builder.CreateFontSet()?;
+        f5.CreateFontCollectionFromFontSet(&set)?.cast()
+    }
 }
 
 thread_local! {
@@ -156,7 +182,8 @@ impl Gfx {
             let tabular = dw.CreateTypography().ok().filter(|t| {
                 t.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 }).is_ok()
             });
-            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular })
+            let embedded = memory_collection(&dw, &EMBEDDED).ok();
+            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular, embedded })
         }
     }
 
@@ -165,17 +192,28 @@ impl Gfx {
         if let Some(f) = self.formats.borrow().get(&key) {
             return f.clone();
         }
-        let (family, weight): (&str, DWRITE_FONT_WEIGHT) = match face {
-            Face::Regular => ("Segoe UI", DWRITE_FONT_WEIGHT_NORMAL),
-            Face::Semibold => ("Segoe UI", DWRITE_FONT_WEIGHT_SEMI_BOLD),
-            Face::Light => (self.display_family, DWRITE_FONT_WEIGHT_LIGHT),
-            Face::Symbol => ("Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL),
-            Face::Icons => (self.icon_family, DWRITE_FONT_WEIGHT_NORMAL),
+        // uma família embutida, se for uma delas (senão, a do Windows com esse nome)
+        let custom = |family: &'static str| {
+            let name = wide(family);
+            let (mut index, mut exists) = (0u32, windows::core::BOOL(0));
+            let found = self.embedded.as_ref().filter(|c| unsafe { c.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists).is_ok() } && exists.as_bool());
+            (family, found)
+        };
+        let (family, weight, collection): (&str, DWRITE_FONT_WEIGHT, Option<&IDWriteFontCollection>) = match face {
+            Face::Regular => ("Segoe UI", DWRITE_FONT_WEIGHT_NORMAL, None),
+            Face::Semibold => ("Segoe UI", DWRITE_FONT_WEIGHT_SEMI_BOLD, None),
+            Face::Light => (self.display_family, DWRITE_FONT_WEIGHT_LIGHT, None),
+            Face::Symbol => ("Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL, None),
+            Face::Icons => (self.icon_family, DWRITE_FONT_WEIGHT_NORMAL, None),
+            Face::Custom(family, weight) => {
+                let (family, c) = custom(family);
+                (family, DWRITE_FONT_WEIGHT(weight as i32), c)
+            }
         };
         let family = wide(family);
         let format = unsafe {
             self.dw
-                .CreateTextFormat(PCWSTR(family.as_ptr()), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!("pt-br"))
+                .CreateTextFormat(PCWSTR(family.as_ptr()), collection, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!("pt-br"))
                 .expect("CreateTextFormat")
         };
         unsafe {
@@ -937,5 +975,32 @@ mod picture_tests {
         // sem faixas: fica igual
         let plain = target(300, 300, 30);
         assert_eq!((trim_bars(&plain).w, trim_bars(&plain).h), (300, 300));
+    }
+}
+
+#[cfg(test)]
+mod embedded_font_tests {
+    use super::*;
+
+    #[test]
+    fn outfit_is_embedded() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        with(|g| {
+            let collection = g.embedded.as_ref().expect("a Outfit carregou");
+            for family in ["Outfit"] {
+                let name = wide(family);
+                let (mut index, mut exists) = (0u32, windows::core::BOOL(0));
+                unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists).unwrap() };
+                assert!(exists.as_bool(), "{family}");
+            }
+        });
+        // e o texto sai mesmo nela, e nos pesos pedidos: a largura muda em relação à Segoe UI e
+        // de um peso para outro
+        let c = Canvas::new(10, 10, 1.0);
+        let w = |face| c.text_width("Uso diário 46%", face, 20.0);
+        assert_ne!(w(Face::Custom("Outfit", 400)), w(Face::Regular));
+        assert_ne!(w(Face::Custom("Outfit", 300)), w(Face::Custom("Outfit", 600)));
     }
 }
