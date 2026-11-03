@@ -51,12 +51,19 @@ $tmp = Join-Path $env:TEMP ("Widgets-" + [guid]::NewGuid().ToString('N'))
 Expand-Archive -Path $zip -DestinationPath $tmp -Force
 $src = if (Test-Path (Join-Path $tmp 'Widgets\Widgets.exe')) { Join-Path $tmp 'Widgets' } else { $tmp }
 
-# 3. o Windows deixa a versão nova abrir? (com --versao ela só responde e fecha; versões antigas,
-# sem essa opção, veem os widgets já abertos e fecham sozinhas)
+# 3. o Windows deixa a versão nova abrir? Ela roda como a linha de status do Claude Code, com a
+# entrada vazia: só escreve uma linha e fecha, sem abrir os widgets nem gravar nada. Toda versão 3.x
+# conhece essa opção (a --versao só existe da 3.11 em diante: numa versão mais velha, ela abriria
+# o app inteiro, da pasta temporária, no computador de quem ainda não tem os widgets abertos).
+# (a entrada e a saída do teste ficam fora da pasta extraída, que é copiada para a instalação)
+$empty = "$tmp-entrada.txt"
+$out = "$tmp-saida.txt"
+Set-Content -Path $empty -Value '' -NoNewline
 try {
-    $probe = Start-Process -FilePath (Join-Path $src 'Widgets.exe') -ArgumentList '--versao' -WindowStyle Hidden -PassThru
+    $probe = Start-Process -FilePath (Join-Path $src 'Widgets.exe') -ArgumentList '--claude-status' -RedirectStandardInput $empty -RedirectStandardOutput $out -WindowStyle Hidden -PassThru
     if (-not $probe.WaitForExit(10000)) { $probe | Stop-Process -Force -ErrorAction SilentlyContinue }
 } catch {
+    Remove-Item $empty, $out -Force -ErrorAction SilentlyContinue
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ''
     Write-Host '  O Windows não deixou a versão nova abrir.' -ForegroundColor Yellow
@@ -66,6 +73,8 @@ try {
     Write-Host ''
     exit 3
 }
+
+Remove-Item $empty, $out -Force -ErrorAction SilentlyContinue
 
 # 4. fecha os Widgets, se estiverem abertos (os arquivos estariam em uso)
 $running = Get-Process -Name 'Widgets' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like "$Dir\*" }

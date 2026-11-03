@@ -79,8 +79,24 @@ fn status_line_survives_bad_input() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `--versao` (o instalador confere com ela se o Windows deixa a versão nova abrir, antes de
-/// trocar a anterior): responde a versão e sai na hora, sem abrir os widgets nem criar opções.
+/// O install.ps1 confere se o Windows deixa a versão nova abrir rodando-a como linha de status
+/// com a entrada vazia (a única opção que toda versão 3.x conhece): ela tem que sair na hora, sem
+/// abrir os widgets nem gravar nada.
+#[test]
+fn status_line_with_empty_input_is_a_safe_probe() {
+    let dir = sandbox("sonda");
+    let start = Instant::now();
+    let mut child = spawn(command(&dir).arg("--claude-status").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()));
+    drop(child.stdin.take()); // entrada vazia
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "saiu com {:?}", out.status);
+    assert!(start.elapsed() < Duration::from_secs(5), "demorou {:?}", start.elapsed());
+    assert!(!data_dir(&dir).exists(), "gravou opções");
+    assert!(std::fs::read_dir(dir.join("claude")).unwrap().next().is_none(), "mexeu na pasta do Claude Code");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--versao`: responde a versão e sai na hora, sem abrir os widgets nem criar opções.
 #[test]
 fn version_flag_answers_and_touches_nothing() {
     let dir = sandbox("versao");
