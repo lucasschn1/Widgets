@@ -58,8 +58,8 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Widgets.exe não foi gerado" }
           $info = (Get-Item $exe).VersionInfo
           $info | Format-List ProductName, ProductVersion
-          if ($info.ProductVersion -ne "${{ steps.version.outputs.version }}") { throw "Versão errada no Widgets.exe" }
-          if ($info.ProductName -ne "Widgets") { throw "Nome errado no Widgets.exe" }
+          if ("$($info.ProductVersion)".Trim() -ne "${{ steps.version.outputs.version }}") { throw "Versão errada no Widgets.exe" }
+          if ("$($info.ProductName)".Trim() -ne "Widgets") { throw "Nome errado no Widgets.exe" }
 
       # --- assinatura do Widgets.exe (antes do .zip e do instalador, que levam ele dentro) ---
       - name: Envia o Widgets.exe para assinar
@@ -106,7 +106,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "O Inno Setup falhou" }
           $info = (Get-Item dist\Widgets-Setup.exe).VersionInfo
           $info | Format-List ProductName, ProductVersion
-          if ($info.ProductVersion -ne "${{ steps.version.outputs.version }}" -or $info.ProductName -ne "Widgets") { throw "Nome ou versão errados no instalador" }
+          # (o Inno Setup grava o nome e a versão com espaços sobrando no fim: "3.11.0      ")
+          if ("$($info.ProductVersion)".Trim() -ne "${{ steps.version.outputs.version }}" -or "$($info.ProductName)".Trim() -ne "Widgets") { throw "Nome ou versão errados no instalador" }
 
       # --- assinatura do instalador ---
       - name: Envia o instalador para assinar
