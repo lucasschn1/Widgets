@@ -9,6 +9,7 @@
 //! Conectar mexe só na chave `statusLine` das configurações do Claude Code (com uma cópia de
 //! segurança do arquivo antes da primeira mudança), e só quando não há outra linha de status.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -18,6 +19,8 @@ pub const FLAG: &str = "--claude-status";
 const FILE: &str = "claude.json";
 pub const FIVE_HOURS: f64 = 5.0 * 3600.0;
 pub const SEVEN_DAYS: f64 = 7.0 * 86400.0;
+/// Quantos dias de histórico guardar (para os dias da semana em que mais se usa).
+pub const HISTORY_DAYS: i64 = 28;
 
 /// Uma janela de limite: quanto foi usado (0 a 1) e quando ela recomeça (segundos desde 1970).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +60,9 @@ pub struct Usage {
     pub seven_day: Option<Window>,
     /// quando o Claude Code mandou estes números
     pub updated: f64,
+    /// quanto da sessão de 5 horas se gastou em cada dia ("2026-11-03" -> 0,8 = 80% de uma
+    /// sessão), nos últimos `HISTORY_DAYS` dias
+    pub days: BTreeMap<String, f64>,
 }
 
 fn window_of(v: &Value) -> Option<Window> {
@@ -69,19 +75,86 @@ impl Usage {
     /// Os limites no JSON da linha de status (None se ele não traz nenhum).
     pub fn from_status(input: &Value, now: f64) -> Option<Usage> {
         let r = input.get("rate_limits")?;
-        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now };
+        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now, days: BTreeMap::new() };
         (u.five_hour.is_some() || u.seven_day.is_some()).then_some(u)
     }
 
     pub fn to_json(&self) -> Value {
         let w = |w: &Option<Window>| w.map(|w| json!({"used": w.used, "resets_at": w.resets_at}));
-        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated})
+        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated, "days": self.days})
     }
 
     pub fn from_json(v: &Value) -> Option<Usage> {
         let w = |v: &Value| Some(Window { used: v.get("used")?.as_f64()?, resets_at: v.get("resets_at")?.as_f64()? });
-        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()? })
+        let days = v["days"].as_object().map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_f64()?))).collect()).unwrap_or_default();
+        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()?, days })
     }
+
+    /// Soma ao dia `today` o que se gastou da sessão desde os números anteriores (`prev`), e
+    /// esquece os dias que já saíram do histórico.
+    pub fn record(&mut self, prev: Option<&Usage>, today: &str) {
+        self.days = prev.map(|p| p.days.clone()).unwrap_or_default();
+        let spent = match (prev.and_then(|p| p.five_hour), self.five_hour) {
+            // a mesma sessão: só o que subiu
+            (Some(p), Some(n)) if (p.resets_at - n.resets_at).abs() < 60.0 => (n.used - p.used).max(0.0),
+            // sessão nova (ou a primeira vez): tudo o que já foi usado nela
+            (_, Some(n)) => n.used,
+            _ => 0.0,
+        };
+        if spent > 0.0 {
+            *self.days.entry(today.to_string()).or_insert(0.0) += spent;
+        }
+        if let Some(t) = day_number(today) {
+            self.days.retain(|d, _| day_number(d).is_some_and(|n| t - n < HISTORY_DAYS));
+        }
+    }
+
+    /// O que se gastou em cada dia da semana (segunda a domingo) nos últimos `HISTORY_DAYS`
+    /// dias até `today`.
+    pub fn by_weekday(&self, today: &str) -> [f64; 7] {
+        let mut out = [0.0; 7];
+        let Some(t) = day_number(today) else { return out };
+        for (d, v) in &self.days {
+            if let Some(n) = day_number(d).filter(|n| (0..HISTORY_DAYS).contains(&(t - n))) {
+                out[weekday(n)] += v;
+            }
+        }
+        out
+    }
+}
+
+/// Dias desde 1970-01-01 de uma data "AAAA-MM-DD".
+pub fn day_number(iso: &str) -> Option<i64> {
+    let mut it = iso.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (it.next()??, it.next()??, it.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
+/// A data "AAAA-MM-DD" de um número de dias desde 1970-01-01.
+pub fn iso_of_day(n: i64) -> String {
+    let z = n + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 0 = segunda ... 6 = domingo (1970-01-01 foi uma quinta).
+pub fn weekday(day: i64) -> usize {
+    (day + 3).rem_euclid(7) as usize
 }
 
 /// O arquivo com os últimos números.
@@ -133,7 +206,8 @@ pub fn run_status_line() {
     let _ = std::io::stdin().read_to_string(&mut text);
     let input: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let now = crate::win::now();
-    if let Some(u) = Usage::from_status(&input, now) {
+    if let Some(mut u) = Usage::from_status(&input, now) {
+        u.record(load().as_ref(), &crate::win::local_time().iso_date());
         let _ = write_atomic(&data_file(), &u.to_json().to_string());
     }
     let mut out = std::io::stdout();
@@ -340,10 +414,45 @@ mod tests {
     fn keeps_the_last_numbers_in_a_file() {
         let dir = temp_dir("file");
         let path = dir.join(FILE);
-        let u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0 };
+        let mut u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0, ..Default::default() };
+        u.days.insert("2026-11-03".into(), 0.5);
         write_atomic(&path, &u.to_json().to_string()).unwrap();
         assert_eq!(load_from(&path), Some(u));
         assert!(!path.with_extension("tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dates_and_weekdays() {
+        assert_eq!(day_number("1970-01-01"), Some(0));
+        assert_eq!(day_number("2026-11-03"), Some(20760));
+        assert_eq!(iso_of_day(20760), "2026-11-03");
+        assert_eq!(iso_of_day(day_number("2024-02-29").unwrap() + 1), "2024-03-01");
+        // 2026-11-03 é uma terça
+        assert_eq!(weekday(day_number("2026-11-03").unwrap()), 1);
+        assert_eq!(day_number("ontem"), None);
+    }
+
+    #[test]
+    fn keeps_what_was_spent_each_day() {
+        let at = |used: f64, resets_at: f64| Usage { five_hour: Some(Window { used, resets_at }), ..Default::default() };
+        // primeira vez: conta o que a sessão já tinha
+        let mut a = at(0.2, 1000.0);
+        a.record(None, "2026-11-03");
+        assert!((a.days["2026-11-03"] - 0.2).abs() < 1e-9);
+        // a mesma sessão subiu para 50%: mais 30% no dia
+        let mut b = at(0.5, 1000.0);
+        b.record(Some(&a), "2026-11-03");
+        assert!((b.days["2026-11-03"] - 0.5).abs() < 1e-9);
+        // sessão nova no dia seguinte, com 10%
+        let mut c = at(0.1, 20000.0);
+        c.record(Some(&b), "2026-11-04");
+        assert!((c.days["2026-11-04"] - 0.1).abs() < 1e-9);
+        let week = c.by_weekday("2026-11-04");
+        assert!((week[1] - 0.5).abs() < 1e-9 && (week[2] - 0.1).abs() < 1e-9, "{week:?}");
+        // os dias velhos saem do histórico
+        let mut d = at(0.3, 90000.0);
+        d.record(Some(&c), "2026-12-15");
+        assert_eq!(d.days.keys().collect::<Vec<_>>(), ["2026-12-15"]);
     }
 }
