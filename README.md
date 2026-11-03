@@ -74,10 +74,10 @@ antes, veja a seção [Por que dá para confiar](#por-que-dá-para-confiar).
 
 Com o **Controle Inteligente de Aplicativos** ligado (Windows 11), uma versão recém-lançada pode
 ser bloqueada nos primeiros dias, até o Windows conhecer o arquivo. Nesse caso, espere um pouco
-e instale de novo. O botão **Atualizar** do app confere isso antes de trocar a versão: se o
-Windows barrar a nova, os widgets continuam na que você tem e um aviso explica o motivo. Para
-acabar com esses bloqueios, as versões vão passar a sair com assinatura digital (veja a
-[política de assinatura](#code-signing-policy)).
+e instale de novo. O `install.ps1` confere isso antes de trocar a versão: se o Windows barrar a
+nova, os widgets continuam na que você tem (e, a partir da versão 3.11, o botão **Atualizar** do
+app mostra um aviso explicando o motivo). Para acabar com esses bloqueios, as versões vão passar
+a sair com assinatura digital (veja a [política de assinatura](#code-signing-policy)).
 
 </details>
 
@@ -251,10 +251,10 @@ widget mostra, e só quando o widget está ligado:
 |---|---|---|
 | Tempo | [Open-Meteo](https://open-meteo.com) | O nome da cidade (para achá-la) e as coordenadas dela |
 | GitHub | api.github.com | O seu usuário do GitHub |
-| Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador. Dá para desligar em **Configurações → Tocando agora → Capa em alta do YouTube** |
+| Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador. Dá para desligar em **Configurações → Tocando agora → Capa em alta do YouTube** (a partir da versão 3.11) |
 | Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
 | Sistema, Pomodoro | Ninguém | |
-| Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** (o botão "Procurar agora" continua lá) |
+| Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** (a partir da versão 3.11; o botão "Procurar agora" continua lá) |
 
 Fora disso, o app não envia nenhuma informação para outros sistemas em rede, a não ser quando
 você pede (abrir um link, por exemplo). O instalador e o `install.ps1` mostram este resumo antes
@@ -269,6 +269,10 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 
 - **Committers and reviewers:** [lucasschn1](https://github.com/lucasschn1)
 - **Approvers:** [lucasschn1](https://github.com/lucasschn1)
+
+> **Situação:** o pedido de assinatura à SignPath Foundation ainda está em andamento. Até ele ser
+> aprovado, as versões saem **sem** assinatura digital (veja
+> [O Windows disse que "protegeu o computador"](#instalar)).
 
 Em português: cada versão é compilada pelo
 [GitHub Actions](https://github.com/lucasschn1/Widgets/actions/workflows/release.yml) a partir do

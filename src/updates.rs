@@ -6,8 +6,9 @@ use std::sync::mpsc::{channel, Receiver};
 
 pub const REPO: &str = "lucasschn1/Widgets";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// `Widgets.exe --versao`: responde a versão e sai (o instalador usa para ver se o Windows deixa
-/// a versão nova abrir).
+/// `Widgets.exe --versao`: responde a versão e sai, sem abrir nada (para conferir qual versão é
+/// um Widgets.exe). O install.ps1 não usa: ele precisa funcionar também com as versões de antes
+/// desta opção, e testa com a da linha de status do Claude Code.
 pub const VERSION_FLAG: &str = "--versao";
 const RELEASES: &str = "https://github.com/lucasschn1/Widgets/releases";
 const INSTALL_SCRIPT: &str = "https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1";

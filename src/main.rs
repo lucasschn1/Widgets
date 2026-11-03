@@ -80,8 +80,7 @@ fn main() {
         claude_usage::run_status_line();
         return;
     }
-    // o instalador confere se o Windows deixa esta versão abrir antes de trocar a anterior:
-    // responde e sai, sem abrir nada nem mexer nas opções
+    // `--versao`: responde e sai, sem abrir nada nem mexer nas opções
     if std::env::args().nth(1).as_deref() == Some(updates::VERSION_FLAG) {
         println!("{}", updates::VERSION);
         return;
