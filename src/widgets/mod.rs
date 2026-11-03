@@ -342,6 +342,11 @@ pub trait Kind {
         None
     }
     fn act(&mut self, _action: u32, _ctx: &mut Ctx) {}
+    /// O botão do mouse desceu na área da ação `action` (o `act` vem só ao soltar). Para reagir
+    /// já ao apertar, sem esperar o clique terminar; devolve true se precisa redesenhar.
+    fn pressed(&mut self, _action: u32) -> bool {
+        false
+    }
     fn hot_rect(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<Hot> {
         None
     }
