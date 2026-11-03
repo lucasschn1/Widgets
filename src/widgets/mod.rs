@@ -78,7 +78,7 @@ pub fn description(key: &str) -> &'static str {
         "midia" => "A música ou o vídeo tocando no Windows, com capa e controles.",
         "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
         "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
-        "claude" => "Quanto da sessão de 5 horas e da semana do seu plano você já usou no Claude Code.",
+        "claude" => "Quanto você já usou da sessão de 5 horas e da semana no Claude Code.",
         _ => "",
     }
 }

@@ -1847,6 +1847,18 @@ impl Tempo {
         t.view_at.set(Instant::now() - Duration::from_secs(5));
         t
     }
+
+    /// Chovendo agora, com a chuva caindo há `secs` segundos (a capa do README).
+    pub fn sample_raining(secs: f32, mode: Mode) -> Tempo {
+        let mut data = sample_data();
+        data["current"]["weather_code"] = json!(61);
+        data["current"]["temperature_2m"] = json!(19.4);
+        data["current"]["precipitation"] = json!(0.6);
+        let mut t = Tempo::sample("inicio", 0, 0.0, mode);
+        t.weather = Some(process(&data, "Florianópolis, Santa Catarina"));
+        t.started = Instant::now() - Duration::from_secs_f32(secs);
+        t
+    }
 }
 
 #[cfg(test)]

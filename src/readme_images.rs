@@ -15,6 +15,7 @@ use crate::backdrop::Backdrop;
 use crate::gfx::{self, Anchor, Canvas, Face, Image};
 use crate::imgops::blur;
 use crate::theme::*;
+use crate::widgets::claude::Claude;
 use crate::widgets::github::GitHub;
 use crate::widgets::media::Media;
 use crate::widgets::pomodoro::Pomodoro;
@@ -58,10 +59,159 @@ fn wallpaper(w: u32, h: u32) -> Image {
 
 /// O conteúdo do widget (sem o vidro) e o raio dos cantos, em pixels.
 fn content(kind: &dyn Kind, mode: Mode, cfg: &Value) -> (Image, f32) {
+    content_at(kind, mode, cfg, S)
+}
+
+/// O mesmo, numa escala qualquer (as miniaturas das janelas são menores).
+fn content_at(kind: &dyn Kind, mode: Mode, cfg: &Value, s: f32) -> (Image, f32) {
     let l = Layout::of(mode);
-    let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
+    let mut c = Canvas::new((l.w * s).round() as u32, (l.h * s).round() as u32, s);
     kind.draw(&mut c, mode, &Env { cfg, key: kind.key() });
-    (c.finish(), l.radius * S)
+    // a chuva do Tempo é desenhada por cima, à parte
+    kind.overlay(&mut c, mode, 0.0, 0.0);
+    (c.finish(), l.radius * s)
+}
+
+/// O widget `key` com os dados de exemplo do README (e as opções com que ele se desenha).
+fn readme_sample(key: &str, mode: Mode) -> (Box<dyn Kind>, Value) {
+    let cfg = empty_cfg();
+    match key {
+        "tempo" => (Box::new(Tempo::sample("inicio", 0, 0.0, mode)), cfg),
+        "sistema" => (Box::new(System::sample()), cfg),
+        "midia" => (Box::new(song(0, 0.0)), cfg),
+        "github" => (Box::new(GitHub::sample(&cfg, &json!({}))), cfg),
+        "pomodoro" => (Box::new(Pomodoro::new(&pomodoro_cfg())), pomodoro_cfg()),
+        _ => (Box::new(Claude::sample()), cfg),
+    }
+}
+
+/// Os três tamanhos de um widget numa imagem: o grande à esquerda, o médio e o pequeno à direita.
+fn trio(key: &str) -> Image {
+    let gap = (WIDGET_GAP * S).round() as i32 + 8;
+    let [(g, gr), (m, mr), (p, pr)] = [Mode::G, Mode::M, Mode::P].map(|mode| {
+        let (kind, cfg) = readme_sample(key, mode);
+        content(kind.as_ref(), mode, &cfg)
+    });
+    let margin = 48;
+    let x2 = margin + g.w as i32 + gap;
+    let (gh, mh, ph, mw) = (g.h as i32, m.h as i32, p.h as i32, m.w as i32);
+    let (w, h) = ((x2 + mw + margin) as u32, (margin + gh.max(mh + gap + ph) + margin) as u32);
+    let items = vec![
+        Item { img: g, radius: gr, x: margin, y: margin },
+        Item { img: m, radius: mr, x: x2, y: margin },
+        Item { img: p, radius: pr, x: x2, y: margin + mh + gap },
+    ];
+    let wall = wallpaper(w, h);
+    let bd = Backdrop::from_picture(&wall, BLUR, S);
+    compose(&wall, &bd, &items, &[])
+}
+
+/// Uma janela do app (configurações ou boas-vindas) sobre o papel de parede, com a barra de
+/// título do Windows 11 e o fundo "Mica" que a janela de verdade usa. `draw` desenha o conteúdo.
+fn window_shot(title: &str, w: f32, h: f32, draw: impl FnOnce(&mut crate::panel::Ui, &crate::settings::View)) -> Image {
+    use crate::panel::{Anims, Ui, BASE, BASE_AMOUNT};
+    use crate::settings::View;
+    let title_h = (32.0 * S).round() as u32;
+    let (pw, ph) = ((w * S).round() as u32, (h * S).round() as u32);
+    let margin = 64u32;
+    let (ww, wh) = (pw + 2 * margin, ph + title_h + 2 * margin);
+    let wall = wallpaper(ww, wh);
+    let bd = Backdrop::from_picture(&wall, BLUR, S);
+    let (wx, wy) = (margin as i32, margin as i32);
+    let origin = (wx, wy + title_h as i32);
+
+    // o fundo: o papel de parede desfocado, bem escurecido
+    let mut region = bd.region(origin.0, origin.1, pw, ph, false);
+    for px in region.px.chunks_exact_mut(3) {
+        for (c, b) in px.iter_mut().zip([BASE.0, BASE.1, BASE.2]) {
+            *c = (*c as f32 + (b as f32 - *c as f32) * BASE_AMOUNT).round() as u8;
+        }
+    }
+    let bg = region.to_image();
+
+    // o conteúdo, desenhado como a janela desenha
+    let mut sh = crate::shared::Shared::new(empty_cfg(), json!({}), S);
+    sh.backdrop = bd;
+    sh.text_scale = 1.0;
+    sh.tint = GLASS_TINT;
+    let sh = sh;
+    let render = |key: &'static str, mode: Mode, s: f32| {
+        let (kind, cfg) = readme_sample(key, mode);
+        Some(content_at(kind.as_ref(), mode, &cfg, s))
+    };
+    let view = View {
+        sh: &sh,
+        visible: crate::widgets::KEYS.to_vec(),
+        modes: Default::default(),
+        origin,
+        render: &render,
+        startup: true,
+        update_status: String::new(),
+        update_version: None,
+    };
+    let mut c = Canvas::new(pw, ph, S);
+    c.image(&bg, 0.0, 0.0);
+    let mut anims = Anims::default();
+    {
+        let mut ui = Ui {
+            c: &mut c,
+            regions: Vec::new(),
+            entries: Vec::new(),
+            hover: None,
+            pressed: None,
+            focus: None,
+            anims: &mut anims,
+            animations: false,
+            ox: 0.0,
+            oy: 0.0,
+            clip: (0.0, 0.0, w, h),
+        };
+        draw(&mut ui, &view);
+    }
+    let body = c.finish();
+
+    // a barra de título fica da cor do alto do fundo (como o Windows pinta a da janela)
+    let n = (bg.w * 6).min(bg.w * bg.h) as usize;
+    let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
+    for p in bg.px.chunks_exact(4).take(n) {
+        b += p[0] as u64;
+        g += p[1] as u64;
+        r += p[2] as u64;
+    }
+    let n = n.max(1) as u64;
+    let caption = Rgba::rgb((r / n) as u8, (g / n) as u8, (b / n) as u8);
+    let mut win = Canvas::new(pw, ph + title_h, S);
+    let (lw, th) = (w, title_h as f32 / S);
+    win.fill_round_rect(0.0, 0.0, lw, th + 1.0, 0.0, caption);
+    win.text(14.0, th / 2.0, title, Face::Regular, 12.0, WHITE.alpha(0.9), Anchor::LM, None);
+    // minimizar, maximizar e fechar
+    let glyph = WHITE.alpha(0.85);
+    let cy = th / 2.0;
+    let (x_min, x_max, x_close) = (lw - 3.0 * 46.0 + 23.0, lw - 2.0 * 46.0 + 23.0, lw - 46.0 + 23.0);
+    win.line(&[(x_min - 5.0, cy), (x_min + 5.0, cy)], glyph, 1.0);
+    win.stroke_round_rect(x_max - 5.0, cy - 5.0, x_max + 5.0, cy + 5.0, 1.0, glyph, 1.0);
+    win.line(&[(x_close - 5.0, cy - 5.0), (x_close + 5.0, cy + 5.0)], glyph, 1.0);
+    win.line(&[(x_close - 5.0, cy + 5.0), (x_close + 5.0, cy - 5.0)], glyph, 1.0);
+    win.image(&body, 0.0, th);
+    let window = win.finish();
+
+    // a cena: sombra, a janela com os cantos arredondados e uma borda fina
+    let mut c = Canvas::new(ww, wh, 1.0);
+    c.image(&wall, 0.0, 0.0);
+    let pad = 48.0;
+    let (fw, fh) = (window.w as f32, window.h as f32);
+    let radius = 8.0 * S;
+    let mut sh = Canvas::new((fw + 2.0 * pad) as u32, (fh + 2.0 * pad) as u32, 1.0);
+    sh.fill_round_rect(pad, pad + 14.0, pad + fw, pad + fh + 14.0, radius, Rgba(10, 6, 24, 110));
+    let mut shadow = sh.finish();
+    let (sw, shh) = (shadow.w, shadow.h);
+    blur(&mut shadow.px, sw, shh, 4, 22.0);
+    c.image(&shadow, wx as f32 - pad, wy as f32 - pad);
+    c.push_round_clip(wx as f32, wy as f32, wx as f32 + fw, wy as f32 + fh, radius);
+    c.image(&window, wx as f32, wy as f32);
+    c.pop_clip();
+    c.stroke_round_rect(wx as f32, wy as f32, wx as f32 + fw, wy as f32 + fh, radius, WHITE.alpha(0.14), 1.0);
+    c.finish()
 }
 
 /// Um cartão pronto para pôr na cena: conteúdo, raio, posição.
@@ -111,8 +261,16 @@ fn empty_cfg() -> Value {
 }
 
 fn pomodoro_cfg() -> Value {
-    // rodando: 13:27 para acabar o terceiro foco
-    json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 2, "total": 1500.0, "fim": crate::win::now() + 807.5}}, "app": {}})
+    pomodoro_cfg_at(0.0)
+}
+
+/// Rodando: 13:27 para acabar o terceiro foco (menos `t` segundos), com dois focos já feitos hoje.
+fn pomodoro_cfg_at(t: f64) -> Value {
+    let today = crate::win::local_time().iso_date();
+    json!({"pomodoro": {
+        "estado": {"fase": "foco", "ciclo": 2, "total": 1500.0, "fim": crate::win::now() + 807.5 - t},
+        "hoje": {"data": today, "pomodoros": 2, "minutos": 50}
+    }, "app": {}})
 }
 
 /// Capas inventadas para as músicas de exemplo.
@@ -188,11 +346,92 @@ fn readme() {
     }
     let cfg = empty_cfg();
 
+    // ---------- capa: os seis widgets no pequeno, se mexendo ----------
+    {
+        let dir = frames_dir("capa");
+        let (gap, margin) = (22, 44);
+        let side = (crate::widgets::SMALL * S).round() as i32;
+        let (cols, rows) = (3, 2);
+        let (w, h) = ((2 * margin + cols * side + (cols - 1) * gap) as u32, (2 * margin + rows * side + (rows - 1) * gap) as u32);
+        let wall = wallpaper(w, h);
+        let bd = Backdrop::from_picture(&wall, BLUR, S);
+        // 5,6 s em quadros de 40 ms; o Sistema oscila num ciclo inteiro, e o Tocando agora troca
+        // de música e volta, para a volta do GIF não dar pulo
+        let (frame_ms, total_ms) = (40u64, 5600u64);
+        let fade = 0.56f64;
+        // o Pomodoro de cada segundo, desenhado de uma vez: o relógio dele é o de verdade, e assim
+        // não vira o minuto no meio do GIF (o anel anda tão pouco em 5 s que não faz falta)
+        let pomodoro: Vec<(Image, f32)> = (0..=total_ms / 1000)
+            .map(|sec| {
+                let c = pomodoro_cfg_at(sec as f64);
+                content(&Pomodoro::new(&c), Mode::P, &c)
+            })
+            .collect();
+        let mut list = String::new();
+        for (k, ms) in (0..total_ms).step_by(frame_ms as usize).enumerate() {
+            let t = ms as f64 / 1000.0;
+            let phase = t / (total_ms as f64 / 1000.0) * std::f64::consts::TAU;
+            let media = if t < 2.2 {
+                song(0, t)
+            } else if t < 2.2 + fade {
+                song(1, 0.0).fading_from(&song(0, 2.2), Mode::P, S, ((t - 2.2) / fade) as f32)
+            } else if t < 5.6 - fade {
+                song(1, t - 2.2 - fade)
+            } else {
+                song(0, 0.0).fading_from(&song(1, 5.6 - 2.2 - 2.0 * fade), Mode::P, S, ((t - (5.6 - fade)) / fade) as f32)
+            };
+            let system = System::sample_values([(0.30 + 0.16 * phase.sin()) as f32, (0.68 + 0.03 * (phase * 2.0).sin()) as f32, 0.54]);
+            let cards: [Box<dyn Kind>; 5] = [
+                Box::new(Tempo::sample_raining(4.0 + t as f32, Mode::P)),
+                Box::new(system),
+                Box::new(media),
+                Box::new(GitHub::sample(&cfg, &json!({}))),
+                Box::new(Claude::sample_growing_to(0.1, (0.46, 0.31), ms)),
+            ];
+            let mut cards: Vec<(Image, f32)> = cards.iter().map(|kind| content(kind.as_ref(), Mode::P, &cfg)).collect();
+            cards.insert(4, pomodoro[t as usize].clone());
+            let items: Vec<Item> = cards
+                .into_iter()
+                .enumerate()
+                .map(|(i, (img, radius))| {
+                    let (col, row) = (i as i32 % cols, i as i32 / cols);
+                    Item { img, radius, x: margin + col * (side + gap), y: margin + row * (side + gap) }
+                })
+                .collect();
+            gfx::save_png(&compose(&wall, &bd, &items, &[]), &dir.join(format!("{k:03}.png"))).unwrap();
+            list.push_str(&format!("{k:03}.png {frame_ms}\n"));
+        }
+        std::fs::write(dir.join("frames.txt"), list).unwrap();
+        println!("{}", dir.display());
+    }
+
+    // ---------- um widget por imagem, nos três tamanhos ----------
+    for key in ["github", "pomodoro", "claude"] {
+        save(&trio(key), &docs().join(format!("{key}.png")));
+    }
+
+    // ---------- janelas: configurações e boas-vindas ----------
+    for page in ["aparencia", "widgets"] {
+        let img = window_shot("Configurações dos widgets", crate::settings::W, crate::settings::H, |ui, view| {
+            let mut st = crate::settings::SettingsState::new(page);
+            crate::settings::draw(&mut st, ui, view);
+        });
+        save(&img, &docs().join(format!("config-{}.png", if page == "widgets" { "galeria" } else { page })));
+    }
+    {
+        let img = window_shot("Bem-vindo aos widgets", crate::prompt::WELCOME_W, crate::prompt::WELCOME_H, |ui, view| {
+            let mut st = crate::prompt::WelcomeState::new(&empty_cfg(), crate::widgets::KEYS, true, true);
+            crate::prompt::draw_welcome(&mut st, ui, view);
+        });
+        save(&img, &docs().join("boas-vindas.png"));
+    }
+
     // ---------- área de trabalho ----------
     {
         let gap = (WIDGET_GAP * S).round() as i32;
-        let (w, top) = (1260, 42);
-        let right = w - 40 - (320.0 * S) as i32;
+        let (top, margin) = (48, 48);
+        let w = 2 * margin + 2 * (320.0 * S) as i32 + gap;
+        let right = w - margin - (320.0 * S) as i32;
         let left = right - gap - (320.0 * S) as i32;
         let column = |x: i32, cards: Vec<(Box<dyn Kind>, Mode, Value)>| {
             let mut y = top;
@@ -207,7 +446,11 @@ fn readme() {
         };
         let (mut items, y1) = column(
             right,
-            vec![(Box::new(Tempo::sample("inicio", 0, 0.0, Mode::G)), Mode::G, cfg.clone()), (Box::new(System::sample()), Mode::M, cfg.clone())],
+            vec![
+                (Box::new(Tempo::sample("inicio", 0, 0.0, Mode::G)), Mode::G, cfg.clone()),
+                (Box::new(System::sample()), Mode::M, cfg.clone()),
+                (Box::new(Claude::sample()), Mode::M, cfg.clone()),
+            ],
         );
         let (more, y2) = column(
             left,
@@ -218,7 +461,7 @@ fn readme() {
             ],
         );
         items.extend(more);
-        let h = y1.max(y2) - gap + 42;
+        let h = y1.max(y2) - gap + margin;
         let wall = wallpaper(w as u32, h as u32);
         let bd = Backdrop::from_picture(&wall, BLUR, S);
         save(&compose(&wall, &bd, &items, &[]), &docs().join("desktop.png"));
@@ -519,7 +762,6 @@ fn claude_widget_images() {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
-    use crate::widgets::claude::Claude;
     let out = std::env::var("MOCK_OUT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
     std::fs::create_dir_all(&out).unwrap();
     let cfg = empty_cfg();
@@ -551,7 +793,6 @@ fn claude_widget_anim() {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
-    use crate::widgets::claude::Claude;
     let out = std::env::var("MOCK_OUT").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("anim");
     std::fs::create_dir_all(&out).unwrap();
     let cfg = empty_cfg();

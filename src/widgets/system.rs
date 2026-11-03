@@ -141,6 +141,16 @@ impl System {
         s
     }
 
+    /// Exemplo com CPU, memória e disco escolhidos (0 a 1), já sem a animação dos anéis (a capa
+    /// do README).
+    #[cfg(test)]
+    pub fn sample_values(values: [f32; 3]) -> System {
+        let mut s = System::sample();
+        s.target = values;
+        s.from = values;
+        s
+    }
+
     /// Exemplo virado (pequeno ou médio) mostrando os apps de um recurso (imagens do README).
     #[cfg(test)]
     pub fn sample_flipped(which: Option<usize>, mode: Mode) -> System {
