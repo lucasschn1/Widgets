@@ -8,3 +8,6 @@ cache.json
 # saída do empacotamento
 /dist
 
+
+# configurações pessoais do Claude Code (o hook que aplica a branch nos widgets instalados)
+.claude/settings.local.json
