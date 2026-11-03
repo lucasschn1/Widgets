@@ -1,136 +1,208 @@
+<p align="center">
+  <img src="docs/images/icone.png" width="88" alt="Ícone do Widgets">
+</p>
+
 <h1 align="center">Widgets</h1>
 
 <p align="center">
-  Widgets de vidro para a área de trabalho do Windows: clima, sistema, a música que está tocando,
-  seu GitHub, um relógio Pomodoro e o uso do Claude.
+  <b>Widgets de vidro para a área de trabalho do Windows.</b><br>
+  Clima, sistema, a música que está tocando, seu GitHub, um Pomodoro e o uso do Claude,
+  presos ao papel de parede.
 </p>
 
 <p align="center">
   <a href="https://github.com/lucasschn1/Widgets/releases/latest"><img alt="Última versão" src="https://img.shields.io/github/v/release/lucasschn1/Widgets?label=vers%C3%A3o&color=0a84ff"></a>
   <img alt="Windows 10 e 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0a84ff">
+  <a href="https://github.com/lucasschn1/Widgets/actions/workflows/release.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/lucasschn1/Widgets/release.yml?label=build"></a>
+  <img alt="Feito em Rust" src="https://img.shields.io/badge/feito%20em-Rust-ce422b">
+  <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-30d158"></a>
   <a href="https://github.com/lucasschn1/Widgets/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/lucasschn1/Widgets/total?label=downloads&color=bf5af2"></a>
 </p>
 
 <p align="center">
-  <img src="docs/images/desktop.png" width="760" alt="Os widgets na área de trabalho">
+  <img src="docs/images/capa.gif" width="711" alt="Os seis widgets no tamanho pequeno: Tempo com chuva caindo, Sistema, Tocando agora trocando de música, GitHub, Pomodoro contando e Uso do Claude">
 </p>
 
-Eles ficam presos ao papel de parede, atrás das janelas, e o fundo de cada um é o próprio
-papel de parede desfocado, como um vidro fosco. Quando o mouse sai de cima, ficam um pouco
-mais transparentes, para não roubar a atenção.
+<p align="center">
+  <a href="https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe"><b>⬇ Baixar o instalador</b></a>
+  &nbsp;·&nbsp;
+  <a href="#instalar">Instalar pelo terminal</a>
+  &nbsp;·&nbsp;
+  <a href="#os-widgets">Ver os widgets</a>
+  &nbsp;·&nbsp;
+  <a href="#privacidade">Privacidade</a>
+  &nbsp;·&nbsp;
+  <a href="#para-quem-quer-mexer-no-código">Mexer no código</a>
+</p>
+
+Eles ficam atrás das janelas, e o fundo de cada um é o próprio papel de parede desfocado,
+como um vidro fosco. Quando o mouse sai de cima, ficam um pouco mais transparentes, para não
+roubar a atenção. O app inteiro é um único `Widgets.exe` de 3,5 MB (download de 1,5 MB), abre na hora e usa pouca
+memória.
 
 ## Instalar
 
-Abra o **PowerShell** e cole:
+**Pelo instalador:** baixe o **[Widgets-Setup.exe](https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe)**
+e siga os passos.
+
+**Pelo terminal:** abra o **PowerShell** e cole:
 
 ```powershell
 irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
 ```
 
-Pronto. Não precisa ser administrador, e o programa inteiro é um único `Widgets.exe` de 2,5 MB
-que abre na hora. Se preferir o jeito tradicional, baixe o
-**[Widgets-Setup.exe](https://github.com/lucasschn1/Widgets/releases/latest)** e siga o
-instalador.
+Nos dois casos não precisa ser administrador: o app vai para `%LOCALAPPDATA%\Programs\Widgets`,
+ganha um atalho no Menu Iniciar e aparece em Configurações → Aplicativos, por onde também se
+desinstala. Quando sai uma versão nova, o próprio app avisa e atualiza com um clique, sem perder
+as suas configurações.
 
-> Na primeira vez, o Windows pode avisar que "protegeu o computador". É porque o app não tem
-> uma assinatura digital paga. Clique em **Mais informações** e depois em **Executar assim mesmo**.
+| | |
+|---|---|
+| **Sistema** | Windows 10 ou 11, 64 bits |
+| **Tamanho** | 3,5 MB instalado (um `.exe` só, sem dependências) |
+| **Permissões** | Nenhuma de administrador; tudo fica na sua pasta de usuário |
+| **Desinstalar** | Configurações → Aplicativos → Widgets |
 
-Quando sair uma versão nova, o próprio app avisa e atualiza com um clique. Para desinstalar,
-é pelo caminho de sempre: Configurações → Aplicativos → Widgets.
+<details>
+<summary><b>O Windows disse que "protegeu o computador"</b></summary>
 
-## O que vem junto
+<br>
 
-**Tempo** tem o céu de agora como fundo: azul de dia, escuro de noite, cinza quando fecha, com
-a chuva (ou a neve) caindo de verdade. Mostra as próximas horas e, no tamanho grande, os
-próximos dias com a faixa de mínima e máxima. Avisa quando vai começar a chover.
+É o SmartScreen. Ele avisa em todo programa que ainda não tem uma assinatura digital paga, como
+este. Clique em **Mais informações** e depois em **Executar assim mesmo**. Se quiser conferir
+antes, veja a seção [Por que dá para confiar](#por-que-dá-para-confiar).
 
-Dá para navegar nele, como no Tempo do Mac: a faixa de horas rola (roda do mouse ou setinhas)
-pelas próximas 24 horas, com a chance de chuva de cada hora. Clicar no tempo de agora abre os
-detalhes (sensação, umidade, vento, índice UV, nascer e pôr do sol e chuva), em páginas com
-pontinhos. Clicar num dia ou numa hora abre aquele dia, com as horas dele e os detalhes, e as
-setas passam para o dia anterior ou o seguinte.
+Com o **Controle Inteligente de Aplicativos** ligado (Windows 11), uma versão recém-lançada pode
+ser bloqueada nos primeiros dias, até o Windows conhecer o arquivo. Nesse caso, espere um pouco
+e instale de novo.
+
+</details>
+
+## Por que dá para confiar
+
+- **O código é aberto,** sob a [licença MIT](LICENSE). Tudo o que o app faz está neste
+  repositório, e dá para [compilar você mesmo](#compilar).
+- **Ninguém compila na própria máquina.** Cada versão é gerada pelo
+  [GitHub Actions](https://github.com/lucasschn1/Widgets/actions/workflows/release.yml) a partir
+  do código público da tag, depois de rodar os testes. O registro de cada build fica aberto.
+- **Dá para conferir o arquivo.** A página de cada Release mostra o SHA-256 dos arquivos.
+  Compare com o do que você baixou:
+  `Get-FileHash .\Widgets-Setup.exe`.
+- **Sem administrador, sem serviço, sem driver.** O app roda como um programa comum, com as
+  permissões do seu usuário, e sai inteiro pela desinstalação.
+- **Sem telemetria e sem anúncios.** O app não manda nada sobre você para lugar nenhum; veja
+  abaixo exatamente com quem ele conversa.
+
+## Os widgets
+
+Cada widget tem três tamanhos, que se encaixam como peças. Escolha quais aparecem na Galeria de
+widgets (clique direito → Configurações).
+
+<p align="center">
+  <img src="docs/images/desktop.png" width="720" alt="Os seis widgets na área de trabalho, em tamanhos diferentes">
+</p>
+
+### Tempo
+
+O céu de agora como fundo: azul de dia, escuro de noite, cinza quando fecha, com a chuva (ou a
+neve) caindo de verdade. Mostra as próximas horas e, no grande, os próximos dias com a faixa de
+mínima e máxima. Avisa quando vai começar a chover.
+
+Dá para navegar nele: a faixa de horas rola (roda do mouse ou setinhas) pelas próximas 24 horas,
+com a chance de chuva de cada hora. Clicar no tempo de agora abre os detalhes (sensação,
+umidade, vento, índice UV, nascer e pôr do sol e chuva), e clicar num dia ou numa hora abre
+aquele dia.
 
 <p align="center">
   <img src="docs/images/tempo-navegavel.png" width="760" alt="Tempo: início, detalhes de agora e um dia da semana">
 </p>
 
-**Sistema** mostra CPU, memória e disco em três anéis, com a porcentagem e quanto está em uso
-agora (a velocidade da CPU em GHz, a memória e o disco em GB). Clique num anel e o widget vira
-para mostrar os 3 apps que mais usam aquele recurso (no disco, as unidades). No tamanho
-grande, aparecem os 5 primeiros, cada um com o seu ícone, junto com a rede e há quanto tempo o
-PC está ligado.
+### Sistema
+
+CPU, memória e disco em três anéis, com a porcentagem e quanto está em uso (a CPU em GHz, a
+memória e o disco em GB). Clique num anel e o widget vira para mostrar os apps que mais usam
+aquele recurso (no disco, as unidades). No grande, aparecem os 5 primeiros, com ícone, junto com
+a rede e há quanto tempo o PC está ligado.
 
 <p align="center">
   <img src="docs/images/sistema-processos.png" width="620" alt="Sistema: os anéis e os apps que mais usam a memória e a CPU">
 </p>
 
-**Tocando agora** acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e
-outros). O fundo ganha as cores da capa e muda junto quando a música troca. No tamanho grande,
-há também o volume do app, aleatório e repetir; clique na barra de progresso para pular. A roda
-do mouse em cima dele muda o volume do app que está tocando.
+### Tocando agora
+
+Acompanha o que estiver tocando no Windows (Spotify, YouTube no navegador e outros). O fundo
+ganha as cores da capa e muda junto quando a música troca. No grande, há também o volume do app,
+aleatório e repetir; clique na barra de progresso para pular. A roda do mouse em cima dele muda
+o volume do app que está tocando.
 
 <p align="center">
   <img src="docs/images/musica.gif" width="380" alt="Tocando agora mudando de cor conforme a música">
 </p>
 
-### Ilha flutuante
-
-Clique no Tocando agora (fora dos botões) e ele vira uma pílula preta por cima de todas as
-janelas. Parada, ela mostra a capa e ondas que seguem o som do app que está tocando. Com o mouse
-em cima, estica e mostra a música, tocar e avançar; com um clique, abre inteira, com a barra de
-progresso. Arraste para qualquer lugar da tela (perto do alto e do meio, ela encaixa lá) e ela
-lembra onde ficou. Em jogo ou vídeo em tela cheia naquele monitor, ela se esconde.
-
-Para devolver o widget à área de trabalho, use **Voltar para a área de trabalho** na ilha aberta
-ou o clique direito. Se nada tocar por 5 minutos, ela volta sozinha.
+**Ilha flutuante.** Clique no Tocando agora (fora dos botões) e ele vira uma pílula preta por
+cima de todas as janelas. Parada, ela mostra a capa e ondas que seguem o som; com o mouse em
+cima, estica e mostra a música; com um clique, abre inteira. Arraste para qualquer lugar (perto
+do alto e do meio, ela encaixa lá). Em jogo ou vídeo em tela cheia, ela se esconde. Para
+devolver o widget à área de trabalho, use **Voltar para a área de trabalho** na ilha aberta ou o
+clique direito; se nada tocar por 5 minutos, ela volta sozinha.
 
 <p align="center">
   <img src="docs/images/ilha.webp" width="560" alt="O Tocando agora virando a ilha flutuante, esticando, abrindo e voltando">
 </p>
 
-**GitHub** traz o mapa de contribuições, a sequência de dias e as últimas atividades. Se você
-usa o [GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso
-quando alguém pede sua revisão.
+### GitHub
 
-**Pomodoro** é um relógio com timer de foco e pausas. Ele conta os ciclos até a pausa longa,
-soma quanto você focou no dia, e começa ou pausa com um clique (ou pelo clique direito).
+O mapa de contribuições, a sequência de dias e as últimas atividades. Se você usa o
+[GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso quando
+alguém pede sua revisão.
 
 <p align="center">
-  <img src="docs/images/pomodoro.webp" width="300" alt="O Pomodoro rodando">
+  <img src="docs/images/github.png" width="620" alt="GitHub nos três tamanhos">
 </p>
 
-**Uso do Claude** mostra quanto da sessão de 5 horas e da semana do seu plano você já usou no
-[Claude Code](https://code.claude.com), em dois medidores: a sessão por fora, a semana por dentro.
-Um tracinho em cada medidor marca quanto do período já passou, e o widget avisa se, no ritmo de
-agora, a sessão acaba antes de reiniciar. Os números vêm do próprio Claude Code: ao clicar em
-"Conectar", o widget vira a linha de status dele (só se ainda não houver outra; uma cópia das
-configurações do Claude Code fica em `settings.json.antes-do-widgets`). Funciona nos planos Pro e
-Max, a partir da primeira resposta de cada conversa. Ele chega oculto para quem já usava o app:
-mostre-o na Galeria de widgets.
+### Pomodoro
+
+Um relógio com timer de foco e pausas. Conta os ciclos até a pausa longa, soma quanto você focou
+no dia e começa ou pausa com um clique (ou pelo clique direito, onde também mudam as durações).
+
+<p align="center">
+  <img src="docs/images/pomodoro.png" width="620" alt="Pomodoro nos três tamanhos">
+</p>
+
+### Uso do Claude
+
+Quanto da sessão de 5 horas e da semana do seu plano você já usou no
+[Claude Code](https://code.claude.com). Um tracinho em cada medidor marca quanto do período já
+passou, o grande mostra os dias da semana em que você mais usa, e o widget avisa se, no ritmo de
+agora, a sessão acaba antes de reiniciar.
+
+Os números vêm do próprio Claude Code: ao clicar em **Conectar**, o widget vira a linha de status
+dele (só se ainda não houver outra; uma cópia das configurações do Claude Code fica em
+`settings.json.antes-do-widgets`). Funciona nos planos Pro e Max, a partir da primeira resposta
+de cada conversa. Quem já usava o app encontra este widget na Galeria de widgets.
+
+<p align="center">
+  <img src="docs/images/claude.png" width="620" alt="Uso do Claude nos três tamanhos">
+</p>
 
 ## Do tamanho que você quiser
 
-Cada widget tem três tamanhos. Clique no botão que aparece no canto, ou dê dois cliques no
-widget. Os vizinhos se ajeitam sozinhos. Os tamanhos são os mesmos em todos os widgets, então
-eles se encaixam como peças: o pequeno é um quadrado, o médio tem a altura dele e a largura de
-dois pequenos lado a lado, e o grande tem a largura do médio e espaço para as listas.
+Clique no botão que aparece no canto, ou dê dois cliques no widget. O pequeno é um quadrado, o
+médio tem a largura de dois pequenos lado a lado e o grande tem espaço para as listas. Os
+vizinhos se ajeitam sozinhos. Para mover, é só arrastar: eles se encaixam uns nos outros e nas
+bordas da tela (segure `Alt` para soltar livre).
 
-<p align="center">
-  <img src="docs/images/tamanhos.webp" width="340" alt="Mudando de tamanho">
-</p>
-
-<p align="center">
-  <img src="docs/images/tamanhos.png" width="760" alt="Pequeno, médio e grande">
-</p>
-
-Para mover, é só arrastar: eles se encaixam uns nos outros e nas bordas da tela (segure `Alt`
-para soltar livre).
+<table>
+  <tr>
+    <td width="34%" align="center"><img src="docs/images/tamanhos.webp" alt="Mudando de tamanho"></td>
+    <td align="center"><img src="docs/images/tamanhos.png" alt="Pequeno, médio e grande"></td>
+  </tr>
+</table>
 
 ## Configurações
 
-Tudo muda na hora, sem botão de salvar. Dá para ajustar o quanto o vidro desfoca e escurece
-(com uma prévia ao vivo), escolher quais widgets aparecem e decidir quais avisos você quer
-receber.
+Tudo muda na hora, sem botão de salvar: o quanto o vidro desfoca e escurece (com uma prévia ao
+vivo), quais widgets aparecem, as opções de cada um e quais avisos você quer receber.
 
 <table>
   <tr>
@@ -139,24 +211,21 @@ receber.
   </tr>
 </table>
 
-Na primeira vez que você abre, umas boas-vindas rápidas ajudam a escolher os widgets e
-configurar a cidade do clima.
+Na primeira vez, umas boas-vindas rápidas ajudam a escolher os widgets e a cidade do clima.
 
 <p align="center">
   <img src="docs/images/boas-vindas.png" width="600" alt="Boas-vindas">
 </p>
 
-## Com mais de um monitor
+### Com mais de um monitor
 
 Os widgets lembram onde ficam em cada combinação de telas. Se você tira o notebook do monitor
 externo, eles vão para a tela do notebook sem ficar um em cima do outro; quando você conecta de
-novo, cada um volta para onde estava. Numa combinação nova (o notebook virou a segunda tela, ou
-mudou de lado), eles ficam no mesmo canto do mesmo monitor, no tamanho certo para a escala dele.
+novo, cada um volta para onde estava. Avisos e janelas abrem no monitor onde está o mouse, um
+jogo em tela cheia pausa só os widgets daquele monitor e cada tela usa o próprio papel de parede
+no vidro.
 
-Avisos e janelas abrem no monitor onde está o mouse. Um jogo ou vídeo em tela cheia pausa só os
-widgets daquele monitor, e cada tela usa o próprio papel de parede no vidro.
-
-## Tudo no clique direito
+### Tudo no clique direito
 
 O app não usa atalhos de teclado globais, para não roubar combinações de outros programas (nem o
 AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no ícone da bandeja:
@@ -170,24 +239,50 @@ AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no �
 | No Pomodoro | Começar, pausar, pular de fase e mudar as durações |
 | No Uso do Claude | Conectar ou desconectar do Claude Code e ver o uso no claude.ai |
 
+## Privacidade
+
+O app não tem conta, telemetria nem anúncios. Ele só acessa a internet para buscar o que cada
+widget mostra, e só quando o widget está ligado:
+
+| Widget | Com quem conversa | O que envia |
+|---|---|---|
+| Tempo | [Open-Meteo](https://open-meteo.com) | O nome da cidade (para achá-la) e as coordenadas dela |
+| GitHub | api.github.com | O seu usuário do GitHub |
+| Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador |
+| Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
+| Sistema, Pomodoro | Ninguém | |
+| Atualizações | api.github.com | Nada além do pedido da versão mais recente |
+
+As configurações ficam em `%APPDATA%\Widgets` (o `config.json` dá para ler e editar à mão).
+
 ---
 
 ## Para quem quer mexer no código
 
+Fork, ideia de widget novo ou correção: tudo é bem-vindo. Abra uma
+[issue](https://github.com/lucasschn1/Widgets/issues) para conversar antes de algo grande, ou
+mande direto um pull request.
+
 O app é escrito em [Rust](https://www.rust-lang.org/) e conversa direto com o Windows: Direct2D
-e DirectWrite para desenhar, WinRT para saber o que está tocando. Para compilar, instale o Rust
-pelo [rustup](https://rustup.rs) (ele oferece as ferramentas de compilação do Visual Studio, se
-faltarem) e rode:
+e DirectWrite para desenhar, WIC para as imagens e WinRT para saber o que está tocando. Não há
+framework de interface: cada widget desenha o próprio conteúdo num `Canvas`, e o resto (vidro,
+arrastar, encaixar, tamanhos, menus) é comum a todos.
+
+### Compilar
+
+Instale o Rust pelo [rustup](https://rustup.rs) (ele oferece as ferramentas de compilação do
+Visual Studio, se faltarem) e rode:
 
 ```powershell
-cargo run            # versão de teste, com opções separadas em %APPDATA%\Widgets-dev
-cargo build --release
+git clone https://github.com/lucasschn1/Widgets
+cd Widgets
+cargo run              # versão de teste
+cargo test             # os testes
+cargo build --release  # o Widgets.exe final, em target\release
 ```
 
-A versão de teste pode ficar aberta junto com a instalada: ela usa outra pasta de opções, outro
-ícone na bandeja e outra entrada em "iniciar com o Windows". A versão final guarda tudo em
-`%APPDATA%\Widgets`, no mesmo formato da versão 2 (em Python), então quem atualiza não perde
-nada.
+A versão de teste pode ficar aberta junto com a instalada: ela usa outra pasta de opções
+(`%APPDATA%\Widgets-dev`), outro ícone na bandeja e outra entrada em "iniciar com o Windows".
 
 <details>
 <summary><b>Como o código está organizado</b></summary>
@@ -196,15 +291,17 @@ nada.
 install.ps1           instalador de uma linha (baixa o último Release)
 packaging/            build.ps1 (Widgets.exe e .zip), o instalador do Inno Setup e
                       readme_anim.py (junta os quadros das animações do README)
-res/                  ícone e manifesto embutidos no Widgets.exe (pelo build.rs)
+res/                  ícone, fontes e manifesto embutidos no Widgets.exe (pelo build.rs)
 src/
   main.rs             inicia o app e roda o laço de mensagens
   app.rs              cria os widgets e coordena arraste, encaixe, menus, avisos e modos
   app_panels.rs       a parte do app que cuida das configurações, perguntas e boas-vindas
+  app_screens.rs      vários monitores: o lugar dos widgets em cada combinação de telas
+  app_island.rs       a ilha flutuante do Tocando agora
   config.rs           lê e grava as opções (config.json e cache.json), com os valores padrão
   shared.rs           o estado que todos os widgets consultam
   card.rs             a base de todo widget (tamanhos, botão de tamanho, modo edição)
-  gfx.rs              desenho com Direct2D, DirectWrite e WIC
+  gfx.rs              desenho com Direct2D, DirectWrite e WIC (o Canvas)
   backdrop.rs         o vidro: o papel de parede desfocado atrás dos cartões
   theme.rs            medidas, cores e ícones
   events.rs           janelas do Windows e a fila de eventos
@@ -216,55 +313,100 @@ src/
   tray.rs             ícone na bandeja e notificações
   updates.rs          procurar e instalar versões novas
   startup.rs          iniciar com o Windows
-  win.rs, util.rs, imgops.rs, drawing.rs
-  widgets/
-    mod.rs            a lista de widgets e o trait `Kind`, que todo widget implementa
-    tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs, claude.rs
   claude_usage.rs     o uso do Claude Code: a linha de status e o arquivo com os números
-  app_screens.rs      vários monitores: o lugar dos widgets em cada combinação de telas
-  app_island.rs       a ilha flutuante do Tocando agora
-  readme_images.rs    gera as imagens do README (cargo test readme -- --ignored)
+  readme_images.rs    gera as imagens do README
+  win.rs, util.rs, imgops.rs, drawing.rs, sysinfo.rs
+  widgets/
+    mod.rs            a lista de widgets, as medidas dos tamanhos e o trait `Kind`
+    tempo.rs, system.rs, media.rs, github.rs, pomodoro.rs, claude.rs
 ```
 
 </details>
 
-<details>
-<summary><b>Criando um widget novo</b></summary>
+### Criando um widget novo
 
-1. Crie um arquivo em `src/widgets/` com um tipo que implemente `Kind`. O essencial é `key`,
-   `title`, `layout(mode)` (o tamanho do cartão em cada modo) e `draw`, e os outros métodos
-   (`hit`, `act`, `tick`, `menu`, `tooltip`...) têm um padrão que não faz nada.
-2. Coloque a chave em `KEYS` e o widget em `create`, `title`, `description`, `icon_name` e
-   `sample` (os dados de exemplo da miniatura da galeria), todos em `src/widgets/mod.rs`.
-3. Se quiser uma página própria nas configurações, crie uma em `src/settings.rs`, seguindo as
-   que já existem.
+Todo widget é um tipo que implementa o trait `Kind` (em `src/widgets/mod.rs`). Só `key`,
+`title` e `draw` são obrigatórios; o resto (`hit` e `act` para cliques, `tick` para atualizar,
+`menu` para o clique direito, `tooltip`...) tem um padrão que não faz nada. O tamanho do cartão
+não é escolha do widget: os três tamanhos são iguais para todos (`Layout::of(mode)`), e o widget
+só desenha dentro deles.
 
-Uma opção geral nova vai em `config.rs`, com o valor padrão. As configurações não têm botão de
-salvar: `set_setting` grava e aplica na hora.
+1. **Crie o arquivo** `src/widgets/meu.rs`. Um ponto de partida:
 
-As imagens do README são desenhadas pelo próprio código, com dados de exemplo:
-`cargo test readme -- --ignored` grava as imagens paradas em `docs/images`, e
-`python packaging/readme_anim.py` junta os quadros do GIF e da animação de tamanho.
+   ```rust
+   use super::{Env, Kind, Layout, Mode};
+   use crate::gfx::{Anchor, Canvas, Face};
+   use crate::theme::*;
 
-</details>
+   pub struct Meu;
 
-<details>
-<summary><b>Lançando uma versão</b></summary>
+   impl Kind for Meu {
+       fn key(&self) -> &'static str {
+           "meu"
+       }
+       fn title(&self) -> &'static str {
+           "Meu widget"
+       }
+       fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+           let l = Layout::of(mode);
+           c.text(l.w / 2.0, l.h / 2.0, "Olá!", Face::Semibold, 24.0, WHITE, Anchor::MM, None);
+       }
+   }
+   ```
+
+2. **Registre** em `src/widgets/mod.rs`: `pub mod meu;`, a chave em `KEYS`, e uma linha em
+   `create`, `title`, `description` e `icon_name` (o ícone vem de `theme::icon`, com os códigos
+   da fonte Segoe Fluent Icons). Em `FIRST_LAYOUT`, escolha a coluna em que ele aparece na
+   primeira vez; em `ADDED_LATER`, se ele não deve surgir sozinho para quem já usa o app.
+3. **Opções:** as do widget ficam na seção dele do `config.json` (`env.wcfg()` para ler). Para
+   ter uma página nas configurações, acrescente um caso em `settings.rs` (veja os de `"tempo"` e
+   `"github"`) e em `size_id`.
+4. **Dados de fora** (internet, sistema) nunca no `draw`: busque numa thread e receba no `tick`,
+   como fazem `tempo.rs` e `github.rs`. O `draw` roda a cada quadro e precisa ser rápido.
+5. **Teste no app:** `cargo run`, e mostre o widget na Galeria de widgets.
+
+Uma opção geral nova (que vale para o app todo) vai em `config.rs`, com o valor padrão. As
+configurações não têm botão de salvar: `set_setting` grava e aplica na hora.
+
+### As imagens do README
+
+São desenhadas pelo próprio código, com dados de exemplo, então ficam sempre iguais ao app:
+
+```powershell
+cargo test --release readme_images::readme -- --ignored --exact   # imagens paradas, em docs\images
+python packaging\readme_anim.py                                   # GIFs e animações (precisa do Pillow)
+```
+
+### Fazendo um fork com releases próprios
+
+O app procura atualizações no repositório de origem. No seu fork, troque `lucasschn1/Widgets`
+pelo seu repositório em `src/updates.rs`, `install.ps1` e `packaging/Widgets.iss`, e o nome do
+autor em `build.rs`. Assim os seus usuários recebem as suas versões.
+
+### Lançando uma versão
 
 1. Mude `version` no `Cargo.toml` e faça o commit.
-2. Crie e envie a tag: `git tag v3.6.0` e depois `git push origin main v3.6.0`.
+2. Crie e envie a tag: `git tag v3.11.0` e `git push origin main v3.11.0`.
 
-O GitHub Actions compila o `Widgets.exe`, gera o `.zip` e o instalador e publica o Release.
-Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua máquina,
-rode `packaging\build.ps1`.
-
-</details>
+O GitHub Actions roda os testes, compila o `Widgets.exe`, gera o `.zip` e o instalador e publica
+o Release. Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua
+máquina, rode `packaging\build.ps1`.
 
 <details>
 <summary><b>A versão 2, em Python</b></summary>
 
-Até a versão 2.0 o app era em Python, com Pillow e Tkinter. O código dessa época continua
-no histórico, na tag [`v2.0.0`](https://github.com/lucasschn1/Widgets/tree/v2.0.0). Com a reescrita em Rust, o
-download caiu de 22 MB para cerca de 1 MB, e o app passou a usar mais ou menos metade da memória.
+<br>
+
+Até a versão 2.0 o app era em Python, com Pillow e Tkinter. Ela continua disponível no
+[Release 2.0.0](https://github.com/lucasschn1/Widgets/releases/tag/v2.0.0) e o código, na tag
+[`v2.0.0`](https://github.com/lucasschn1/Widgets/tree/v2.0.0). Com a reescrita em Rust, o
+download caiu de 22 MB para cerca de 1,5 MB, e o app passou a usar mais ou menos metade da
+memória.
 
 </details>
+
+## Licença
+
+[MIT](LICENSE): use, modifique e distribua à vontade, inclusive em forks e projetos comerciais,
+mantendo o aviso de copyright. A fonte Outfit, embutida no app, tem a licença dela
+([SIL Open Font License](res/fonts/OFL.txt)).

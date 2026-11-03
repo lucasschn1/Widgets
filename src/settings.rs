@@ -479,7 +479,7 @@ fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
         ui.text(tx + 16.0, ny, widgets::title(key), 14.0, FG, Face::Semibold, Anchor::LM, Some(tile_w - 90.0));
         ui.switch(&format!("ver:{key}"), tx + tile_w - 56.0, ny - 11.0, visible, A::Visible(key, !visible), None);
         for (j, line) in ui.wrap(widgets::description(key), 11.5, tile_w - 32.0, 2).iter().enumerate() {
-            ui.text(tx + 16.0, ny + 18.0 + j as f32 * 17.0, line, 11.5, MUTED, Face::Regular, Anchor::LA, None);
+            ui.text(tx + 16.0, ny + 18.0 + j as f32 * 17.0, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(tile_w - 32.0));
         }
         ui.button(&format!("opcoes:{key}"), tx + 10.0, ty + tile_h - 40.0, "Opções", A::Go(key), "ghost", 'l', None, None);
     }

@@ -210,9 +210,15 @@ impl Claude {
     /// `ms` milissegundos depois de começar (para as imagens da animação).
     #[cfg(test)]
     pub fn sample_growing(from: f64, ms: u64) -> Claude {
-        let mut c = Claude::sample_with(0.92, 0.64, 2.0 * 3600.0);
+        Claude::sample_growing_to(from, (0.92, 0.64), ms)
+    }
+
+    /// O mesmo, subindo até `to` (diário, semanal).
+    #[cfg(test)]
+    pub fn sample_growing_to(from: f64, to: (f64, f64), ms: u64) -> Claude {
+        let mut c = Claude::sample_with(to.0, to.1, 2.0 * 3600.0);
         let start = Instant::now() - Duration::from_millis(ms);
-        c.grow = [Some(Grow { from, to: 0.92, start }), Some(Grow { from: from * 0.7, to: 0.64, start })];
+        c.grow = [Some(Grow { from, to: to.0, start }), Some(Grow { from: from * 0.7, to: to.1, start })];
         c
     }
 

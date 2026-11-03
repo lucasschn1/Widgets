@@ -2,6 +2,7 @@
 name = "widgets"
 version = "3.10.1"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 serde_json = { version = "1.0.154", features = ["preserve_order"] }

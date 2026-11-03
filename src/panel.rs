@@ -22,7 +22,7 @@ use crate::widgets::Mode;
 use crate::win;
 
 pub const BASE: Rgba = Rgba::rgb(24, 24, 30); // fundo, misturado ao papel de parede (efeito "Mica")
-const BASE_AMOUNT: f32 = 0.84;
+pub const BASE_AMOUNT: f32 = 0.84;
 pub const FIELD: Rgba = Rgba::rgb(40, 40, 48); // campos de texto (opacos, para o EDIT combinar)
 pub const FIELD_HOVER: Rgba = Rgba::rgb(48, 48, 57);
 pub const LINE: Rgba = Rgba(255, 255, 255, 26);

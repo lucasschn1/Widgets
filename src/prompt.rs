@@ -204,7 +204,7 @@ fn step_widgets(st: &mut WelcomeState, ui: &mut Ui, x: f32, w: f32, v: &View) {
         let title_y = ty + stage_h + 24.0;
         ui.text(tx + 14.0, title_y, widgets::title(key), 13.5, FG, Face::Semibold, Anchor::LM, Some(tile_w - 52.0));
         for (j, line) in ui.wrap(widgets::description(key), 11.0, tile_w - 28.0, 2).iter().enumerate() {
-            ui.text(tx + 14.0, title_y + 20.0 + 15.0 * j as f32, line, 11.0, MUTED, Face::Regular, Anchor::LM, None);
+            ui.text(tx + 14.0, title_y + 20.0 + 15.0 * j as f32, line, 11.0, MUTED, Face::Regular, Anchor::LM, Some(tile_w - 28.0));
         }
         let (cx, cy) = (tx + tile_w - 22.0, title_y);
         if on {
