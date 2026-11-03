@@ -23,6 +23,7 @@ macro_rules! debug_log {
 
 pub(crate) mod app;
 mod backdrop;
+mod claude_history;
 mod claude_usage;
 mod card;
 mod config;
