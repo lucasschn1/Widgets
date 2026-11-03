@@ -736,6 +736,55 @@ mod tests {
         assert!(max_scroll > 0.0, "a página precisa rolar até o último cartão");
     }
 
+    #[test]
+    fn every_page_draws_at_the_top_and_at_the_end() {
+        com();
+        let pages: Vec<&'static str> = nav_items().into_iter().map(|(page, _, _)| page).filter(|p| *p != "-").collect();
+        assert!(pages.len() >= widgets::KEYS.len() + 5, "{pages:?}");
+        for page in pages {
+            let (_, content_h, max_scroll) = page_draw(page, 0.0);
+            assert!(content_h > 0.0, "{page}: página vazia");
+            let _ = page_draw(page, max_scroll);
+            // rolar além do fim não quebra
+            let _ = page_draw(page, max_scroll + 500.0);
+        }
+    }
+
+    #[test]
+    fn every_welcome_step_draws() {
+        com();
+        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}});
+        let sh = Shared::new(cfg, serde_json::json!({}), 1.0);
+        let render = |key: &'static str, mode: Mode, scale: f32| {
+            let kind = widgets::sample(key, &sh.cfg, &sh.cache)?;
+            Some((crate::card::render_kind(kind.as_ref(), mode, scale, &sh), widgets::Layout::of(mode).radius * scale))
+        };
+        let view = View {
+            sh: &sh,
+            visible: widgets::KEYS.to_vec(),
+            modes: HashMap::new(),
+            origin: (0, 0),
+            render: &render,
+            startup: false,
+            update_status: String::new(),
+            update_version: None,
+        };
+        for step in 0..3 {
+            let mut st = crate::prompt::WelcomeState::new(&sh.cfg, widgets::KEYS, false, true);
+            st.step = step;
+            let (w, h) = (crate::prompt::WELCOME_W, crate::prompt::WELCOME_H);
+            let mut c = crate::gfx::Canvas::new(w as u32, h as u32, 1.0);
+            let mut anims = Anims::default();
+            let mut ui = Ui { c: &mut c, regions: Vec::new(), entries: Vec::new(), hover: None, pressed: None, focus: None, anims: &mut anims, animations: false, ox: 0.0, oy: 0.0, clip: (0.0, 0.0, w, h) };
+            crate::prompt::draw_welcome(&mut st, &mut ui, &view);
+            assert!(!ui.regions.is_empty(), "passo {step} sem nada clicável");
+        }
+    }
+
+    fn page_draw(name: &'static str, scroll: f32) -> (Image, f32, f32) {
+        page(name, scroll, 1.0)
+    }
+
     /// As páginas de Aparência e da Galeria (no alto e rolada até o fim) num PNG:
     ///   cargo test settings_pages -- --ignored --nocapture
     #[test]

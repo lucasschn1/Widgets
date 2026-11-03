@@ -1,0 +1,41 @@
+# Testes de cada pull request (e de cada push na main). A main está protegida: um PR só entra
+# com o check "testes" verde.
+#
+# Roda a compilação de teste (cargo test, sem --release): é nela que o teste de integração abre o
+# Widgets.exe de verdade, do zero, num perfil temporário.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    name: testes
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compila
+        run: cargo build --locked --all-targets
+
+      - name: Testes de unidade e de integração
+        run: cargo test --locked
+
+      - name: Compila a versão final
+        run: cargo build --release --locked

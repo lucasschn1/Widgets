@@ -284,11 +284,47 @@ cargo build --release  # o Widgets.exe final, em target\release
 A versão de teste pode ficar aberta junto com a instalada: ela usa outra pasta de opções
 (`%APPDATA%\Widgets-dev`), outro ícone na bandeja e outra entrada em "iniciar com o Windows".
 
+### Testes
+
+Todo pull request passa pelos testes no GitHub Actions ([CI](.github/workflows/ci.yml)), e a
+`main` só recebe o PR com eles verdes.
+
+```powershell
+cargo test --release   # unidade e integração dentro do app (uns 10 s)
+cargo test             # tudo, incluindo o Widgets.exe de verdade (o que o CI roda)
+```
+
+- **Unidade**, em cada módulo: opções e migrações, versões, a linha de status do Claude, o
+  encaixe entre monitores, a previsão do tempo...
+- **Os widgets inteiros** ([`src/testes.rs`](src/testes.rs)): cada widget, em cada tamanho e em
+  cada estado (sem dados, carregando, no limite, virado...), desenhando e respondendo ao mouse
+  em toda a área do cartão. Um widget novo entra na lista `cases()`.
+- **As janelas**: todas as páginas das configurações e os passos das boas-vindas.
+- **O executável** ([`tests/binario.rs`](tests/binario.rs)): a linha de status do Claude Code e
+  o app abrindo do zero, sempre num perfil temporário (sem tocar nas suas opções).
+
+### Ver a sua branch nos widgets instalados
+
+`dev\aplicar.ps1` compila a pasta atual (com as alterações ainda não commitadas), roda os
+testes, troca o `Widgets.exe` instalado e confere se o app ficou aberto. Se ele fechar sozinho,
+volta o anterior. A versão lançada fica guardada:
+
+```powershell
+powershell -File dev\aplicar.ps1          # aplica a branch atual
+powershell -File dev\aplicar.ps1 -Voltar  # volta para a versão lançada
+```
+
+Com o [Claude Code](https://code.claude.com), o [`CLAUDE.md`](CLAUDE.md) descreve o fluxo
+completo: cada alteração numa branch, aplicada nos widgets ao fim de cada resposta por um hook
+(`dev\aplicar.ps1 -Auto`), e commit e PR só depois de conferir.
+
 <details>
 <summary><b>Como o código está organizado</b></summary>
 
 ```
 install.ps1           instalador de uma linha (baixa o último Release)
+dev/aplicar.ps1       aplica a branch atual nos widgets instalados (e volta a versão lançada)
+tests/                testes com o Widgets.exe de verdade
 packaging/            build.ps1 (Widgets.exe e .zip), o instalador do Inno Setup e
                       readme_anim.py (junta os quadros das animações do README)
 res/                  ícone, fontes e manifesto embutidos no Widgets.exe (pelo build.rs)
@@ -314,6 +350,7 @@ src/
   updates.rs          procurar e instalar versões novas
   startup.rs          iniciar com o Windows
   claude_usage.rs     o uso do Claude Code: a linha de status e o arquivo com os números
+  testes.rs           testes de integração: todos os widgets, tamanhos e estados
   readme_images.rs    gera as imagens do README
   win.rs, util.rs, imgops.rs, drawing.rs, sysinfo.rs
   widgets/
@@ -363,7 +400,9 @@ só desenha dentro deles.
    `"github"`) e em `size_id`.
 4. **Dados de fora** (internet, sistema) nunca no `draw`: busque numa thread e receba no `tick`,
    como fazem `tempo.rs` e `github.rs`. O `draw` roda a cada quadro e precisa ser rápido.
-5. **Teste no app:** `cargo run`, e mostre o widget na Galeria de widgets.
+5. **Testes:** acrescente o widget (e os estados dele) em `cases()` de `src/testes.rs`; o teste
+   `every_widget_has_its_registry_entries` avisa se faltou alguma lista do passo 2.
+6. **Veja no app:** `cargo run` (ou `dev\aplicar.ps1`), e mostre o widget na Galeria de widgets.
 
 Uma opção geral nova (que vale para o app todo) vai em `config.rs`, com o valor padrão. As
 configurações não têm botão de salvar: `set_setting` grava e aplica na hora.
@@ -385,10 +424,11 @@ autor em `build.rs`. Assim os seus usuários recebem as suas versões.
 
 ### Lançando uma versão
 
-1. Mude `version` no `Cargo.toml` e faça o commit.
-2. Crie e envie a tag: `git tag v3.11.0` e `git push origin main v3.11.0`.
+1. Mude `version` no `Cargo.toml` numa branch e faça o PR (a `main` só recebe código por PR).
+2. Depois do merge, crie a tag na `main`: `git switch main`, `git pull`, `git tag v3.11.0` e
+   `git push origin v3.11.0`.
 
-O GitHub Actions roda os testes, compila o `Widgets.exe`, gera o `.zip` e o instalador e publica
+O GitHub Actions roda os testes de novo, compila o `Widgets.exe`, gera o `.zip` e o instalador e publica
 o Release. Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua
 máquina, rode `packaging\build.ps1`.
 

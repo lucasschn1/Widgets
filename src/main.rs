@@ -41,6 +41,8 @@ mod settings;
 mod shared;
 mod startup;
 mod sysinfo;
+#[cfg(test)]
+mod testes;
 mod updates;
 mod theme;
 mod tray;

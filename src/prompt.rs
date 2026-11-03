@@ -294,6 +294,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn descriptions_fit_in_two_lines() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        // a largura do texto num cartão das boas-vindas (3 por linha, como em step_widgets)
+        let tile_w = (WELCOME_W - 2.0 * SIDE - 2.0 * 14.0) / 3.0;
+        let max_w = tile_w - 28.0;
+        let c = crate::gfx::Canvas::new(10, 10, 1.0);
+        for key in widgets::KEYS {
+            let lines = c.wrap(widgets::description(key), Face::Regular, 11.0, max_w, 2);
+            let last = lines.last().unwrap();
+            assert!(c.text_width(last, Face::Regular, 11.0) <= max_w, "{key}: a descrição passa de duas linhas e vira \"…\": {last:?}");
+        }
+    }
+
+    #[test]
     fn welcome_steps_fit_between_header_and_footer() {
         assert!(CONTENT_Y + CONTENT_H <= FOOT_LINE - 12.0);
         assert!(BUTTONS_Y + 32.0 <= WELCOME_H - 12.0, "os botões cabem embaixo da linha do rodapé");
