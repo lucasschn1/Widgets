@@ -7,10 +7,12 @@
 //! aos poucos quando o uso sobe; ao passar de 90%, fica vermelho e a bolinha da ponta dá um pulo.
 
 use std::cell::RefCell;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Status, SMALL, WIDE};
-use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS, HISTORY_DAYS};
+use crate::claude_history::{self as history, HISTORY_DAYS};
+use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::{Rgba, FG, MUTED, WHITE};
 use crate::win;
@@ -49,6 +51,8 @@ const TEXT: Face = Face::Custom("Outfit", 400);
 /// os títulos e o botão
 const BOLD: Face = Face::Custom("Outfit", 600);
 
+/// De quanto em quanto tempo ler de novo o histórico de conversas (para os dias da semana).
+const HISTORY_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Intervalo entre os quadros enquanto anima.
 const FRAME: Duration = Duration::from_millis(16);
 
@@ -164,12 +168,29 @@ pub struct Claude {
     minute: RefCell<i64>,
     /// o arco de cada limite (diário, semanal) crescendo até o número novo
     grow: [Option<Grow>; 2],
+    /// o uso de cada dia da semana (segunda a domingo) nas últimas semanas; None: ainda lendo
+    weekdays: Option<[f64; 7]>,
+    /// a leitura do histórico em andamento, e quando foi a última
+    reading: Option<Receiver<[f64; 7]>>,
+    read_at: Option<Instant>,
 }
 
 impl Claude {
     pub fn new() -> Claude {
-        let mut c = Claude { view: View { usage: None, link: Link::Off }, seen: None, note: None, due: Instant::now(), fixed_now: None, minute: RefCell::new(0), grow: [None; 2] };
+        let mut c = Claude {
+            view: View { usage: None, link: Link::Off },
+            seen: None,
+            note: None,
+            due: Instant::now(),
+            fixed_now: None,
+            minute: RefCell::new(0),
+            grow: [None; 2],
+            weekdays: None,
+            reading: None,
+            read_at: None,
+        };
         c.reload(true);
+        c.read_history();
         c
     }
 
@@ -195,6 +216,14 @@ impl Claude {
         c
     }
 
+    /// Com os números, mas ainda lendo o histórico de conversas (o aviso no lugar das barras).
+    #[cfg(test)]
+    pub fn sample_reading() -> Claude {
+        let mut c = Claude::sample();
+        c.weekdays = None;
+        c
+    }
+
     /// Ainda sem ligação com o Claude Code (o botão de conectar).
     #[cfg(test)]
     pub fn sample_unlinked() -> Claude {
@@ -205,23 +234,60 @@ impl Claude {
 
     fn sample_with(session: f64, week: f64, session_left: f64) -> Claude {
         let now = win::now();
-        // quatro semanas de uso, mais forte de terça a quinta e quase nada no domingo
-        const WEEK: [f64; 7] = [1.1, 1.6, 1.9, 1.4, 0.9, 0.35, 0.15];
-        let today = usage::day_number(&win::local_time().iso_date()).unwrap_or(0);
-        let days = (0..HISTORY_DAYS)
-            .map(|k| {
-                let n = today - k;
-                let wobble = 0.9 + 0.2 * ((k * 7 % 5) as f64 / 4.0);
-                (usage::iso_of_day(n), WEEK[usage::weekday(n)] * wobble)
-            })
-            .collect();
         let usage = Usage {
             five_hour: Some(Window { used: session, resets_at: now + session_left }),
             seven_day: Some(Window { used: week, resets_at: now + 0.98 * 86400.0 }),
             updated: now,
-            days,
         };
-        Claude { view: View { usage: Some(usage), link: Link::Connected }, seen: None, note: None, due: Instant::now(), fixed_now: Some(now), minute: RefCell::new(0), grow: [None; 2] }
+        Claude {
+            view: View { usage: Some(usage), link: Link::Connected },
+            seen: None,
+            note: None,
+            due: Instant::now(),
+            fixed_now: Some(now),
+            minute: RefCell::new(0),
+            grow: [None; 2],
+            // mais uso de terça a quinta e quase nada no domingo
+            weekdays: Some([4.4, 6.4, 7.6, 5.6, 3.6, 1.4, 0.6]),
+            reading: None,
+            read_at: None,
+        }
+    }
+
+    /// Começa a ler o histórico de conversas do Claude Code, num fio à parte (são centenas de
+    /// megabytes); o resultado chega em `tick`.
+    fn read_history(&mut self) {
+        let Some(dir) = history::projects_dir() else {
+            self.weekdays = Some([0.0; 7]);
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let (today, offset) = (history::today(), history::utc_offset());
+        let started = std::thread::Builder::new().name("claude-history".into()).spawn(move || {
+            let _ = tx.send(history::by_weekday(&dir, today, offset));
+        });
+        if started.is_ok() {
+            self.reading = Some(rx);
+            self.read_at = Some(Instant::now());
+        }
+    }
+
+    /// Pega o histórico, se a leitura terminou; true se mudou.
+    fn take_history(&mut self) -> bool {
+        let Some(rx) = &self.reading else { return false };
+        match rx.try_recv() {
+            Ok(days) => {
+                self.reading = None;
+                let changed = self.weekdays != Some(days);
+                self.weekdays = Some(days);
+                changed
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.reading = None;
+                false
+            }
+        }
     }
 
     fn now(&self) -> f64 {
@@ -335,9 +401,9 @@ impl Claude {
         }
     }
 
-    /// O uso em cada dia da semana (segunda a domingo), nas últimas semanas.
+    /// O uso em cada dia da semana (segunda a domingo), nas últimas semanas (zeros enquanto lê).
     fn weekdays(&self) -> [f64; 7] {
-        self.view.usage.as_ref().map_or([0.0; 7], |u| u.by_weekday(&win::local_time().iso_date()))
+        self.weekdays.unwrap_or([0.0; 7])
     }
 
     // ---------- desenho ----------
@@ -490,12 +556,10 @@ impl Claude {
         let days = self.weekdays();
         let total: f64 = days.iter().sum();
         let top = (0..7).max_by(|&a, &b| days[a].total_cmp(&days[b])).filter(|_| total > 0.0);
-        c.text(x0, y0, "Dias em que você mais usa", BOLD, 12.0, FG, Anchor::LA, None);
-        let caption = match top {
-            Some(_) => format!("últimas {} semanas", HISTORY_DAYS / 7),
-            None => "aparecem conforme você usa".into(),
-        };
+        let caption = format!("últimas {} semanas", HISTORY_DAYS / 7);
+        let cw = c.text_width(&caption, TEXT, 10.0);
         c.text(x1, y0 + 1.5, &caption, TEXT, 10.0, MUTED, Anchor::RA, None);
+        c.text(x0, y0, "Dias em que você mais usa", BOLD, 12.0, FG, Anchor::LA, Some(x1 - x0 - cw - 10.0));
         let today = win::local_time().weekday as usize;
         let max = days.iter().cloned().fold(0.0, f64::max);
         let (bars_top, base) = (y0 + 40.0, y1 - 20.0);
@@ -515,6 +579,13 @@ impl Claude {
                 }
             }
             c.text(cx, base + 7.0, name, TEXT, 10.0, if i == today { FG } else { MUTED }, Anchor::MA, None);
+        }
+        if top.is_none() {
+            let note = if self.weekdays.is_none() { "Lendo as conversas do Claude Code…" } else { "Sem uso do Claude Code nestas semanas" };
+            let mid = (bars_top + base) / 2.0;
+            let nw = c.text_width(note, TEXT, 10.5) + 24.0;
+            c.fill_round_rect((x0 + x1 - nw) / 2.0, mid - 12.0, (x0 + x1 + nw) / 2.0, mid + 12.0, 12.0, Rgba(0, 0, 0, 60));
+            c.text((x0 + x1) / 2.0, mid, note, TEXT, 10.5, FG.alpha(0.85), Anchor::MM, None);
         }
     }
 }
@@ -699,6 +770,10 @@ impl Kind for Claude {
             if g.is_some_and(|g| g.done()) {
                 *g = None;
             }
+        }
+        redraw |= self.take_history();
+        if self.reading.is_none() && self.read_at.is_some_and(|t| t.elapsed() >= HISTORY_EVERY) {
+            self.read_history();
         }
         if Instant::now() >= self.due {
             self.due = Instant::now() + Duration::from_secs(5);
