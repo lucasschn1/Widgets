@@ -90,7 +90,12 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         out.push((format!("clawd {anim:?}"), Box::new(Claude::sample().with_crab(anim, 0.5)), cfg.clone()));
         out.push((format!("clawd dormindo {anim:?}"), Box::new(Claude::sample_unlinked().with_crab(anim, 0.5)), cfg.clone()));
         out.push((format!("clawd suando {anim:?}"), Box::new(Claude::sample_limit().with_crab(anim, 0.3)), cfg.clone()));
+        // (no meio de cada parte: escrevendo, a página virando ou a bolinha voando)
+        for t in [0.3, 0.6, 0.9] {
+            out.push((format!("clawd escrevendo {anim:?} {t}"), Box::new(Claude::sample_busy().with_crab(anim, t)), cfg.clone()));
+        }
     }
+    out.push(("claude trabalhando".into(), Box::new(Claude::sample_busy()), cfg.clone()));
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));
     out
 }

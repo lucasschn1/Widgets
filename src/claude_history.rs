@@ -141,6 +141,80 @@ pub fn projects_dir() -> Option<PathBuf> {
     crate::claude_usage::claude_dir().map(|d| d.join("projects"))
 }
 
+// ---------- o que uma conversa está fazendo agora ----------
+
+/// Como está uma conversa, pelo fim do arquivo dela.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Turn {
+    /// o Claude está trabalhando (None: nada reconhecível no fim do arquivo)
+    pub busy: Option<bool>,
+    /// passos (respostas e resultados de ferramentas) no último minuto
+    pub steps: u32,
+}
+
+/// Quanto do fim do arquivo ler: bastam as últimas linhas (os resultados de ferramentas podem
+/// ser grandes, então sobra folga).
+const TAIL: u64 = 256 * 1024;
+
+/// As últimas linhas inteiras do arquivo.
+pub fn read_tail(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    // começou no meio de uma linha: ela fica de fora
+    Some(if start > 0 { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
+}
+
+/// O que o fim de uma conversa diz, às `now` (segundos desde 1970). A última linha que importa
+/// decide: uma resposta final do Claude (`stop_reason` "end_turn"), o fim da vez
+/// (`turn_duration`) ou um pedido interrompido: terminou; um pedido novo, um passo no meio
+/// (usando ferramentas) ou o resultado de uma ferramenta: trabalhando. Comandos locais (as
+/// linhas do usuário que começam com "<", como os do "!" e do "/") não contam.
+pub fn turn(tail: &str, now: f64) -> Turn {
+    let mut t = Turn::default();
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let at = v["timestamp"].as_str().and_then(iso_epoch).map(|s| s as f64);
+        let recent = at.is_some_and(|at| now - at <= 60.0);
+        let state = match v["type"].as_str() {
+            Some("assistant") => {
+                t.steps += recent as u32;
+                Some(v["message"]["stop_reason"].as_str() != Some("end_turn"))
+            }
+            Some("user") if v["isMeta"].as_bool() != Some(true) => {
+                let content = &v["message"]["content"];
+                let result = content.as_array().is_some_and(|a| a.iter().any(|c| c["type"] == "tool_result"));
+                let text = content.as_str().or_else(|| content.as_array()?.iter().find_map(|c| c["text"].as_str())).unwrap_or("");
+                if result {
+                    t.steps += recent as u32;
+                    Some(true)
+                } else if text.starts_with("[Request interrupted") {
+                    Some(false)
+                } else if text.trim_start().starts_with('<') {
+                    None
+                } else {
+                    Some(true)
+                }
+            }
+            Some("system") if v["subtype"] == "turn_duration" => Some(false),
+            _ => None,
+        };
+        if t.busy.is_none() {
+            t.busy = state;
+        }
+        // já sabe o estado e passou do último minuto: o resto não muda nada
+        if t.busy.is_some() && at.is_some_and(|at| now - at > 60.0) {
+            break;
+        }
+    }
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +261,62 @@ mod tests {
     fn local_offset_is_whole() {
         assert_eq!(utc_offset() % 900, 0);
         assert!(utc_offset().abs() <= 14 * 3600);
+    }
+
+    /// Uma linha da conversa, `secs` segundos depois de 2026-11-03 12:00 UTC.
+    fn entry(kind: &str, extra: &str, secs: u32) -> String {
+        let (m, s) = (secs / 60, secs % 60);
+        format!(r#"{{"type":"{kind}",{extra},"timestamp":"2026-11-03T12:{m:02}:{s:02}.000Z"}}"#)
+    }
+    const NOON: f64 = 20760.0 * 86400.0 + 12.0 * 3600.0;
+    const PROMPT: &str = r#""message":{"role":"user","content":"faça o caderno"}"#;
+    const TOOL: &str = r#""message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use"}]}"#;
+    const RESULT: &str = r#""message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}"#;
+    const FINAL: &str = r#""message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"pronto"}]}"#;
+
+    #[test]
+    fn knows_when_claude_is_working_and_when_it_finished() {
+        let at = |lines: &[String], now: u32| turn(&lines.join("\n"), NOON + now as f64);
+        // pediu: trabalhando; usando ferramentas: trabalhando, contando os passos do último minuto
+        let mut c = vec![entry("user", PROMPT, 0)];
+        assert_eq!(at(&c, 1).busy, Some(true));
+        for k in 0..5 {
+            c.push(entry("assistant", TOOL, 10 + k * 10));
+            c.push(entry("user", RESULT, 12 + k * 10));
+        }
+        assert_eq!(at(&c, 60), Turn { busy: Some(true), steps: 10 });
+        assert_eq!(at(&c, 85).steps, 6, "só os do último minuto");
+        // respondeu de vez: terminou (e o fim da vez, depois, também diz isso)
+        c.push(entry("assistant", FINAL, 70));
+        assert_eq!(at(&c, 71).busy, Some(false));
+        c.push(entry("system", r#""subtype":"turn_duration""#, 72));
+        assert_eq!(at(&c, 72).busy, Some(false));
+        // anexos e linhas de controle depois do fim não mudam nada
+        c.push(entry("attachment", r#""x":1"#, 73));
+        assert_eq!(at(&c, 73).busy, Some(false));
+        // um comando "!" ou "/" do usuário não é um pedido ao Claude
+        c.push(entry("user", r#""message":{"role":"user","content":"<bash-input>ls</bash-input>"}"#, 80));
+        assert_eq!(at(&c, 80).busy, Some(false));
+        // interrompido com Esc: parou
+        let stopped = [entry("user", PROMPT, 0), entry("assistant", TOOL, 5), entry("user", r#""message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}"#, 6)];
+        assert_eq!(at(&stopped, 7).busy, Some(false));
+        // começo cortado no meio de uma linha, ou nada que importe: não sabe
+        assert_eq!(turn(r#"ype":"assistant"}"#, NOON).busy, None);
+        assert_eq!(turn("", NOON), Turn::default());
+    }
+
+    #[test]
+    fn reads_only_the_end_of_long_conversations() {
+        let dir = std::env::temp_dir().join(format!("widgets-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conversa.jsonl");
+        // uma conversa enorme: o fim é lido inteiro, a primeira linha cortada fica de fora
+        let filler = entry("user", &format!(r#""message":{{"role":"user","content":"{}"}}"#, "x".repeat(400 * 1024)), 0);
+        std::fs::write(&path, [filler, entry("user", PROMPT, 1), entry("assistant", FINAL, 2)].join("\n")).unwrap();
+        let tail = read_tail(&path).unwrap();
+        assert!(tail.len() < 300 * 1024 && tail.lines().count() == 2);
+        assert_eq!(turn(&tail, NOON + 3.0).busy, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Quanto demora ler o histórico de verdade deste computador.

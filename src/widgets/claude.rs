@@ -7,12 +7,13 @@
 //! aos poucos quando o uso sobe; ao passar de 90%, fica vermelho e a bolinha da ponta dá um pulo.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::clawd::{self, Anim, Crab, Mood};
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Status, SMALL, WIDE};
-use crate::claude_history::{self as history, HISTORY_DAYS};
+use crate::claude_history::{self as history, Turn, HISTORY_DAYS};
 use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::{Rgba, FG, MUTED, WHITE};
@@ -35,6 +36,25 @@ const OPEN_USAGE: u32 = 3;
 const POKE_CRAB: u32 = 4;
 /// sem resposta do Claude Code por este tempo (segundos), o Clawd tira um cochilo
 const NAP_AFTER: f64 = 30.0 * 60.0;
+/// sem saber pelas conversas: a linha de status foi chamada há menos que isto (segundos), o
+/// Claude Code está trabalhando, e o Clawd escreve no caderno (ela é chamada a cada mensagem nova)
+const BUSY_FOR: f64 = 60.0;
+/// uma conversa no meio de um trabalho, mas parada há tanto tempo (segundos): fechou, travou ou
+/// espera uma permissão; não conta como trabalhando
+const STALE_AFTER: f64 = 10.0 * 60.0;
+/// de quanto em quanto tempo olhar os números e as conversas (mais vezes trabalhando, para
+/// comemorar logo que o Claude Code termina)
+const CHECK_EVERY: Duration = Duration::from_secs(5);
+const CHECK_BUSY: Duration = Duration::from_secs(2);
+
+/// O que as conversas abertas do Claude Code estão fazendo.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Activity {
+    /// alguma está trabalhando (None: não deu para saber pelas conversas)
+    busy: Option<bool>,
+    /// passos por minuto, somando todas
+    steps: u32,
+}
 const USAGE_URL: &str = "https://claude.ai/settings/usage";
 
 /// Os medidores são 3/4 de volta, abertos embaixo: de 135° (embaixo à esquerda) a 405°, pelo alto.
@@ -196,6 +216,11 @@ pub struct Claude {
     near_crab: bool,
     /// o humor do último desenho (mudou: desenha de novo)
     shown_mood: Mood,
+    /// o que o Claude Code está fazendo, o fim lido de cada conversa (para ler de novo só quando
+    /// o arquivo muda) e desde quando está trabalhando (para o café)
+    activity: Activity,
+    turns: HashMap<String, (SystemTime, Turn)>,
+    busy_since: Option<Instant>,
 }
 
 impl Claude {
@@ -216,8 +241,12 @@ impl Claude {
             gaze: None,
             near_crab: false,
             shown_mood: Mood::Normal,
+            activity: Activity::default(),
+            turns: HashMap::new(),
+            busy_since: None,
         };
         c.reload(true);
+        c.read_activity();
         c.read_history();
         c
     }
@@ -281,6 +310,12 @@ impl Claude {
         self
     }
 
+    /// Com o Claude Code trabalhando agora (o Clawd escrevendo no caderno).
+    #[cfg(test)]
+    pub fn sample_busy() -> Claude {
+        Claude::sample().idle_for(5.0)
+    }
+
     /// Ainda sem ligação com o Claude Code (o botão de conectar).
     #[cfg(test)]
     pub fn sample_unlinked() -> Claude {
@@ -294,7 +329,9 @@ impl Claude {
         let usage = Usage {
             five_hour: Some(Window { used: session, resets_at: now + session_left }),
             seven_day: Some(Window { used: week, resets_at: now + 0.98 * 86400.0 }),
-            updated: now,
+            // a última resposta do Claude Code há pouco (já parado: o Clawd sem o caderno)
+            updated: now - 5.0 * 60.0,
+            sessions: Vec::new(),
         };
         Claude {
             view: View { usage: Some(usage), link: Link::Connected },
@@ -313,6 +350,9 @@ impl Claude {
             gaze: None,
             near_crab: false,
             shown_mood: Mood::Normal,
+            activity: Activity::default(),
+            turns: HashMap::new(),
+            busy_since: None,
         }
     }
 
@@ -398,17 +438,79 @@ impl Claude {
     }
 
     /// Como o Clawd está: dormindo sem números ou depois de um bom tempo sem o Claude Code
-    /// responder (acorda com o mouse em cima), suando com o diário perto do limite.
+    /// responder (acorda com o mouse em cima), suando com o diário perto do limite, escrevendo
+    /// no caderno enquanto o Claude Code trabalha.
     fn mood(&self) -> Mood {
         let now = self.now();
-        let napping = self.view.usage.as_ref().is_none_or(|u| now - u.updated > NAP_AFTER);
-        if self.pointer.is_none() && (!self.has_data() || napping) {
+        if self.pointer.is_none() && (!self.has_data() || self.quiet() > NAP_AFTER) {
             Mood::Sleepy
         } else if self.session().is_some_and(|w| w.used_at(now) >= 0.85) {
             Mood::Worried
+        } else if self.has_data() && self.busy() {
+            Mood::Busy
         } else {
             Mood::Normal
         }
+    }
+
+    /// Segundos desde a última chamada da linha de status.
+    fn quiet(&self) -> f64 {
+        self.view.usage.as_ref().map_or(f64::INFINITY, |u| self.now() - u.updated)
+    }
+
+    /// O Claude Code está trabalhando agora? Pelas conversas, se dá para saber; senão, pela
+    /// última chamada da linha de status.
+    fn busy(&self) -> bool {
+        self.activity.busy.unwrap_or_else(|| self.quiet() < BUSY_FOR)
+    }
+
+    /// Olha o fim das conversas que chamaram a linha de status na última hora (só as que mudaram
+    /// desde a última vez): se alguma está trabalhando e quantos passos por minuto.
+    fn read_activity(&mut self) {
+        let now = self.now();
+        let sessions = self.view.usage.as_ref().map(|u| u.sessions.clone()).unwrap_or_default();
+        let mut act = Activity::default();
+        let mut seen = Vec::new();
+        for (path, at) in sessions {
+            if now - at > 3600.0 {
+                continue;
+            }
+            let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
+            let turn = match self.turns.get(&path) {
+                Some(&(m, t)) if m == modified => t,
+                _ => {
+                    let t = history::read_tail(std::path::Path::new(&path)).map_or(Turn::default(), |tail| history::turn(&tail, now));
+                    self.turns.insert(path.clone(), (modified, t));
+                    t
+                }
+            };
+            let still = modified.elapsed().map_or(0.0, |d| d.as_secs_f64());
+            let busy = turn.busy.map(|b| b && still < STALE_AFTER);
+            act.busy = match (act.busy, busy) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (None, None) => None,
+                _ => Some(false),
+            };
+            // os passos contados quando o arquivo mudou; parado há um minuto, já não valem
+            if still < 60.0 {
+                act.steps += turn.steps;
+            }
+            seen.push(path);
+        }
+        self.turns.retain(|p, _| seen.contains(p));
+        self.activity = act;
+    }
+
+    /// Uma conversa do Claude Code, no arquivo `path`, chamou a linha de status agora (testes).
+    #[cfg(test)]
+    pub fn with_session(mut self, path: &std::path::Path) -> Claude {
+        let now = self.now();
+        if let Some(u) = &mut self.view.usage {
+            u.sessions = vec![(path.to_string_lossy().into_owned(), now)];
+            u.updated = now;
+        }
+        self.read_activity();
+        self
     }
 
     /// Onde o Clawd fica em cada tamanho: (centro x, centro y, tamanho dos quadradinhos).
@@ -832,9 +934,19 @@ impl Kind for Claude {
                 self.reload(true);
             }
             OPEN_USAGE => ctx.open(USAGE_URL),
-            POKE_CRAB => self.crab.play(Anim::Hop),
+            // (já pulou ao apertar; só pula aqui se o clique veio de outro jeito)
+            POKE_CRAB if !self.crab.is_playing(Anim::Hop) => self.crab.play(Anim::Hop),
             _ => {}
         }
+    }
+
+    fn pressed(&mut self, action: u32) -> bool {
+        // clique no Clawd: pula na hora, ao apertar
+        if action == POKE_CRAB {
+            self.crab.play(Anim::Hop);
+            return true;
+        }
+        false
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
@@ -896,21 +1008,34 @@ impl Kind for Claude {
             }
         }
         redraw |= self.take_history();
+        if self.reading.is_none() && self.read_at.is_some_and(|t| t.elapsed() >= HISTORY_EVERY) {
+            self.read_history();
+        }
+        if Instant::now() >= self.due {
+            self.due = Instant::now() + if self.busy() { CHECK_BUSY } else { CHECK_EVERY };
+            // (os exemplos, com a hora fixa, não leem o arquivo de verdade)
+            if self.fixed_now.is_none() {
+                redraw |= self.reload(false);
+            }
+            self.read_activity();
+            // os textos de tempo ("acaba às", "atualizado às") mudam com o relógio
+            redraw |= (self.now() / 60.0) as i64 != *self.minute.borrow();
+        }
         let mood = self.mood();
+        // o Claude Code terminou: o Clawd fecha o caderno, se espreguiça e mostra um ✓
+        if self.shown_mood == Mood::Busy && mood == Mood::Normal {
+            self.crab.play(Anim::Done);
+        }
+        // o ritmo da escrita e, depois de muito tempo trabalhando, o café
+        let busy = self.has_data() && self.busy();
+        self.busy_since = if busy { Some(self.busy_since.unwrap_or_else(Instant::now)) } else { None };
+        self.crab.tired = self.busy_since.is_some_and(|t| t.elapsed() >= clawd::COFFEE_AFTER);
+        self.crab.pace = if self.activity.busy.is_some() { clawd::pace_for(self.activity.steps as f32) } else { clawd::PACE };
         redraw |= self.crab.tick(mood);
         // dormiu ou acordou (cochilo depois de um tempo sem o Claude Code, ou o mouse)
         if mood != self.shown_mood {
             self.shown_mood = mood;
             redraw = true;
-        }
-        if self.reading.is_none() && self.read_at.is_some_and(|t| t.elapsed() >= HISTORY_EVERY) {
-            self.read_history();
-        }
-        if Instant::now() >= self.due {
-            self.due = Instant::now() + Duration::from_secs(5);
-            redraw |= self.reload(false);
-            // os textos de tempo ("acaba às", "atualizado às") mudam com o relógio
-            redraw |= (self.now() / 60.0) as i64 != *self.minute.borrow();
         }
         redraw
     }
@@ -935,6 +1060,11 @@ mod tests {
         for (name, w) in [("com números", Claude::sample()), ("sem conectar", Claude::sample_unlinked())] {
             for mode in Mode::ALL {
                 let l = super::super::Layout::of(mode);
+                // no grande, os "z" (até 4 quadradinhos à direita da grade) não chegam ao título
+                if mode == Mode::G {
+                    let (_, _, unit) = w.crab_spot(mode);
+                    assert!((clawd::COLS + 4.0) * unit <= clawd::COLS * unit + 7.0, "os \"z\" encostam no título");
+                }
                 let (cx, cy, unit) = w.crab_spot(mode);
                 let (hw, hh) = (clawd::COLS * unit / 2.0, clawd::ROWS * unit / 2.0);
                 let (x0, y0, x1, y1) = (cx - hw, cy - hh - 3.0 * unit, cx + hw, cy + hh);
@@ -948,7 +1078,8 @@ mod tests {
                         continue; // sem números, o médio mostra só o diário
                     }
                     // nenhum canto do Clawd em cima do trilho do anel (fora do vão de baixo)
-                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0)] {
+                    // (nem os "z", que vão até 4 quadradinhos à direita)
+                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0), (x1 + 4.0 * unit, y0)] {
                         let d = (px - gx).hypot(py - g.cy);
                         let angle = (py - g.cy).atan2(px - gx).to_degrees().rem_euclid(360.0);
                         let in_gap = (45.0..=135.0).contains(&angle);
@@ -970,12 +1101,83 @@ mod tests {
     }
 
     #[test]
+    fn crab_works_while_the_conversation_works_and_celebrates_the_end() {
+        let dir = std::env::temp_dir().join(format!("widgets-clawd-turn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("conversa.jsonl");
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"faça o caderno"}}"#;
+        let tool = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"tool_use","content":[]}}"#;
+        let done = r#"{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[]}}"#;
+        let write = |lines: &[&str], ago: u64| {
+            std::fs::write(&path, lines.join("\n")).unwrap();
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(ago)).unwrap();
+        };
+        let tick = |w: &mut Claude| {
+            w.due = Instant::now();
+            let mut req = Vec::new();
+            let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+            w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req })
+        };
+        // pediu e ele está usando ferramentas: trabalhando
+        write(&[prompt, tool], 2);
+        let mut w = Claude::sample().with_session(&path);
+        assert_eq!(w.mood(), Mood::Busy);
+        tick(&mut w);
+        assert_eq!(w.shown_mood, Mood::Busy);
+        assert!(w.due <= Instant::now() + CHECK_BUSY, "trabalhando, olha mais vezes");
+        // um comando demorado (a conversa parada uns minutos) continua sendo trabalho, mesmo sem
+        // a linha de status ser chamada nesse tempo
+        let mut slow = Claude::sample().idle_for(5.0 * 60.0);
+        write(&[prompt, tool], 4 * 60);
+        slow = slow.with_session(&path).idle_for(4.0 * 60.0);
+        assert_eq!(slow.mood(), Mood::Busy);
+        // respondeu de vez: no próximo olhar ele para de escrever e comemora
+        write(&[prompt, tool, done], 1);
+        assert!(tick(&mut w));
+        assert_eq!(w.shown_mood, Mood::Normal);
+        assert!(w.crab.is_playing(Anim::Done), "não comemorou");
+        // parada no meio há muito tempo (fechou, travou ou espera uma permissão): não trabalha
+        write(&[prompt, tool], 11 * 60);
+        assert_eq!(Claude::sample().with_session(&path).mood(), Mood::Normal);
+        // sem as conversas (versão antiga da linha de status), vale a última chamada
+        assert_eq!(Claude::sample_busy().mood(), Mood::Busy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crab_hops_as_soon_as_the_button_goes_down() {
+        for w in [Claude::sample(), Claude::sample_busy(), Claude::sample_unlinked()] {
+            let mut w = w;
+            let still = clawd::cells(&w.crab.pose(w.mood(), None));
+            // apertou em cima do Clawd: redesenha já, com ele saindo do lugar
+            assert!(Kind::pressed(&mut w, POKE_CRAB));
+            assert_ne!(clawd::cells(&w.crab.pose(w.mood(), None)), still);
+            // soltou: o clique não recomeça o pulo que já está acontecendo
+            w.crab = clawd::Crab::playing(Anim::Hop, 0.4);
+            let pose = w.crab.pose(w.mood(), None);
+            let mut req = Vec::new();
+            let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+            w.act(POKE_CRAB, &mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
+            assert_eq!(w.crab.pose(w.mood(), None), pose);
+            // outras áreas não reagem ao apertar
+            assert!(!Kind::pressed(&mut w, OPEN_USAGE));
+        }
+    }
+
+    #[test]
     fn crab_naps_when_claude_code_is_quiet() {
         assert_eq!(Claude::sample().mood(), Mood::Normal);
         assert_eq!(Claude::sample().idle_for(10.0 * 60.0).mood(), Mood::Normal, "10 min sem usar: acordado");
         assert_eq!(Claude::sample().idle_for(NAP_AFTER + 60.0).mood(), Mood::Sleepy, "muito tempo sem usar: cochila");
         assert_eq!(Claude::sample_unlinked().mood(), Mood::Sleepy, "sem números: dorme");
         assert_eq!(Claude::sample_limit().mood(), Mood::Worried);
+        // o Claude Code respondeu agora há pouco: trabalhando (com o mouse em cima também)
+        assert_eq!(Claude::sample_busy().mood(), Mood::Busy);
+        assert_eq!(Claude::sample().idle_for(BUSY_FOR - 1.0).with_pointer(40.0, 40.0, Mode::P).mood(), Mood::Busy);
+        assert_eq!(Claude::sample().idle_for(BUSY_FOR + 1.0).mood(), Mood::Normal, "parou: guarda o caderno");
+        // perto do limite, suar vem antes
+        assert_eq!(Claude::sample_limit().idle_for(5.0).mood(), Mood::Worried);
         // o mouse em cima acorda
         let awake = Claude::sample().idle_for(NAP_AFTER + 60.0).with_pointer(40.0, 40.0, Mode::P);
         assert_eq!(awake.mood(), Mood::Normal);

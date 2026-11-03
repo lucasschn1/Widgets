@@ -57,6 +57,28 @@ pub struct Usage {
     pub seven_day: Option<Window>,
     /// quando o Claude Code mandou estes números
     pub updated: f64,
+    /// as conversas que chamaram a linha de status na última hora: (arquivo, última vez)
+    pub sessions: Vec<(String, f64)>,
+}
+
+/// Por quanto tempo lembrar de uma conversa, e de quantas no máximo.
+const SESSION_FOR: f64 = 3600.0;
+const SESSIONS_MAX: usize = 6;
+
+/// Junta as conversas de antes com as de agora: a última vez de cada uma, só as da última hora,
+/// as mais recentes primeiro.
+pub fn merge_sessions(old: &[(String, f64)], new: &[(String, f64)], now: f64) -> Vec<(String, f64)> {
+    let mut all: Vec<(String, f64)> = Vec::new();
+    for (path, at) in new.iter().chain(old) {
+        match all.iter_mut().find(|(p, _)| p == path) {
+            Some(seen) => seen.1 = seen.1.max(*at),
+            None => all.push((path.clone(), *at)),
+        }
+    }
+    all.retain(|(_, at)| now - at <= SESSION_FOR);
+    all.sort_by(|a, b| b.1.total_cmp(&a.1));
+    all.truncate(SESSIONS_MAX);
+    all
 }
 
 fn window_of(v: &Value) -> Option<Window> {
@@ -69,18 +91,21 @@ impl Usage {
     /// Os limites no JSON da linha de status (None se ele não traz nenhum).
     pub fn from_status(input: &Value, now: f64) -> Option<Usage> {
         let r = input.get("rate_limits")?;
-        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now };
+        let sessions = input["transcript_path"].as_str().map(|p| vec![(p.to_string(), now)]).unwrap_or_default();
+        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now, sessions };
         (u.five_hour.is_some() || u.seven_day.is_some()).then_some(u)
     }
 
     pub fn to_json(&self) -> Value {
         let w = |w: &Option<Window>| w.map(|w| json!({"used": w.used, "resets_at": w.resets_at}));
-        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated})
+        let sessions: Vec<Value> = self.sessions.iter().map(|(p, at)| json!({"transcript": p, "at": at})).collect();
+        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated, "sessions": sessions})
     }
 
     pub fn from_json(v: &Value) -> Option<Usage> {
         let w = |v: &Value| Some(Window { used: v.get("used")?.as_f64()?, resets_at: v.get("resets_at")?.as_f64()? });
-        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()? })
+        let sessions = v["sessions"].as_array().map_or(Vec::new(), |a| a.iter().filter_map(|s| Some((s["transcript"].as_str()?.to_string(), s["at"].as_f64()?))).collect());
+        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()?, sessions })
     }
 }
 
@@ -133,7 +158,10 @@ pub fn run_status_line() {
     let _ = std::io::stdin().read_to_string(&mut text);
     let input: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
     let now = crate::win::now();
-    if let Some(u) = Usage::from_status(&input, now) {
+    if let Some(mut u) = Usage::from_status(&input, now) {
+        // lembra também das outras conversas abertas (o Clawd escreve se qualquer uma trabalha)
+        let before = load().map(|b| b.sessions).unwrap_or_default();
+        u.sessions = merge_sessions(&before, &u.sessions, now);
         let _ = write_atomic(&data_file(), &u.to_json().to_string());
     }
     let mut out = std::io::stdout();
@@ -340,11 +368,28 @@ mod tests {
     fn keeps_the_last_numbers_in_a_file() {
         let dir = temp_dir("file");
         let path = dir.join(FILE);
-        let u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0 };
+        let u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0, sessions: vec![("C:/c/a.jsonl".into(), 2.0)] };
         write_atomic(&path, &u.to_json().to_string()).unwrap();
         assert_eq!(load_from(&path), Some(u));
         assert!(!path.with_extension("tmp").exists());
+        // o arquivo de uma versão anterior (sem as conversas) continua valendo
+        std::fs::write(&path, r#"{"five_hour":{"used":0.5,"resets_at":9.0},"seven_day":null,"updated":3.0}"#).unwrap();
+        assert_eq!(load_from(&path).unwrap().sessions, vec![]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembers_the_conversations_of_the_last_hour() {
+        // a linha de status diz de qual conversa vem
+        let input = json!({"transcript_path": "C:/c/nova.jsonl", "rate_limits": {"five_hour": {"used_percentage": 1, "resets_at": 5}}});
+        assert_eq!(Usage::from_status(&input, 7200.0).unwrap().sessions, vec![("C:/c/nova.jsonl".to_string(), 7200.0)]);
+        // junta com as de antes: a mais recente de cada, sem as de mais de uma hora
+        let old = vec![("C:/c/a.jsonl".to_string(), 7000.0), ("C:/c/velha.jsonl".to_string(), 3000.0), ("C:/c/nova.jsonl".to_string(), 6000.0)];
+        let new = vec![("C:/c/nova.jsonl".to_string(), 7200.0)];
+        assert_eq!(merge_sessions(&old, &new, 7200.0), vec![("C:/c/nova.jsonl".to_string(), 7200.0), ("C:/c/a.jsonl".to_string(), 7000.0)]);
+        // e no máximo algumas
+        let many: Vec<_> = (0..20).map(|k| (format!("C:/c/{k}.jsonl"), 7000.0 + k as f64)).collect();
+        assert_eq!(merge_sessions(&many, &[], 7200.0).len(), SESSIONS_MAX);
     }
 
 

@@ -824,6 +824,12 @@ impl App {
             card.press_anim = Some((Instant::now(), true));
             card.present(&self.sh, false);
         }
+        // o widget pode reagir já ao apertar (o Clawd pula), sem esperar soltar
+        if let Some(Act::Kind(n)) = action {
+            if self.cards[i].kind.pressed(n) {
+                self.cards[i].refresh(&self.sh);
+            }
+        }
     }
 
     fn on_release(&mut self, i: usize, x: i32, y: i32) {
