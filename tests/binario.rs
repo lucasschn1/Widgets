@@ -79,6 +79,20 @@ fn status_line_survives_bad_input() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--versao` (o instalador confere com ela se o Windows deixa a versão nova abrir, antes de
+/// trocar a anterior): responde a versão e sai na hora, sem abrir os widgets nem criar opções.
+#[test]
+fn version_flag_answers_and_touches_nothing() {
+    let dir = sandbox("versao");
+    let start = Instant::now();
+    let out = spawn(command(&dir).arg("--versao").stdout(Stdio::piped()).stderr(Stdio::piped())).wait_with_output().unwrap();
+    assert!(out.status.success(), "saiu com {:?}", out.status);
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), env!("CARGO_PKG_VERSION"));
+    assert!(start.elapsed() < Duration::from_secs(5), "demorou {:?}", start.elapsed());
+    assert!(!data_dir(&dir).exists(), "criou a pasta de opções");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// O app abre do zero (primeira vez, sem opções), fica de pé por alguns segundos e grava as
 /// opções. Só na compilação de teste: a final, aberta de fora da pasta de instalação, trocaria
 /// a "iniciar com o Windows" de verdade e daria de cara com o app instalado já aberto.

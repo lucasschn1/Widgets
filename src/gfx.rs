@@ -615,6 +615,25 @@ impl Canvas {
         self.image_px(img, px, py, img.w as f32, img.h as f32, 1.0);
     }
 
+    /// Cola uma imagem no retângulo w×h com o canto em (x, y) (em pontos), nítida: ela é
+    /// redimensionada antes, com um filtro de qualidade, para o tamanho exato em pixels, e cai
+    /// pixel a pixel. Esticar na hora (`image_px`) usa interpolação bilinear, que serrilha as
+    /// bordas quando reduz muito (um ícone de 64 px desenhado com 33).
+    pub fn image_sharp(&mut self, img: &Image, x: f32, y: f32, w: f32, h: f32, opacity: f32) {
+        let s = self.s;
+        let (px, py) = ((x * s).round(), (y * s).round());
+        let (pw, ph) = (((x + w) * s).round() - px, ((y + h) * s).round() - py);
+        if pw < 1.0 || ph < 1.0 {
+            return;
+        }
+        if (pw as u32, ph as u32) == (img.w, img.h) {
+            self.image_px(img, px, py, pw, ph, opacity);
+        } else {
+            let fitted = resize_photo(img, pw as u32, ph as u32);
+            self.image_px(&fitted, px, py, pw, ph, opacity);
+        }
+    }
+
     /// Cola uma imagem num retângulo em pixels (esticando, com suavização).
     pub fn image_px(&mut self, img: &Image, x: f32, y: f32, w: f32, h: f32, opacity: f32) {
         if img.w == 0 || img.h == 0 {

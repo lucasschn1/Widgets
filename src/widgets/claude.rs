@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
+use super::clawd::{self, Anim, Crab, Mood};
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Status, SMALL, WIDE};
 use crate::claude_history::{self as history, HISTORY_DAYS};
 use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS};
@@ -30,6 +31,10 @@ const TRACK: Rgba = Rgba(255, 255, 255, 30);
 pub const CONNECT: u32 = 1;
 pub const DISCONNECT: u32 = 2;
 const OPEN_USAGE: u32 = 3;
+/// clique no Clawd: ele pula
+const POKE_CRAB: u32 = 4;
+/// sem resposta do Claude Code por este tempo (segundos), o Clawd tira um cochilo
+const NAP_AFTER: f64 = 30.0 * 60.0;
 const USAGE_URL: &str = "https://claude.ai/settings/usage";
 
 /// Os medidores são 3/4 de volta, abertos embaixo: de 135° (embaixo à esquerda) a 405°, pelo alto.
@@ -55,6 +60,12 @@ const BOLD: Face = Face::Custom("Outfit", 600);
 const HISTORY_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Intervalo entre os quadros enquanto anima.
 const FRAME: Duration = Duration::from_millis(16);
+/// O tamanho dos quadradinhos do Clawd embaixo dos medidores, e a altura do centro dele (na
+/// abertura de baixo dos anéis, onde ficava o ícone do diário).
+const CRAB_UNIT: f32 = 1.2;
+const CRAB_Y: f32 = 127.0;
+/// sozinho embaixo de um medidor (no lugar do sol), há espaço para ele maior
+const CRAB_UNIT_SOLO: f32 = 2.0;
 
 /// O arco indo de `from` a `to` (uso de 0 a 1), desde `start`.
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +141,10 @@ struct Geom {
 }
 
 const WIDE_Q: f32 = WIDE / 4.0;
+/// O título do grande (o Clawd e "Uso do Claude"): canto e tamanho da letra.
+const BRAND_X: f32 = 22.0;
+const BRAND_Y: f32 = 20.0;
+const BRAND_SIZE: f32 = 14.0;
 
 fn geom(mode: Mode) -> Geom {
     match mode {
@@ -173,6 +188,14 @@ pub struct Claude {
     /// a leitura do histórico em andamento, e quando foi a última
     reading: Option<Receiver<[f64; 7]>>,
     read_at: Option<Instant>,
+    /// o Clawd, o caranguejo do Claude Code, no lugar do símbolo (com as animações dele)
+    crab: Crab,
+    /// o mouse sobre o widget (em pontos), para onde o Clawd olha, e se está em cima dele
+    pointer: Option<(f32, f32)>,
+    gaze: Option<(i32, i32)>,
+    near_crab: bool,
+    /// o humor do último desenho (mudou: desenha de novo)
+    shown_mood: Mood,
 }
 
 impl Claude {
@@ -188,6 +211,11 @@ impl Claude {
             weekdays: None,
             reading: None,
             read_at: None,
+            crab: Crab::new(),
+            pointer: None,
+            gaze: None,
+            near_crab: false,
+            shown_mood: Mood::Normal,
         };
         c.reload(true);
         c.read_history();
@@ -230,6 +258,29 @@ impl Claude {
         c
     }
 
+    /// O mesmo exemplo, com o mouse em (x, y) (o Clawd olhando para ele).
+    #[cfg(test)]
+    pub fn with_pointer(mut self, x: f32, y: f32, mode: Mode) -> Claude {
+        Kind::pointer_moved(&mut self, x, y, mode);
+        self
+    }
+
+    /// O mesmo exemplo, com a última resposta do Claude Code há `secs` segundos.
+    #[cfg(test)]
+    pub fn idle_for(mut self, secs: f64) -> Claude {
+        if let Some(u) = &mut self.view.usage {
+            u.updated = self.fixed_now.unwrap_or_else(win::now) - secs;
+        }
+        self
+    }
+
+    /// O mesmo exemplo, com o Clawd no meio de uma animação (`t` de 0 a 1).
+    #[cfg(test)]
+    pub fn with_crab(mut self, anim: clawd::Anim, t: f32) -> Claude {
+        self.crab = Crab::playing(anim, t);
+        self
+    }
+
     /// Ainda sem ligação com o Claude Code (o botão de conectar).
     #[cfg(test)]
     pub fn sample_unlinked() -> Claude {
@@ -257,6 +308,11 @@ impl Claude {
             weekdays: Some([4.4, 6.4, 7.6, 5.6, 3.6, 1.4, 0.6]),
             reading: None,
             read_at: None,
+            crab: Crab::new(),
+            pointer: None,
+            gaze: None,
+            near_crab: false,
+            shown_mood: Mood::Normal,
         }
     }
 
@@ -341,6 +397,53 @@ impl Claude {
         self.grow.iter().any(Option::is_some)
     }
 
+    /// Como o Clawd está: dormindo sem números ou depois de um bom tempo sem o Claude Code
+    /// responder (acorda com o mouse em cima), suando com o diário perto do limite.
+    fn mood(&self) -> Mood {
+        let now = self.now();
+        let napping = self.view.usage.as_ref().is_none_or(|u| now - u.updated > NAP_AFTER);
+        if self.pointer.is_none() && (!self.has_data() || napping) {
+            Mood::Sleepy
+        } else if self.session().is_some_and(|w| w.used_at(now) >= 0.85) {
+            Mood::Worried
+        } else {
+            Mood::Normal
+        }
+    }
+
+    /// Onde o Clawd fica em cada tamanho: (centro x, centro y, tamanho dos quadradinhos).
+    /// No grande, no título; sem números no pequeno, grande no meio; com um medidor só, na
+    /// abertura de baixo do anel (no lugar do ícone do diário); com dois, entre eles.
+    fn crab_spot(&self, mode: Mode) -> (f32, f32, f32) {
+        match mode {
+            Mode::G => {
+                let unit = BRAND_SIZE / 10.0;
+                (BRAND_X + clawd::COLS * unit / 2.0, BRAND_Y + BRAND_SIZE * 0.55, unit)
+            }
+            Mode::P if self.needs_connect() && self.view.link == Link::Off => (SMALL / 2.0, 50.0, 3.0),
+            Mode::P => (SMALL / 2.0, CRAB_Y, CRAB_UNIT_SOLO),
+            Mode::M if !self.has_data() => (WIDE_Q, CRAB_Y, CRAB_UNIT_SOLO),
+            Mode::M => (WIDE / 2.0, CRAB_Y, CRAB_UNIT),
+        }
+    }
+
+    /// O Clawd está no lugar do ícone do diário (o sol) neste tamanho?
+    fn crab_on_daily(&self, mode: Mode) -> bool {
+        mode == Mode::P || (mode == Mode::M && !self.has_data())
+    }
+
+    /// O ponto (x, y) está em cima do Clawd (com uma folga em volta)?
+    fn on_crab(&self, x: f32, y: f32, mode: Mode) -> bool {
+        let (cx, cy, unit) = self.crab_spot(mode);
+        (x - cx).abs() <= clawd::COLS * unit / 2.0 + 4.0 && (y - cy).abs() <= clawd::ROWS * unit / 2.0 + 4.0
+    }
+
+    /// Desenha o Clawd no lugar dele; devolve a largura.
+    fn crab(&self, c: &mut Canvas, mode: Mode) -> f32 {
+        let (cx, cy, unit) = self.crab_spot(mode);
+        clawd::draw(c, cx, cy, unit, &self.crab.pose(self.mood(), self.gaze))
+    }
+
     fn session(&self) -> Option<Window> {
         self.view.usage.as_ref().and_then(|u| u.five_hour)
     }
@@ -418,7 +521,7 @@ impl Claude {
     /// porcentagem no meio, o nome embaixo dela e o ícone na abertura de baixo. A partir de 90%
     /// o arco fica vermelho; `since` é há quantos milissegundos ele acabou de passar de 90% (o
     /// laranja vira vermelho e a bolinha cresce e volta); None: já estava assim.
-    fn gauge(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit, v: Option<f64>, since: Option<f32>) {
+    fn gauge(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit, v: Option<f64>, since: Option<f32>, icon: bool) {
         let (cy, r, w) = (g.cy, g.r, g.w);
         c.arc(cx, cy, r, START, START + SWEEP, TRACK, w);
         if let Some(v) = v {
@@ -453,6 +556,7 @@ impl Claude {
         c.text(cx, base + 6.0, limit.name(), TEXT, label, MUTED, Anchor::MA, None);
         let (iy, ir) = (cy + r * 0.86, w * 0.9);
         match limit {
+            _ if !icon => {} // o Clawd está no lugar do ícone
             Limit::Daily => sun(c, cx, iy, ir, ORANGE),
             Limit::Weekly => calendar(c, cx, iy, ir, ORANGE),
         }
@@ -463,15 +567,16 @@ impl Claude {
         for &(limit, cx) in g.gauges {
             if only.is_none_or(|o| o == limit) {
                 let since = self.grow[limit.index()].and_then(|g| g.since_hot());
-                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since);
+                let icon = !(limit == Limit::Daily && self.crab_on_daily(mode));
+                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since, icon);
             }
         }
     }
 
-    /// O símbolo do Claude e o nome, no alto à esquerda.
-    fn brand(c: &mut Canvas, x: f32, y: f32, size: f32, text: &str) {
-        mark(c, x + size * 0.5, y + size * 0.62, size * 0.6, ACCENT);
-        c.text(x + size * 1.3, y, text, BOLD, size, FG, Anchor::LA, None);
+    /// O Clawd e o nome, no alto à esquerda (no grande).
+    fn brand(&self, c: &mut Canvas, text: &str) {
+        let w = self.crab(c, Mode::G);
+        c.text(BRAND_X + w + 7.0, BRAND_Y, text, BOLD, BRAND_SIZE, FG, Anchor::LA, None);
     }
 
     fn draw_connect(&self, c: &mut Canvas, mode: Mode) {
@@ -497,17 +602,17 @@ impl Claude {
     fn draw_small(&self, c: &mut Canvas, now: f64) {
         if self.needs_connect() && self.view.link == Link::Off {
             // sem números: o símbolo, o nome e o botão
-            mark(c, SMALL / 2.0, 50.0, 20.0, ACCENT);
+            self.crab(c, Mode::P);
             c.text(SMALL / 2.0, 82.0, "Uso do Claude", BOLD, 12.5, FG, Anchor::MA, None);
             self.draw_connect(c, Mode::P);
             return;
         }
-        mark(c, 18.0, 18.0, 6.5, ACCENT);
         self.draw_gauges(c, Mode::P, now, Some(Limit::Daily));
+        self.crab(c, Mode::P);
     }
 
     fn draw_medium(&self, c: &mut Canvas, now: f64) {
-        mark(c, 18.0, 18.0, 6.5, ACCENT);
+        self.crab(c, Mode::M);
         if !self.has_data() {
             self.draw_gauges(c, Mode::M, now, Some(Limit::Daily));
             let (x, w) = (172.0, WIDE - 18.0 - 172.0);
@@ -527,7 +632,7 @@ impl Claude {
 
     fn draw_large(&self, c: &mut Canvas, now: f64) {
         let pad = 22.0;
-        Self::brand(c, pad, 20.0, 14.0, "Uso do Claude");
+        self.brand(c, "Uso do Claude");
         self.draw_gauges(c, Mode::G, now, None);
         let g = geom(Mode::G);
         if !self.has_data() {
@@ -641,37 +746,6 @@ fn calendar(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
     }
 }
 
-/// O símbolo do Claude: raios que afinam nas pontas, de comprimentos um pouco diferentes,
-/// saindo do centro.
-pub fn mark(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
-    const RAYS: [(f32, f32); 12] = [
-        (0.0, 1.0), (31.0, 0.74), (58.0, 0.93), (92.0, 0.7), (118.0, 0.97), (151.0, 0.78),
-        (180.0, 0.9), (208.0, 0.72), (242.0, 1.0), (268.0, 0.76), (299.0, 0.92), (329.0, 0.7),
-    ];
-    for (deg, len) in RAYS {
-        let a = (deg - 90.0f32).to_radians();
-        let (dx, dy) = (a.cos(), a.sin());
-        let (px, py) = (-dy, dx);
-        let base = r * 0.15;
-        let tip_w = r * 0.05;
-        let tip = (cx + dx * r * len, cy + dy * r * len);
-        let mid = (cx + dx * r * len * 0.5, cy + dy * r * len * 0.5);
-        c.polygon(
-            &[
-                (cx + px * base, cy + py * base),
-                (mid.0 + px * base * 0.6, mid.1 + py * base * 0.6),
-                (tip.0 + px * tip_w, tip.1 + py * tip_w),
-                (tip.0 - px * tip_w, tip.1 - py * tip_w),
-                (mid.0 - px * base * 0.6, mid.1 - py * base * 0.6),
-                (cx - px * base, cy - py * base),
-            ],
-            color,
-        );
-        c.fill_circle(tip.0, tip.1, tip_w, color);
-    }
-    c.fill_circle(cx, cy, r * 0.2, color);
-}
-
 /// O centro (x) do medidor no ponto (x, y), se houver um ali. O pequeno só mostra o diário.
 fn gauge_at(x: f32, y: f32, mode: Mode) -> Option<f32> {
     let g = geom(mode);
@@ -710,6 +784,9 @@ impl Kind for Claude {
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
+        if self.on_crab(x, y, mode) {
+            return Some(POKE_CRAB);
+        }
         if self.needs_connect() && self.view.link == Link::Off {
             let (x0, y0, x1, y1) = connect_rect(mode);
             if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
@@ -726,6 +803,11 @@ impl Kind for Claude {
                 let (x0, y0, x1, y1) = connect_rect(mode);
                 Some((x0, y0, x1, y1, (y1 - y0) / 2.0))
             }
+            POKE_CRAB => {
+                let (cx, cy, unit) = self.crab_spot(mode);
+                let (hw, hh) = (clawd::COLS * unit / 2.0 + 4.0, clawd::ROWS * unit / 2.0 + 4.0);
+                Some((cx - hw, cy - hh, cx + hw, cy + hh, 6.0))
+            }
             _ => {
                 let g = geom(mode);
                 let cx = gauge_at(x, y, mode)?;
@@ -736,7 +818,7 @@ impl Kind for Claude {
     }
 
     fn hover_style(&self, x: f32, y: f32, mode: Mode, env: &Env) -> HoverStyle {
-        if self.hit(x, y, mode, env) == Some(OPEN_USAGE) { HoverStyle::Quiet } else { HoverStyle::Surface }
+        if matches!(self.hit(x, y, mode, env), Some(OPEN_USAGE | POKE_CRAB)) { HoverStyle::Quiet } else { HoverStyle::Surface }
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
@@ -750,6 +832,7 @@ impl Kind for Claude {
                 self.reload(true);
             }
             OPEN_USAGE => ctx.open(USAGE_URL),
+            POKE_CRAB => self.crab.play(Anim::Hop),
             _ => {}
         }
     }
@@ -765,8 +848,43 @@ impl Kind for Claude {
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        // enquanto o arco anima, um quadro a cada 16 ms
-        Some(if self.animating() { self.due.min(Instant::now() + FRAME) } else { self.due })
+        // enquanto o arco anima, um quadro a cada 16 ms; o Clawd, nos quadros dele
+        let next = if self.animating() { self.due.min(Instant::now() + FRAME) } else { self.due };
+        Some(next.min(self.crab.next_tick()))
+    }
+
+    fn pointer_entered(&mut self) -> bool {
+        // o Clawd reage ao mouse (os quadros vêm pelo tick)
+        let mood = self.mood();
+        self.crab.poke(mood);
+        false
+    }
+
+    fn pointer_moved(&mut self, x: f32, y: f32, mode: Mode) -> bool {
+        // acabou de chegar: ele acorda (se cochilava) e passa a olhar para o mouse
+        let mut redraw = self.pointer.is_none();
+        self.pointer = Some((x, y));
+        let (cx, cy, _) = self.crab_spot(mode);
+        let gaze = clawd::gaze(cx, cy, x, y);
+        if self.gaze != Some(gaze) {
+            self.gaze = Some(gaze);
+            redraw = true;
+        }
+        // o mouse chegou em cima dele: acena
+        let near = self.on_crab(x, y, mode);
+        if near && !self.near_crab && !self.crab.animating() {
+            self.crab.play(Anim::Wave);
+            redraw = true;
+        }
+        self.near_crab = near;
+        redraw
+    }
+
+    fn pointer_left(&mut self) -> bool {
+        self.pointer = None;
+        self.gaze = None;
+        self.near_crab = false;
+        true
     }
 
     fn tick(&mut self, _ctx: &mut Ctx) -> bool {
@@ -778,6 +896,13 @@ impl Kind for Claude {
             }
         }
         redraw |= self.take_history();
+        let mood = self.mood();
+        redraw |= self.crab.tick(mood);
+        // dormiu ou acordou (cochilo depois de um tempo sem o Claude Code, ou o mouse)
+        if mood != self.shown_mood {
+            self.shown_mood = mood;
+            redraw = true;
+        }
         if self.reading.is_none() && self.read_at.is_some_and(|t| t.elapsed() >= HISTORY_EVERY) {
             self.read_history();
         }
@@ -798,6 +923,110 @@ impl Kind for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cfg() -> serde_json::Value {
+        serde_json::json!({"claude": {}, "app": {}})
+    }
+
+    #[test]
+    fn crab_has_room_in_every_size() {
+        // o Clawd (com folga para pular e para os "z") cabe no cartão e não encosta nos anéis,
+        // nos ícones nem no botão de conectar
+        for (name, w) in [("com números", Claude::sample()), ("sem conectar", Claude::sample_unlinked())] {
+            for mode in Mode::ALL {
+                let l = super::super::Layout::of(mode);
+                let (cx, cy, unit) = w.crab_spot(mode);
+                let (hw, hh) = (clawd::COLS * unit / 2.0, clawd::ROWS * unit / 2.0);
+                let (x0, y0, x1, y1) = (cx - hw, cy - hh - 3.0 * unit, cx + hw, cy + hh);
+                assert!(x0 >= 6.0 && y0 >= 6.0 && x1 <= l.w - 6.0 && y1 <= l.h - 6.0, "{name} {mode:?}: fora do cartão");
+                if mode == Mode::G || (mode == Mode::P && w.needs_connect()) {
+                    continue; // no título do grande e sozinho no meio do pequeno
+                }
+                let g = geom(mode);
+                for &(limit, gx) in g.gauges {
+                    if !w.has_data() && mode == Mode::M && limit == Limit::Weekly {
+                        continue; // sem números, o médio mostra só o diário
+                    }
+                    // nenhum canto do Clawd em cima do trilho do anel (fora do vão de baixo)
+                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0)] {
+                        let d = (px - gx).hypot(py - g.cy);
+                        let angle = (py - g.cy).atan2(px - gx).to_degrees().rem_euclid(360.0);
+                        let in_gap = (45.0..=135.0).contains(&angle);
+                        assert!(in_gap || d < g.r - g.w || d > g.r + g.w, "{name} {mode:?}: em cima do anel em ({px}, {py})");
+                    }
+                    // nem em cima do ícone que ficou (sol ou calendário)
+                    let icon_here = !(limit == Limit::Daily && w.crab_on_daily(mode));
+                    if icon_here {
+                        let (ix, iy, ir) = (gx, g.cy + g.r * 0.86, g.w * 0.9 + 3.0);
+                        assert!(x1 < ix - ir || x0 > ix + ir || y1 < iy - ir || y0 > iy + ir, "{name} {mode:?}: em cima do ícone");
+                    }
+                }
+                if w.needs_connect() {
+                    let (bx0, by0, bx1, by1) = connect_rect(mode);
+                    assert!(x1 < bx0 || x0 > bx1 || y1 < by0 || y0 > by1, "{name} {mode:?}: em cima do botão");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crab_naps_when_claude_code_is_quiet() {
+        assert_eq!(Claude::sample().mood(), Mood::Normal);
+        assert_eq!(Claude::sample().idle_for(10.0 * 60.0).mood(), Mood::Normal, "10 min sem usar: acordado");
+        assert_eq!(Claude::sample().idle_for(NAP_AFTER + 60.0).mood(), Mood::Sleepy, "muito tempo sem usar: cochila");
+        assert_eq!(Claude::sample_unlinked().mood(), Mood::Sleepy, "sem números: dorme");
+        assert_eq!(Claude::sample_limit().mood(), Mood::Worried);
+        // o mouse em cima acorda
+        let awake = Claude::sample().idle_for(NAP_AFTER + 60.0).with_pointer(40.0, 40.0, Mode::P);
+        assert_eq!(awake.mood(), Mood::Normal);
+        // e o widget se redesenha quando ele dorme (o tick nota a mudança)
+        let mut w = Claude::sample().idle_for(NAP_AFTER + 60.0);
+        w.shown_mood = Mood::Normal;
+        let mut req = Vec::new();
+        let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+        let redraw = w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
+        assert!(redraw && w.shown_mood == Mood::Sleepy);
+    }
+
+    #[test]
+    fn crab_follows_the_mouse() {
+        for mode in Mode::ALL {
+            let mut w = Claude::sample();
+            let (cx, cy, _) = w.crab_spot(mode);
+            // chegou: olha para o mouse (à esquerda e acima)
+            assert!(Kind::pointer_moved(&mut w, 2.0, 2.0, mode), "{mode:?}");
+            assert_eq!(w.gaze, Some((-1, -1)));
+            // mexer sem mudar a direção do olhar não redesenha
+            assert!(!Kind::pointer_moved(&mut w, 3.0, 3.0, mode), "{mode:?}: redesenhou à toa");
+            // do outro lado: olha para lá
+            assert!(Kind::pointer_moved(&mut w, cx + 60.0, cy, mode));
+            assert_eq!(w.gaze, Some((1, 0)));
+            // em cima dele: acena
+            assert!(Kind::pointer_moved(&mut w, cx, cy, mode));
+            assert!(w.crab.animating(), "{mode:?}: não acenou");
+            // saiu: volta a olhar para a frente
+            assert!(Kind::pointer_left(&mut w));
+            assert_eq!(w.gaze, None);
+        }
+    }
+
+    #[test]
+    fn clicking_the_crab_makes_it_hop() {
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        for (name, sample) in [("com números", Claude::sample as fn() -> Claude), ("sem conectar", Claude::sample_unlinked)] {
+            for mode in Mode::ALL {
+                let mut w = sample();
+                let (cx, cy, _) = w.crab_spot(mode);
+                // o clique nele vale mais que o do medidor embaixo
+                assert_eq!(Kind::hit(&w, cx, cy, mode, &env), Some(POKE_CRAB), "{name} {mode:?}");
+                let mut req = Vec::new();
+                let (mut c2, mut cache) = (cfg(), serde_json::json!({}));
+                Kind::act(&mut w, POKE_CRAB, &mut Ctx { cfg: &mut c2, cache: &mut cache, key: "claude", out: &mut req });
+                assert!(w.crab.animating(), "{name} {mode:?}: não pulou");
+            }
+        }
+    }
 
     #[test]
     fn critical_limit_and_notes() {

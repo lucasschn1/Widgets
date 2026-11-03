@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Configuração de artefato "widgets-exe" da SignPath (cole no projeto, em Artifact Configurations).
+     O GitHub Actions envia o Widgets.exe dentro de um .zip (o actions/upload-artifact sempre zipa);
+     só é assinado se o nome e a versão gravados no arquivo forem os do Widgets e os da tag. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file-set product-name="Widgets" product-version="${version}">
+      <include path="Widgets.exe" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

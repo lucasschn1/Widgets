@@ -30,6 +30,8 @@ const _: () = assert!(G_LIST_Y + ROW_H * LIST_N as f32 + 6.0 <= G_FOOT_Y, "a lis
 
 const EVERY: Duration = Duration::from_secs(2);
 const RING_MS: f32 = 550.0;
+/// mudança a partir da qual os anéis animam (3 pontos percentuais); menor, vão direto
+const RING_STEP: f32 = 0.03;
 const BARS_MS: f32 = 650.0;
 
 // ações
@@ -46,6 +48,62 @@ pub(crate) fn color(i: usize) -> Rgba {
         0 => Rgba::rgb(255, 55, 95),
         1 => Rgba::rgb(48, 209, 88),
         _ => Rgba::rgb(100, 210, 255),
+    }
+}
+
+/// Um "ícone" de teste: um círculo verde cheio, com borda suave, num fundo transparente.
+#[cfg(test)]
+fn test_icon(px: u32) -> Image {
+    let mut c = Canvas::new(px, px, 1.0);
+    let r = px as f32 / 2.0;
+    c.fill_circle(r, r, r - 2.0, Rgba::rgb(30, 215, 96));
+    c.finish()
+}
+
+/// Cores dos ícones de letra (apps sem ícone): cada app fica sempre com a mesma.
+const TILE_COLORS: [Rgba; 8] = [
+    Rgba::rgb(94, 129, 244),
+    Rgba::rgb(52, 168, 140),
+    Rgba::rgb(236, 112, 99),
+    Rgba::rgb(171, 112, 230),
+    Rgba::rgb(242, 166, 56),
+    Rgba::rgb(64, 156, 220),
+    Rgba::rgb(220, 96, 160),
+    Rgba::rgb(96, 170, 90),
+];
+
+/// A cor do ícone de letra de um app (pelo nome, para não mudar de uma leitura para outra).
+fn tile_color(name: &str) -> Rgba {
+    let hash = name.to_lowercase().bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    TILE_COLORS[(hash % TILE_COLORS.len() as u32) as usize]
+}
+
+/// O ícone de um app (ou de uma unidade) no quadrado de lado `size`, com o canto em (x, y):
+/// o do Windows, redimensionado com qualidade para o tamanho exato (nítido em qualquer escala);
+/// sem ele, a inicial do nome num quadrado arredondado com a cor do app.
+fn app_icon(c: &mut Canvas, icon: Option<&Image>, name: &str, x: f32, y: f32, size: f32, alpha: f32) {
+    match icon {
+        Some(img) => c.image_sharp(img, x, y, size, size, alpha),
+        None => {
+            let radius = size * 0.27;
+            let col = tile_color(name);
+            c.gradient_round_rect(x, y, x + size, y + size, radius, &[(0.0, col.mix(WHITE, 0.18).alpha(alpha)), (1.0, col.alpha(alpha))], y, y + size);
+            let letter: String = name.chars().find(|ch| ch.is_alphanumeric()).map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
+            c.text(x + size / 2.0, y + size / 2.0, &letter, Face::Semibold, size * 0.46, WHITE.alpha(alpha), Anchor::MM, None);
+        }
+    }
+}
+
+/// Sombra suave logo à frente da ponta de um anel (o fim arredondado em `end` graus), como nos
+/// anéis de atividade: desenhada antes do arco, só aparece a parte que sai da frente dele e dá
+/// a impressão de a ponta estar um pouco acima do trilho.
+fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, wd: f32) {
+    let a = end.to_radians();
+    // a direção em que o anel anda (sentido horário na tela)
+    let (dx, dy) = (-a.sin(), a.cos());
+    let (tx, ty) = (cx + r * a.cos() + dx * wd * 0.14, cy + r * a.sin() + dy * wd * 0.14);
+    for k in 0..4 {
+        c.fill_circle(tx, ty, wd / 2.0 + 0.6 * k as f32, Rgba(0, 0, 0, 22 - 4 * k as u8));
     }
 }
 
@@ -165,6 +223,18 @@ impl System {
         s
     }
 
+    /// O mesmo, com ícones de 64 px nos apps (como os que o Windows dá), para desenhar o caminho
+    /// dos ícones de verdade.
+    #[cfg(test)]
+    pub fn sample_with_icons(which: Option<usize>, mode: Mode) -> System {
+        let mut s = System::sample_flipped(which, mode);
+        let icon = Arc::new(test_icon(64));
+        for app in s.apps.iter_mut().take(2) {
+            app.icon = Some(icon.clone());
+        }
+        s
+    }
+
     fn measure(&mut self) {
         let (idle, total) = win::cpu_times();
         let (last_idle, last_total) = self.last_cpu;
@@ -188,19 +258,25 @@ impl System {
             format!("{}/{:.0} GB", br(win::gb(used), 1), win::gb(total_mem)),
             format!("{:.0}/{:.0} GB", win::gb(dused), win::gb(dtotal)),
         ];
-        // os anéis partem de onde estão agora (mudança pequena: sem animação, para poupar a CPU)
-        let shown = self.shown();
-        let moved = (0..3).any(|i| (values[i] - shown[i]).abs() > 0.008);
-        self.from = if moved { shown } else { values };
-        self.target = values;
-        if moved {
-            self.ring_since = Instant::now();
-        }
+        self.set_rings(values);
         let (rx, tx) = sysinfo::net_bytes();
         let secs = self.last_net.2.elapsed().as_secs_f64().max(0.1);
         self.rates = (rx.saturating_sub(self.last_net.0) as f64 / secs, tx.saturating_sub(self.last_net.1) as f64 / secs);
         self.last_net = (rx, tx, Instant::now());
         self.next = Instant::now() + EVERY;
+    }
+
+    /// Leva os anéis aos valores novos (0 a 1): partindo de onde estão agora, animados só se a
+    /// mudança aparece. Cada quadro da animação redesenha o cartão inteiro, e a CPU oscila um
+    /// pouco a cada medida: animar esses tremores gastava mais CPU do que o que eles mostram.
+    fn set_rings(&mut self, values: [f32; 3]) {
+        let shown = self.shown();
+        let moved = (0..3).any(|i| (values[i] - shown[i]).abs() > RING_STEP);
+        self.from = if moved { shown } else { values };
+        self.target = values;
+        if moved {
+            self.ring_since = Instant::now();
+        }
     }
 
     fn shown(&self) -> [f32; 3] {
@@ -376,14 +452,10 @@ impl System {
             c.stroke_circle(cx, cy, rc, color(i).alpha(if dim { 0.1 } else { 0.22 }), wd);
             if *v > 0.003 {
                 let end = -90.0 + 360.0 * v.min(0.999);
-                c.arc(cx, cy, rc, -90.0, end, col, wd);
                 if !dim {
-                    // a ponta brilha um pouco, como nos anéis de atividade
-                    let a = end.to_radians();
-                    let (tx, ty) = (cx + rc * a.cos(), cy + rc * a.sin());
-                    c.fill_circle(tx, ty, wd * 0.78, color(i).alpha(0.2));
-                    c.fill_circle(tx, ty, wd * 0.48, color(i).mix(WHITE, 0.35));
+                    ring_tip_shadow(c, cx, cy, rc, end, wd);
                 }
+                c.arc(cx, cy, rc, -90.0, end, col, wd);
             }
         }
     }
@@ -439,17 +511,7 @@ impl System {
             let y = y0 + row_h * n as f32;
             let icon = 26.0;
             let ix = PAD;
-            match &row.icon {
-                Some(img) => {
-                    let s = c.s;
-                    c.image_px(img, (ix * s).round(), ((y + 5.0) * s).round(), (icon * s).round(), (icon * s).round(), 1.0);
-                }
-                None => {
-                    c.fill_round_rect(ix, y + 5.0, ix + icon, y + 5.0 + icon, 7.0, WHITE.alpha(0.16));
-                    let letter: String = row.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                    c.text(ix + icon / 2.0, y + 5.0 + icon / 2.0, &letter, Face::Semibold, 12.0, FG, Anchor::MM, None);
-                }
-            }
+            app_icon(c, row.icon.as_deref(), &row.name, ix, y + 5.0, icon, 1.0);
             let tx = ix + icon + 10.0;
             let vw = c.text(W - PAD, y + 12.0, &row.value, Face::Regular, 12.0, MUTED, Anchor::RM, None);
             c.text(tx, y + 12.0, &row.name, Face::Regular, 12.5, FG, Anchor::LM, Some(W - PAD - tx - vw - 10.0));
@@ -506,17 +568,7 @@ impl System {
             let t = ease_out((since - n as f32 * 60.0) / 380.0);
             let y = 44.0 + 36.0 * n as f32 + (1.0 - t) * 8.0;
             let icon = 22.0;
-            match &row.icon {
-                Some(img) => {
-                    let s = c.s;
-                    c.image_px(img, (12.0 * s).round(), ((y + 3.0) * s).round(), (icon * s).round(), (icon * s).round(), t);
-                }
-                None => {
-                    c.fill_round_rect(12.0, y + 3.0, 12.0 + icon, y + 3.0 + icon, 6.0, WHITE.alpha(0.16 * t));
-                    let letter: String = row.name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-                    c.text(12.0 + icon / 2.0, y + 3.0 + icon / 2.0, &letter, Face::Semibold, 11.0, FG.alpha(t), Anchor::MM, None);
-                }
-            }
+            app_icon(c, row.icon.as_deref(), &row.name, 12.0, y + 3.0, icon, t);
             let tx = 12.0 + icon + 8.0;
             let w = SMALL - tx - 10.0;
             c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(t), Anchor::LA, Some(w));
@@ -690,6 +742,51 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icons_are_resized_sharply() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        // um ícone de 64 px num quadrado de 26 pontos a 125% (33 px): sai igual ao ícone reduzido
+        // antes com o filtro de qualidade, e não ao esticado na hora (bilinear, que serrilha)
+        let icon = test_icon(64);
+        let mut c = Canvas::new(40, 40, 1.25);
+        app_icon(&mut c, Some(&icon), "Spotify", 0.0, 0.0, 26.0, 1.0);
+        let drawn = c.finish();
+        let sharp = crate::gfx::resize_photo(&icon, 33, 33);
+        for y in 0..33 {
+            for x in 0..33 {
+                let (i, j) = (((y * drawn.w + x) * 4) as usize, ((y * 33 + x) * 4) as usize);
+                assert_eq!(drawn.px[i..i + 4], sharp.px[j..j + 4], "pixel ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn letter_tiles_keep_their_color() {
+        assert_eq!(tile_color("Discord"), tile_color("discord"), "mesma cor em qualquer leitura");
+        let names = ["Google Chrome", "Visual Studio Code", "Discord", "Spotify", "Steam", "Notepad"];
+        let distinct: std::collections::HashSet<_> = names.iter().map(|n| { let c = tile_color(n); (c.0, c.1, c.2) }).collect();
+        assert!(distinct.len() >= 3, "as cores variam entre os apps");
+    }
+
+    #[test]
+    fn rings_animate_only_visible_changes() {
+        let mut s = System::sample();
+        s.ring_since = Instant::now() - Duration::from_secs(5);
+        s.bars_since = Instant::now() - Duration::from_secs(5);
+        let before = s.shown();
+        // a CPU oscilou 2 pontos: vai direto, sem quadros de animação
+        s.set_rings([before[0] + 0.02, before[1], before[2]]);
+        assert!(!s.animating(), "tremor pequeno não anima");
+        assert!((s.shown()[0] - (before[0] + 0.02)).abs() < 1e-6, "já mostra o valor novo");
+        // subiu 10 pontos: anima, partindo de onde estava
+        let now = s.shown();
+        s.set_rings([now[0] + 0.10, now[1], now[2]]);
+        assert!(s.animating(), "mudança que aparece anima");
+        assert!((s.from[0] - now[0]).abs() < 1e-6);
+    }
 
     #[test]
     #[ignore] // desenha num PNG: cargo test -- --ignored

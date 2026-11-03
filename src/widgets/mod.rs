@@ -5,6 +5,7 @@
 //! `create` e em `KEYS`.
 
 pub mod claude;
+pub mod clawd;
 pub mod github;
 pub mod media;
 pub mod pomodoro;
@@ -321,6 +322,20 @@ pub trait Kind {
     /// Quadros por segundo da camada animada (0: sem animação).
     fn overlay_fps(&self) -> u32 {
         0
+    }
+    /// O mouse acabou de entrar no widget; devolve true se a camada animada mudou de ritmo
+    /// (`overlay_fps`).
+    fn pointer_entered(&mut self) -> bool {
+        false
+    }
+    /// O mouse se mexeu sobre o widget, em (x, y) pontos; devolve true se o widget precisa ser
+    /// redesenhado (o Clawd seguindo o mouse com os olhos, por exemplo).
+    fn pointer_moved(&mut self, _x: f32, _y: f32, _mode: Mode) -> bool {
+        false
+    }
+    /// O mouse saiu do widget; devolve true se ele precisa ser redesenhado.
+    fn pointer_left(&mut self) -> bool {
+        false
     }
     /// Ação (número) da área clicável em (x, y).
     fn hit(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<u32> {

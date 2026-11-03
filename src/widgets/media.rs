@@ -5,9 +5,10 @@
 //! A central de mídia do Windows (a mesma do controle de volume) é lida numa thread própria; o
 //! resultado fica num "retrato" que a interface consulta 4 vezes por segundo.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -51,14 +52,6 @@ fn source_label(kind: &str) -> &'static str {
         "spotify" => "SPOTIFY",
         "youtube" => "YOUTUBE",
         _ => "MÍDIA",
-    }
-}
-
-fn source_name(kind: &str) -> &'static str {
-    match kind {
-        "spotify" => "Spotify",
-        "youtube" => "o navegador",
-        _ => "o player",
     }
 }
 
@@ -297,6 +290,26 @@ pub fn cover_image(art: &Image, w: u32, h: u32) -> Image {
     out
 }
 
+/// A opção "Capa em alta do YouTube" (ligada, se nunca mudou).
+pub fn hd_covers(cfg: &Value) -> bool {
+    cfg["midia"].bool_of("capa_hd").unwrap_or(true)
+}
+
+/// Imagens mais largas ou mais altas que isto (um panorama) são cortadas nas pontas, para a
+/// capa não virar uma tira fina.
+const ART_ASPECT: (f32, f32) = (0.5, 2.4);
+
+/// A moldura de uma capa com a proporção `aspect` (largura / altura) dentro da área
+/// (x, y, largura, altura, raio): a maior que cabe, centralizada.
+fn fit_art(area: (f32, f32, f32, f32, f32), aspect: f32) -> (f32, f32, f32, f32, f32) {
+    let (x, y, w, h, radius) = area;
+    let aspect = if aspect.is_finite() { aspect.clamp(ART_ASPECT.0, ART_ASPECT.1) } else { 1.0 };
+    let (fw, fh) = if aspect >= w / h { (w, w / aspect) } else { (h * aspect, h) };
+    // cantos proporcionais ao lado menor, para uma capa baixa não parecer uma pílula
+    let radius = radius.min(fw.min(fh) * 0.2);
+    (x + (w - fw) / 2.0, y + (h - fh) / 2.0, fw, fh, radius)
+}
+
 /// Capa em alta resolução para vídeos do YouTube. O navegador passa para o Windows só uma
 /// miniatura (o Edge, 150 × 83), que fica pixelada no widget: aqui se acha o vídeo pelo título e
 /// pelo canal e baixa a miniatura original na maior resolução que houver, conferindo que é a
@@ -374,6 +387,14 @@ struct Reader {
     art_hd: bool,
     /// capa em alta sendo procurada: (música, resposta)
     upgrade: Option<(String, std::sync::mpsc::Receiver<Option<Image>>)>,
+    /// pode procurar a capa em alta no youtube.com (opção "Capa em alta do YouTube")
+    hd_allowed: Arc<AtomicBool>,
+}
+
+/// Vale procurar a capa em alta? Só de vídeo do YouTube com miniatura pequena, e só com a opção
+/// ligada (a busca manda o título e o canal do vídeo para o youtube.com).
+fn wants_hd(kind: &str, art: &Image, allowed: bool) -> bool {
+    allowed && kind == "youtube" && youtube::worth_upgrading(art)
 }
 
 impl Reader {
@@ -396,7 +417,8 @@ impl Reader {
             self.art = read_art(&props).map(|img| Arc::new(gfx::trim_bars(&img)));
             self.art_hd = false;
             self.upgrade = None;
-            let small = self.art.clone().filter(|a| media_kind(&app_id) == "youtube" && youtube::worth_upgrading(a));
+            let allowed = self.hd_allowed.load(Ordering::Relaxed);
+            let small = self.art.clone().filter(|a| wants_hd(media_kind(&app_id), a, allowed));
             if let Some(small) = small {
                 let (tx, rx) = channel();
                 let (title, artist) = (title.clone(), artist.clone());
@@ -452,13 +474,13 @@ impl Reader {
     }
 }
 
-fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot>>>, pref: Arc<Mutex<String>>) {
+fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot>>>, pref: Arc<Mutex<String>>, hd_allowed: Arc<AtomicBool>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
     let mut manager: Option<Manager> = None;
     let mut current: Option<Session> = None;
-    let mut reader = Reader { art_key: None, art: None, art_hd: false, upgrade: None };
+    let mut reader = Reader { art_key: None, art: None, art_hd: false, upgrade: None, hd_allowed };
     loop {
         let p = pref.lock().unwrap().clone();
         let result = (|| {
@@ -507,22 +529,24 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
 // ---------- o widget ----------
 
 const W: f32 = WIDE;
-// grande: a capa na largura toda em cima; embaixo, fonte, título e artista, a barra, os
-// controles, o volume do app e aleatório/abrir/repetir
-const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, 200.0, 18.0); // x, y, largura, altura, raio
-const G_TEXT_Y: f32 = 228.0;
-const G_VOL_Y: f32 = 384.0;
-const G_TOG_Y: f32 = LARGE_H - 28.0;
+// grande: a capa grande em cima; embaixo, a fonte, título e
+// artista, a barra, aleatório/controles/repetir numa linha só e o volume do app no pé
+const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, 240.0, 18.0); // x, y, largura, altura, raio
+const G_TEXT_Y: f32 = 266.0;
+const G_VOL_Y: f32 = LARGE_H - 26.0;
+/// aleatório e repetir: nas pontas da linha dos controles
+const G_TOG_X: f32 = 34.0;
 const VOL_X: (f32, f32) = (44.0, W - 44.0);
 const ART: f32 = 76.0;
 const ART_RADIUS: f32 = 14.0;
 const ART_XY: (f32, f32) = (18.0, 18.0);
 const TEXT_X: f32 = 18.0;
 const TEXT_W: f32 = W - 36.0;
-const BAR_Y: f32 = 290.0;
-const CTRL_Y: f32 = 336.0;
+const BAR_Y: f32 = 328.0;
+const CTRL_Y: f32 = 372.0;
 const PLAY_D: f32 = 44.0;
-const IDLE_BOX: (f32, f32, f32, f32) = (36.0, 66.0, W - 72.0, 100.0); // x, y, largura, altura do equalizador (na capa)
+// x, y, largura, altura do equalizador (no meio da capa)
+const IDLE_BOX: (f32, f32, f32, f32) = (36.0, G_ART.1 + (G_ART.3 - 100.0) / 2.0, W - 72.0, 100.0);
 
 // pequeno (quadrado): capa e tocar em cima, título e artista embaixo, barra fina no pé
 const C_ART: f32 = 64.0;
@@ -552,6 +576,24 @@ const FADE_MS: f32 = 600.0;
 /// o fundo é desenhado um pouco maior que o cartão (as bordas da ampliação ficam de fora)
 const BG_ZOOM: f32 = 1.2;
 const HUD: Duration = Duration::from_millis(1100);
+
+// título comprido demais: ele dá uma volta para o lado (até mostrar o fim e o começo de novo)
+// quando a música troca e quando o mouse entra no widget; no resto do tempo fica parado, com
+// "...", sem gastar quadros
+/// pontos por segundo
+const MARQUEE_SPEED: f32 = 30.0;
+/// segundos parado, depois que a música troca, antes da volta (para ler o começo)
+const MARQUEE_PAUSE: f32 = 2.5;
+/// espaço entre o fim do título e o começo dele de novo
+const MARQUEE_GAP: f32 = 40.0;
+const MARQUEE_FPS: u32 = 30;
+
+/// Quanto o título andou para a esquerda, `elapsed` segundos depois do começo da volta, se a
+/// volta (o título e o espaço) mede `span` pontos. Fora da volta (antes ou depois), parado: None.
+fn marquee_offset(elapsed: f32, span: f32) -> Option<f32> {
+    let offset = elapsed * MARQUEE_SPEED;
+    (elapsed > 0.0 && offset < span).then_some(offset)
+}
 
 /// Duas cores fortes e diferentes da capa (para as ondas da ilha).
 fn art_colors(art: &Image) -> [Rgba; 2] {
@@ -659,19 +701,33 @@ pub struct Media {
     meters: RefCell<Option<(String, Vec<windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation>)>>,
     /// cores da capa já calculadas: (capa, cores)
     colors: RefCell<Option<(String, [Rgba; 2])>>,
+    /// a opção "Capa em alta do YouTube", dividida com a thread que lê a mídia
+    hd_allowed: Arc<AtomicBool>,
+    /// o título não coube no último desenho: o tamanho de uma volta dele (título e espaço), em
+    /// pontos (0: coube, ou não há o fundo da capa para repintar embaixo dele)
+    marquee: Cell<f32>,
+    /// o tamanho do texto do último desenho (a camada animada usa o mesmo)
+    text_scale: Cell<f32>,
+    /// a volta do título: (título, quando ela começa)
+    lap: RefCell<Option<(String, Instant)>>,
+    /// o título estava dando a volta no último `tick` (para avisar o cartão quando muda)
+    sliding: Cell<bool>,
 }
 
 impl Media {
     pub fn new(cfg: &Value) -> Media {
         let pref = Arc::new(Mutex::new(cfg["midia"].str_of("fonte").unwrap_or("auto").to_string()));
         let shared = Arc::new(Mutex::new(None));
+        let hd_allowed = Arc::new(AtomicBool::new(hd_covers(cfg)));
         let (tx, rx) = channel();
         {
-            let (shared, pref) = (shared.clone(), pref.clone());
-            std::thread::spawn(move || watch(rx, shared, pref));
+            let (shared, pref, hd_allowed) = (shared.clone(), pref.clone(), hd_allowed.clone());
+            std::thread::spawn(move || watch(rx, shared, pref, hd_allowed));
         }
         let seed = (win::now() * 1000.0) as usize;
-        Media::with(tx, shared, pref, None, seed % FUNNY.len(), Instant::now())
+        let mut m = Media::with(tx, shared, pref, None, seed % FUNNY.len(), Instant::now());
+        m.hd_allowed = hd_allowed;
+        m
     }
 
     fn with(tx: Sender<Cmd>, shared: Arc<Mutex<Option<Snapshot>>>, pref: Arc<Mutex<String>>, media: Option<Snapshot>, msg: usize, next: Instant) -> Media {
@@ -694,6 +750,11 @@ impl Media {
             frame_at: next,
             meters: RefCell::new(None),
             colors: RefCell::new(None),
+            hd_allowed: Arc::new(AtomicBool::new(true)),
+            marquee: Cell::new(0.0),
+            text_scale: Cell::new(1.0),
+            lap: RefCell::new(None),
+            sliding: Cell::new(false),
         }
     }
 
@@ -724,6 +785,16 @@ impl Media {
         let mut m = Media::sample();
         m.media = None;
         m
+    }
+
+    /// Exemplo tocando com uma capa lisa de w×h pixels (300×300 do Spotify, 150×84 do navegador).
+    #[cfg(test)]
+    pub fn sample_art(kind: &'static str, w: u32, h: u32) -> Media {
+        let mut art = Image::new(w, h);
+        for p in art.px.chunks_mut(4) {
+            p.copy_from_slice(&[40, 220, 40, 255]);
+        }
+        Media::sample_song(kind, "Nome da música", "Artista", Arc::new(art), &format!("capa{w}x{h}"), 74.0, 213.0)
     }
 
     /// Exemplo com uma música e capa quaisquer (imagens do README).
@@ -805,13 +876,24 @@ impl Media {
         }
     }
 
-    /// (x, y, largura, altura, raio) da capa: quadrada no pequeno e no médio, larga no grande.
-    fn art_rect(&self, mode: Mode) -> (f32, f32, f32, f32, f32) {
+    /// (x, y, largura, altura, raio) da área da capa: quadrada no pequeno e no médio, larga no
+    /// grande.
+    fn art_box(&self, mode: Mode) -> (f32, f32, f32, f32, f32) {
         if mode == Mode::G {
             return G_ART;
         }
         let ((x, y), size, r) = self.art_geom(mode);
         (x, y, size, size, r)
+    }
+
+    /// (x, y, largura, altura, raio) da capa: na proporção da própria imagem, o maior possível
+    /// dentro da área e centralizada nela (inteira, sem cortes nem faixas). Sem imagem, a área.
+    fn art_rect(&self, mode: Mode) -> (f32, f32, f32, f32, f32) {
+        let area = self.art_box(mode);
+        match self.media.as_ref().filter(|m| !m.empty).and_then(|m| m.art.as_ref()) {
+            Some(art) => fit_art(area, art.w as f32 / art.h.max(1) as f32),
+            None => area,
+        }
     }
 
     fn idle_box(mode: Mode) -> (f32, f32, f32, f32) {
@@ -894,24 +976,28 @@ impl Media {
         (x >= x0 - 8.0 && x <= x1 + 8.0).then(|| ((x - x0) / (x1 - x0)).clamp(0.0, 1.0))
     }
 
-    /// (ação, centro x) dos botões da última linha do grande.
-    fn toggles(&self) -> [(u32, f32); 3] {
-        [(SHUFFLE, 34.0), (OPEN_PLAYER, W / 2.0), (REPEAT, W - 34.0)]
+    /// (ação, x0, y0, x1, y1) dos botões extras do grande: aleatório e repetir nas pontas da
+    /// linha dos controles.
+    fn toggles(&self) -> Vec<(u32, (f32, f32, f32, f32))> {
+        if !self.has_media() {
+            return Vec::new();
+        }
+        let square = |cx: f32| (cx - 18.0, CTRL_Y - 16.0, cx + 18.0, CTRL_Y + 16.0);
+        vec![(SHUFFLE, square(G_TOG_X)), (REPEAT, square(W - G_TOG_X))]
     }
 
-    fn toggle_at(&self, x: f32, y: f32, mode: Mode) -> Option<u32> {
-        if mode != Mode::G || !self.has_media() || !(G_TOG_Y - 16.0..=G_TOG_Y + 16.0).contains(&y) {
+    fn toggle_at(&self, x: f32, y: f32, mode: Mode) -> Option<(u32, (f32, f32, f32, f32))> {
+        if mode != Mode::G {
             return None;
         }
         let m = self.media.as_ref()?;
-        self.toggles().into_iter().find_map(|(a, cx)| {
-            let half = if a == OPEN_PLAYER { 70.0 } else { 18.0 };
+        self.toggles().into_iter().find(|&(a, (x0, y0, x1, y1))| {
             let enabled = match a {
                 SHUFFLE => m.can_shuffle && m.shuffle.is_some(),
                 REPEAT => m.can_repeat && m.repeat.is_some(),
                 _ => true,
             };
-            ((cx - half..=cx + half).contains(&x) && enabled).then_some(a)
+            enabled && (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
         })
     }
 
@@ -927,7 +1013,9 @@ impl Media {
         let cache_key = (key.clone(), pw as u32, ph as u32);
         let mut cache = self.art_cache.borrow_mut();
         if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
-            *cache = Some((cache_key, cover_image(art, pw as u32, ph as u32)));
+            // a moldura já tem a proporção da capa: ela entra inteira, mesmo que precise ampliar
+            // (uma miniatura pequena do navegador fica um pouco suave, mas ocupa o lugar todo)
+            *cache = Some((cache_key, gfx::fit_cover(art, pw as u32, ph as u32)));
         }
         c.push_round_clip(x, y, x + w, y + h, radius);
         c.image_px(&cache.as_ref().unwrap().1, px0, py0, pw, ph, 1.0);
@@ -1109,38 +1197,94 @@ impl Media {
                 c.fill_round_rect(x0, G_VOL_Y - 2.5, x1, G_VOL_Y + 2.5, 2.5, WHITE.alpha(0.12));
             }
         }
-        for (action, cx) in self.toggles() {
-            let y = G_TOG_Y;
-            match action {
-                SHUFFLE | REPEAT => {
-                    let (on, enabled) = if action == SHUFFLE {
-                        (m.shuffle == Some(true), m.can_shuffle && m.shuffle.is_some())
-                    } else {
-                        (m.repeat.is_some_and(|r| r > 0), m.can_repeat && m.repeat.is_some())
-                    };
-                    if on {
-                        c.fill_round_rect(cx - 16.0, y - 15.0, cx + 16.0, y + 15.0, 9.0, WHITE.alpha(0.2));
-                    }
-                    let glyph = match action {
-                        SHUFFLE => "\u{e8b1}",
-                        _ if m.repeat == Some(1) => "\u{e8ed}",
-                        _ => "\u{e8ee}",
-                    };
-                    let col = if !enabled { WHITE.alpha(0.25) } else if on { FG } else { MUTED };
-                    icon(c, cx, y, glyph, 15.0, col);
-                }
-                _ => {
-                    let label = format!("Abrir {}", source_name(m.kind));
-                    let tw = c.text_width(&label, Face::Semibold, 12.0);
-                    c.text(cx - 9.0, y, &label, Face::Semibold, 12.0, Rgba::rgb(90, 200, 250), Anchor::MM, None);
-                    icon(c, cx - 9.0 + tw / 2.0 + 12.0, y, "\u{e8a7}", 11.0, Rgba::rgb(90, 200, 250));
-                }
+        for (action, (x0, y0, x1, y1)) in self.toggles() {
+            let (cx, y) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            let (on, enabled) = if action == SHUFFLE {
+                (m.shuffle == Some(true), m.can_shuffle && m.shuffle.is_some())
+            } else {
+                (m.repeat.is_some_and(|r| r > 0), m.can_repeat && m.repeat.is_some())
+            };
+            if on {
+                c.fill_round_rect(cx - 16.0, y - 15.0, cx + 16.0, y + 15.0, 9.0, WHITE.alpha(0.2));
             }
+            let glyph = match action {
+                SHUFFLE => "\u{e8b1}",
+                _ if m.repeat == Some(1) => "\u{e8ed}",
+                _ => "\u{e8ee}",
+            };
+            let col = if !enabled { WHITE.alpha(0.25) } else if on { FG } else { MUTED };
+            icon(c, cx, y, glyph, 15.0, col);
         }
     }
 
     fn layout_of(&self, mode: Mode) -> Layout {
         Layout::of(mode)
+    }
+
+    /// (x, y, largura, tamanho da letra) do título da música.
+    fn title_spot(mode: Mode) -> (f32, f32, f32, f32) {
+        match mode {
+            Mode::P => (14.0, 90.0, C_TEXT_W, 12.5),
+            Mode::M => (M_TEXT_X, 30.0, M_TEXT_W, 13.5),
+            Mode::G => (TEXT_X, G_TEXT_Y + 15.0, TEXT_W, 15.5),
+        }
+    }
+
+    /// O título, parado (com "..." se não couber). Se não cabe e há o fundo da capa, a camada
+    /// animada o faz dar uma volta (`overlay_title`); aqui fica a versão parada, que aparece fora
+    /// das voltas, nas animações do cartão e na economia de bateria.
+    fn draw_title(&self, c: &mut Canvas, m: &Snapshot, mode: Mode, has_bg: bool) {
+        let (x, y, w, size) = Self::title_spot(mode);
+        c.text(x, y, &m.title, Face::Semibold, size, FG, Anchor::LA, Some(w));
+        let tw = c.text_width(&m.title, Face::Semibold, size);
+        self.marquee.set(if has_bg && tw > w { tw + MARQUEE_GAP } else { 0.0 });
+        self.text_scale.set(c.text_scale);
+        // música nova (ou título novo): uma volta, depois de dar tempo de ler o começo
+        let mut lap = self.lap.borrow_mut();
+        if lap.as_ref().map(|l| l.0.as_str()) != Some(m.title.as_str()) {
+            *lap = Some((m.title.clone(), Instant::now() + Duration::from_secs_f32(MARQUEE_PAUSE)));
+        }
+    }
+
+    /// Quanto o título comprido andou agora (None: parado, fora da volta, ou ele cabe).
+    fn marquee_now(&self) -> Option<f32> {
+        let span = self.marquee.get();
+        let m = self.media.as_ref().filter(|m| !m.empty && span > 0.0)?;
+        let lap = self.lap.borrow();
+        let (_, start) = lap.as_ref().filter(|l| l.0 == m.title)?;
+        let now = Instant::now();
+        if now < *start {
+            return None;
+        }
+        marquee_offset((now - *start).as_secs_f32().max(f32::MIN_POSITIVE), span)
+    }
+
+    /// O mouse entrou no widget: o título comprido dá uma volta (se já não está dando).
+    fn slide_title(&self) -> bool {
+        if self.marquee.get() <= 0.0 || self.marquee_now().is_some() {
+            return false;
+        }
+        let Some(m) = self.media.as_ref().filter(|m| !m.empty) else { return false };
+        *self.lap.borrow_mut() = Some((m.title.clone(), Instant::now()));
+        true
+    }
+
+    /// O título deslizando (só quando ele não cabe): repinta o fundo na faixa dele, por cima do
+    /// título parado, e escreve o título deslocado, com uma segunda cópia logo atrás.
+    fn overlay_title(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        let (Some(m), Some(offset)) = (self.media.as_ref(), self.marquee_now()) else { return };
+        let span = self.marquee.get();
+        let scale = std::mem::replace(&mut c.text_scale, self.text_scale.get());
+        let (x, y, w, size) = Self::title_spot(mode);
+        // a faixa do título, um pouco mais alta que a letra (acentos e a perna do "g")
+        let (x0, y0, x1, y1) = (ox + x, oy + y - 3.0, ox + x + w, oy + y + size * 1.6);
+        c.push_round_clip(x0, y0, x1, y1, 0.0);
+        self.paint_bg(c, mode, ox, oy);
+        for k in 0..2 {
+            c.text(x0 - offset + k as f32 * span, oy + y, &m.title, Face::Semibold, size, FG, Anchor::LA, None);
+        }
+        c.pop_clip();
+        c.text_scale = scale;
     }
 
     /// Tudo o que fica por cima do fundo.
@@ -1167,7 +1311,7 @@ impl Media {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 26.0);
                     }
-                    c.text(x, 90.0, &m.title, Face::Semibold, 12.5, FG, Anchor::LA, Some(C_TEXT_W));
+                    self.draw_title(c, m, mode, has_bg);
                     c.text(x, 108.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
                 } else {
                     c.text(x, 92.0, &funny_title, Face::Semibold, 12.5, FG, Anchor::LA, Some(C_TEXT_W));
@@ -1183,7 +1327,7 @@ impl Media {
                         self.note(c, mode, 28.0);
                     }
                     c.text(x, 16.0, source_label(m.kind), Face::Semibold, 9.5, source_color(m.kind), Anchor::LA, None);
-                    c.text(x, 30.0, &m.title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
+                    self.draw_title(c, m, mode, has_bg);
                     c.text(x, 50.0, &m.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                 } else {
                     let kind = self.pref();
@@ -1203,7 +1347,7 @@ impl Media {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 44.0);
                     }
-                    c.text(x, y + 15.0, &m.title, Face::Semibold, 15.5, FG, Anchor::LA, Some(w));
+                    self.draw_title(c, m, mode, has_bg);
                     c.text(x, y + 37.0, &m.artist, Face::Regular, 12.5, MUTED, Anchor::LA, Some(w));
                     self.draw_extras(c, m);
                 } else {
@@ -1256,16 +1400,23 @@ impl Kind for Media {
         self.draw_fg(c, mode, has_bg);
     }
 
-    /// O equalizador "cochilando" quando nada está tocando e o aviso de volume.
+    /// O título comprido deslizando, o equalizador "cochilando" quando nada está tocando e o
+    /// aviso de volume.
     fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        self.overlay_title(c, mode, ox, oy);
         self.overlay_rest(c, mode, ox, oy);
+    }
+
+    fn pointer_entered(&mut self) -> bool {
+        self.slide_title()
     }
 
     fn overlay_fps(&self) -> u32 {
         if self.hud_until.is_some_and(|t| Instant::now() < t) {
             30
         } else if self.has_media() {
-            0
+            // quadros só enquanto o título dá a volta
+            if self.marquee_now().is_some() { MARQUEE_FPS } else { 0 }
         } else {
             IDLE_FPS
         }
@@ -1279,7 +1430,7 @@ impl Kind for Media {
                 Ctl::Next => NEXT,
             });
         }
-        if let Some(a) = self.toggle_at(x, y, mode) {
+        if let Some((a, _)) = self.toggle_at(x, y, mode) {
             return Some(a);
         }
         if let Some(v) = self.volume_at(x, y, mode) {
@@ -1352,10 +1503,8 @@ impl Kind for Media {
             let r = Self::reach(size, circle) + 2.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
-        if let Some(a) = self.toggle_at(x, y, mode) {
-            let cx = self.toggles().iter().find(|t| t.0 == a).map(|t| t.1).unwrap_or(0.0);
-            let half = if a == OPEN_PLAYER { 72.0 } else { 18.0 };
-            return Some((cx - half, G_TOG_Y - 16.0, cx + half, G_TOG_Y + 16.0, 10.0));
+        if let Some((_, (x0, y0, x1, y1))) = self.toggle_at(x, y, mode) {
+            return Some((x0, y0, x1, y1, 10.0));
         }
         // a barra de progresso "engrossa" com o mouse em cima
         if let (Some(_), Some((x0, x1, by, h))) = (self.bar_at(x, y, mode), self.bar_geom(mode)) {
@@ -1380,7 +1529,7 @@ impl Kind for Media {
         if self.control_at(x, y, mode).is_some() {
             return None;
         }
-        if let Some(a) = self.toggle_at(x, y, mode) {
+        if let Some((a, _)) = self.toggle_at(x, y, mode) {
             return match (a, m.repeat) {
                 (REPEAT, Some(1)) => Some("Repetindo esta música".into()),
                 (REPEAT, Some(2)) => Some("Repetindo a lista".into()),
@@ -1478,11 +1627,20 @@ impl Kind for Media {
         if let Some(t) = self.hud_until {
             next = next.min(t);
         }
+        // o começo e o fim da volta do título, na hora certa
+        if let Some((_, start)) = self.lap.borrow().as_ref().filter(|_| self.marquee.get() > 0.0) {
+            let end = *start + Duration::from_secs_f32(self.marquee.get() / MARQUEE_SPEED);
+            if let Some(t) = [*start, end].into_iter().find(|t| *t > Instant::now()) {
+                next = next.min(t);
+            }
+        }
         Some(next)
     }
 
-    fn tick(&mut self, _ctx: &mut Ctx) -> bool {
+    fn tick(&mut self, ctx: &mut Ctx) -> bool {
         let now = Instant::now();
+        // a opção pode mudar nas configurações a qualquer momento
+        self.hd_allowed.store(hd_covers(ctx.cfg), Ordering::Relaxed);
         let mut changed = false;
         if let Some((_, since)) = &self.fade {
             changed = true; // um quadro da troca de fundo
@@ -1493,6 +1651,12 @@ impl Kind for Media {
         }
         if self.hud_until.is_some_and(|t| now >= t) {
             self.hud_until = None;
+            changed = true;
+        }
+        // a volta do título começou ou acabou: o cartão liga ou desliga os quadros
+        let sliding = self.marquee_now().is_some();
+        if sliding != self.sliding.get() {
+            self.sliding.set(sliding);
             changed = true;
         }
         if now >= self.next_poll {
@@ -1682,6 +1846,233 @@ mod cover_tests {
         assert!(!youtube::worth_upgrading(&picture(1280, 720, 1)), "já está em alta");
         assert!(youtube::worth_upgrading(&picture(150, 83, 1)));
         assert!(!youtube::worth_upgrading(&picture(300, 300, 1)), "capa quadrada de música");
+    }
+
+    /// A capa desenhada no widget, numa escala de 1,25: o retângulo (x0, y0, x1, y1), em pontos,
+    /// com exatamente a cor da capa (o fundo é feito dela, mas desfocado, saturado e escurecido).
+    fn drawn_art(m: &Media, mode: Mode) -> (f32, f32, f32, f32) {
+        let l = Layout::of(mode);
+        let s = 1.25;
+        let mut c = Canvas::new((l.w * s).round() as u32, (l.h * s).round() as u32, s);
+        Kind::draw(m, &mut c, mode, &Env { cfg: &serde_json::json!({"midia": {}, "app": {}}), key: "midia" });
+        let img = c.finish();
+        let green = |x: u32, y: u32| {
+            let i = ((y * img.w + x) * 4) as usize;
+            [40u8, 220, 40].iter().zip(&img.px[i..i + 3]).all(|(a, b)| a.abs_diff(*b) <= 4)
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for y in 0..img.h {
+            for x in 0..img.w {
+                if green(x, y) {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+                }
+            }
+        }
+        assert!(x0 < x1, "a capa não apareceu");
+        (x0 as f32 / s, y0 as f32 / s, x1 as f32 / s, y1 as f32 / s)
+    }
+
+    #[test]
+    fn cover_is_whole_in_every_size() {
+        com();
+        // capa quadrada do Spotify, miniatura do navegador e miniatura em alta do YouTube
+        for (kind, w, h) in [("spotify", 300, 300), ("youtube", 150, 84), ("youtube", 1280, 720)] {
+            let m = Media::sample_art(kind, w, h);
+            let aspect = w as f32 / h as f32;
+            for mode in Mode::ALL {
+                let (bx, by, bw, bh, _) = m.art_box(mode);
+                let (x, y, fw, fh, _) = m.art_rect(mode);
+                // a moldura tem a proporção da capa (nada é cortado), cabe na área e encosta
+                // nela em um dos sentidos (o maior tamanho possível), centralizada
+                assert!((fw / fh - aspect).abs() < 0.01, "{kind} {w}x{h} {mode:?}: moldura {fw}x{fh}");
+                assert!(fw <= bw + 0.01 && fh <= bh + 0.01, "{kind} {w}x{h} {mode:?}: fora da área");
+                assert!((fw - bw).abs() < 0.01 || (fh - bh).abs() < 0.01, "{kind} {w}x{h} {mode:?}: menor que o possível");
+                assert!(((x - bx) - (bx + bw - x - fw)).abs() < 0.01 && ((y - by) - (by + bh - y - fh)).abs() < 0.01, "{kind} {mode:?}: fora do centro");
+                // e é isso que aparece desenhado: a capa inteira ocupa a moldura toda (sem
+                // faixas em volta nem pedaço de fora); os cantos são arredondados, então mede
+                // pelo meio de cada lado
+                let (dx0, dy0, dx1, dy1) = drawn_art(&m, mode);
+                let tol = 1.5;
+                assert!((dx0 - x).abs() <= tol && (dx1 - (x + fw)).abs() <= tol, "{kind} {w}x{h} {mode:?}: largura desenhada {dx0}..{dx1}, moldura {x}..{}", x + fw);
+                assert!((dy0 - y).abs() <= tol && (dy1 - (y + fh)).abs() <= tol, "{kind} {w}x{h} {mode:?}: altura desenhada {dy0}..{dy1}, moldura {y}..{}", y + fh);
+            }
+        }
+    }
+
+    #[test]
+    fn square_cover_is_not_cropped_in_large() {
+        com();
+        // antes, a capa quadrada esticava até a largura toda do grande e perdia o alto e o pé
+        let m = Media::sample_art("spotify", 300, 300);
+        let (_, _, w, h, _) = m.art_rect(Mode::G);
+        assert_eq!((w, h), (G_ART.3, G_ART.3), "quadrada, na altura da área");
+        // sem capa, o lugar dela continua sendo a área toda
+        let (_, _, w, h, _) = Media::sample().art_rect(Mode::G);
+        assert_eq!((w, h), (G_ART.2, G_ART.3));
+    }
+
+    #[test]
+    fn large_has_room_for_a_big_cover() {
+        com();
+        // a capa quadrada do grande ocupa bem mais que antes (200), sem sobrar tanto dos lados
+        assert!(G_ART.3 >= 240.0);
+        let mut m = Media::sample_art("spotify", 300, 300);
+        if let Some(snap) = &mut m.media {
+            (snap.can_shuffle, snap.shuffle, snap.can_repeat, snap.repeat) = (true, Some(false), true, Some(0));
+        }
+        let env = Env { cfg: &serde_json::json!({"midia": {}, "app": {}}), key: "midia" };
+        let art_bottom = G_ART.1 + G_ART.3;
+        assert!(G_TEXT_Y >= art_bottom + 8.0, "o texto começa embaixo da capa");
+        // botões: abaixo da capa, dentro do cartão e sem encostar uns nos outros
+        let mut boxes: Vec<(String, (f32, f32, f32, f32))> = m
+            .controls(Mode::G)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_, cx, cy, size, _, circle))| {
+                let r = Media::reach(size, circle);
+                (format!("controle {i}"), (cx - r, cy - r, cx + r, cy + r))
+            })
+            .collect();
+        boxes.extend(m.toggles().into_iter().map(|(a, r)| (format!("botão {a}"), r)));
+        for (name, (x0, y0, x1, y1)) in &boxes {
+            assert!(*y0 > art_bottom && *x0 >= 0.0 && *x1 <= W && *y1 <= LARGE_H - 8.0, "{name} fora do lugar: {x0},{y0} {x1},{y1}");
+        }
+        for (i, (a, ra)) in boxes.iter().enumerate() {
+            for (b, rb) in &boxes[i + 1..] {
+                let overlap = ra.0 < rb.2 && rb.0 < ra.2 && ra.1 < rb.3 && rb.1 < ra.3;
+                assert!(!overlap, "{a} e {b} se sobrepõem");
+            }
+        }
+        // a barra, os controles e o volume, de cima para baixo, sem se cruzar
+        let (_, _, bar_y, _) = m.bar_geom(Mode::G).unwrap();
+        assert!(bar_y > G_TEXT_Y + 50.0 && CTRL_Y - PLAY_D / 2.0 > bar_y + 16.0 && G_VOL_Y - 12.0 > CTRL_Y + PLAY_D / 2.0);
+        // cada botão responde no lugar dele
+        for (a, (x0, y0, x1, y1)) in m.toggles() {
+            assert_eq!(Kind::hit(&m, (x0 + x1) / 2.0, (y0 + y1) / 2.0, Mode::G, &env), Some(a));
+        }
+    }
+
+    #[test]
+    fn marquee_makes_a_single_lap() {
+        let span = 300.0;
+        let lap = span / MARQUEE_SPEED;
+        assert_eq!(marquee_offset(0.0, span), None, "antes da volta: parado");
+        assert!((marquee_offset(2.0, span).unwrap() - 2.0 * MARQUEE_SPEED).abs() < 0.01, "anda na velocidade certa");
+        assert!(marquee_offset(lap - 0.01, span).unwrap() < span, "nunca passa de uma volta");
+        assert_eq!(marquee_offset(lap + 0.1, span), None, "depois da volta: parado de novo (sem recomeçar)");
+    }
+
+    /// Põe a volta do título do widget para ter começado `ago` segundos atrás.
+    fn lap_started(m: &Media, ago: f32) {
+        let title = m.media.as_ref().unwrap().title.clone();
+        *m.lap.borrow_mut() = Some((title, Instant::now() - Duration::from_secs_f32(ago)));
+    }
+
+    /// O widget com um título, desenhado parado (como o cartão faz) a 1,25.
+    fn drawn_with_title(m: &Media, mode: Mode) -> Canvas {
+        let l = Layout::of(mode);
+        let s = 1.25;
+        let mut c = Canvas::new((l.w * s).round() as u32, (l.h * s).round() as u32, s);
+        Kind::draw(m, &mut c, mode, &Env { cfg: &serde_json::json!({"midia": {}, "app": {}}), key: "midia" });
+        c
+    }
+
+    fn with_title(mut m: Media, title: &str) -> Media {
+        if let Some(snap) = &mut m.media {
+            snap.title = title.into();
+        }
+        m
+    }
+
+    const LONG: &str = "Computer use chegou ao Maestri! Seu computador, agora compartilhado com seus agentes";
+
+    #[test]
+    fn only_long_titles_slide() {
+        com();
+        for mode in Mode::ALL {
+            let mut long = with_title(Media::sample_art("youtube", 1280, 720), LONG);
+            drawn_with_title(&long, mode);
+            // música nova: espera um pouco (sem quadros), dá uma volta e para de novo
+            assert_eq!(long.overlay_fps(), 0, "{mode:?}: parado enquanto dá para ler o começo");
+            let start = long.lap.borrow().as_ref().unwrap().1;
+            let wait = start.saturating_duration_since(Instant::now()).as_secs_f32();
+            assert!(wait > MARQUEE_PAUSE - 0.5, "{mode:?}: a volta começa depois da pausa");
+            assert!(long.next_tick().unwrap() <= start, "{mode:?}: o widget acorda quando a volta começa");
+            lap_started(&long, 1.0);
+            assert_eq!(long.overlay_fps(), MARQUEE_FPS, "{mode:?}: dando a volta");
+            let lap = long.marquee.get() / MARQUEE_SPEED;
+            lap_started(&long, lap + 0.5);
+            assert_eq!(long.overlay_fps(), 0, "{mode:?}: acabou a volta, sem gastar quadros");
+            // o mouse entra: mais uma volta, já
+            assert!(Kind::pointer_entered(&mut long), "{mode:?}");
+            assert_eq!(long.overlay_fps(), MARQUEE_FPS, "{mode:?}: o mouse entrou");
+            assert!(!Kind::pointer_entered(&mut long), "{mode:?}: já está dando a volta");
+            let short = with_title(Media::sample_art("spotify", 300, 300), "Thriller");
+            drawn_with_title(&short, mode);
+            assert_eq!(short.overlay_fps(), 0, "{mode:?}: título curto fica parado (sem gastar quadros)");
+            let mut short = short;
+            assert!(!Kind::pointer_entered(&mut short), "{mode:?}: título curto não dá volta");
+            // sem capa não há o fundo para repintar embaixo dele: fica parado, com "..."
+            let bare = with_title(Media::sample(), LONG);
+            drawn_with_title(&bare, mode);
+            assert_eq!(bare.overlay_fps(), 0, "{mode:?}: sem capa");
+        }
+    }
+
+    #[test]
+    fn sliding_title_moves_only_inside_its_strip() {
+        com();
+        for mode in Mode::ALL {
+            let m = with_title(Media::sample_art("youtube", 1280, 720), LONG);
+            let still = drawn_with_title(&m, mode).finish();
+            // logo que aparece: parado (a camada não mexe em nada)
+            let mut c = drawn_with_title(&m, mode);
+            Kind::overlay(&m, &mut c, mode, 0.0, 0.0);
+            assert_eq!(c.finish().px, still.px, "{mode:?}: na pausa, o título parado aparece como está");
+            // alguns segundos depois: só a faixa do título muda
+            lap_started(&m, 3.0);
+            let mut c = drawn_with_title(&m, mode);
+            Kind::overlay(&m, &mut c, mode, 0.0, 0.0);
+            let moved = c.finish();
+            let (x, y, w, size) = Media::title_spot(mode);
+            let s = 1.25;
+            let mut changed = 0;
+            for py in 0..still.h {
+                for px in 0..still.w {
+                    let i = ((py * still.w + px) * 4) as usize;
+                    if still.px[i..i + 4] != moved.px[i..i + 4] {
+                        changed += 1;
+                        let (fx, fy) = (px as f32 / s, py as f32 / s);
+                        let inside = fx >= x - 1.0 && fx <= x + w + 1.0 && fy >= y - 4.0 && fy <= y + size * 1.6 + 1.0;
+                        assert!(inside, "{mode:?}: mudou fora da faixa do título em ({fx}, {fy})");
+                    }
+                }
+            }
+            assert!(changed > 50, "{mode:?}: o título andou");
+        }
+    }
+
+    #[test]
+    fn odd_shapes_are_kept_sensible() {
+        let area = (0.0, 0.0, 120.0, 120.0, 14.0);
+        // um panorama não vira uma tira fina; uma imagem vazia não quebra a conta
+        let (_, _, w, h, _) = fit_art(area, 10.0);
+        assert!((w / h - ART_ASPECT.1).abs() < 0.01);
+        assert_eq!(fit_art(area, f32::NAN), area);
+        // capa baixa: cantos menores
+        let (_, _, _, h, r) = fit_art(area, 2.0);
+        assert!(r <= h * 0.2 + 0.01);
+    }
+
+    #[test]
+    fn hd_cover_search_can_be_turned_off() {
+        com();
+        let small = picture(150, 83, 1);
+        assert!(wants_hd("youtube", &small, true));
+        assert!(!wants_hd("youtube", &small, false), "opção desligada: não manda nada ao youtube.com");
+        assert!(!wants_hd("spotify", &small, true), "só vídeos do YouTube");
+        assert!(hd_covers(&serde_json::json!({})), "ligada por padrão");
+        assert!(!hd_covers(&serde_json::json!({"midia": {"capa_hd": false}})));
     }
 
     #[test]

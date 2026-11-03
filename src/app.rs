@@ -118,6 +118,8 @@ pub struct App {
     next_update: Instant,
     /// busca em andamento: a resposta e se foi pedida pelo botão
     update_rx: Option<(std::sync::mpsc::Receiver<updates::Found>, bool)>,
+    /// o install.ps1 rodando (se ele terminar e o app continuar aberto, a atualização não foi)
+    installer: Option<std::process::Child>,
     /// opção mexida por um slider, para aplicar no vidro daqui a pouco (sem pesar a cada pixel)
     pending_setting: Option<(Instant, &'static str)>,
     /// abrir as boas-vindas (primeira vez)
@@ -182,6 +184,7 @@ impl App {
             update_version: None,
             next_update: Instant::now() + UPDATE_FIRST,
             update_rx: None,
+            installer: None,
             pending_setting: None,
             welcome_at: None,
             screens: Vec::new(),
@@ -741,9 +744,20 @@ impl App {
     fn on_motion(&mut self, i: usize, x: i32, y: i32) {
         if self.cards[i].hover_target == 0.0 {
             self.cards[i].set_hover(true);
+            // (o título comprido do Tocando agora dá uma volta, por exemplo)
+            if self.cards[i].kind.pointer_entered() && !self.sh.saving {
+                self.cards[i].fps = self.cards[i].kind.overlay_fps();
+            }
         }
         if self.cards[i].drag.is_some() {
             return;
+        }
+        if !self.cards[i].animating() && !self.sh.editing {
+            let (lx, ly) = self.cards[i].logical(x, y);
+            let mode = self.cards[i].mode;
+            if self.cards[i].kind.pointer_moved(lx, ly, mode) {
+                self.cards[i].refresh(&self.sh);
+            }
         }
         let sh = &self.sh;
         let card = &self.cards[i];
@@ -773,6 +787,9 @@ impl App {
     }
 
     fn on_leave(&mut self, i: usize) {
+        if self.cards[i].kind.pointer_left() && !self.cards[i].animating() {
+            self.cards[i].refresh(&self.sh);
+        }
         let card = &mut self.cards[i];
         card.set_hover(false);
         card.expand_at = None;
@@ -1761,7 +1778,11 @@ impl App {
             self.open_welcome();
         }
         if now >= self.next_update {
-            self.check_updates(false);
+            if config::setting_bool(&self.sh.cfg, "procurar_atualizacoes") {
+                self.check_updates(false);
+            } else {
+                self.next_update = now + UPDATE_EVERY; // desligado: só pelo botão em Sobre
+            }
         }
         self.poll_updates();
         self.toast.frame();
@@ -1888,6 +1909,7 @@ impl App {
     }
 
     fn poll_updates(&mut self) {
+        self.poll_installer();
         let Some((rx, manual)) = &self.update_rx else { return };
         let manual = *manual;
         let found = match rx.try_recv() {
@@ -1928,10 +1950,29 @@ impl App {
     }
 
     fn install_update(&mut self) {
+        if self.installer.is_some() {
+            return; // já está atualizando
+        }
         if updates::installed() {
             self.toast("Atualizando…", Some("Os widgets fecham e abrem de novo sozinhos"), "refresh", ACCENT, None);
         }
-        updates::install();
+        self.installer = updates::install();
+    }
+
+    /// O install.ps1 terminou e este app continua aberto: a atualização não aconteceu (deu
+    /// certo, ele teria fechado este app). Diz o porquê.
+    fn poll_installer(&mut self) {
+        let Some(child) = &mut self.installer else { return };
+        let code = match child.try_wait() {
+            Ok(None) => return, // ainda rodando
+            Ok(Some(status)) => status.code(),
+            Err(_) => None,
+        };
+        self.installer = None;
+        let (title, detail) = updates::failure_message(code);
+        self.update_status = title.to_string();
+        self.toast(title, Some(detail), "close", WARNING, None);
+        self.panels_changed();
     }
 
     pub fn exit(&mut self) {

@@ -74,7 +74,10 @@ antes, veja a seção [Por que dá para confiar](#por-que-dá-para-confiar).
 
 Com o **Controle Inteligente de Aplicativos** ligado (Windows 11), uma versão recém-lançada pode
 ser bloqueada nos primeiros dias, até o Windows conhecer o arquivo. Nesse caso, espere um pouco
-e instale de novo.
+e instale de novo. O botão **Atualizar** do app confere isso antes de trocar a versão: se o
+Windows barrar a nova, os widgets continuam na que você tem e um aviso explica o motivo. Para
+acabar com esses bloqueios, as versões vão passar a sair com assinatura digital (veja a
+[política de assinatura](#code-signing-policy)).
 
 </details>
 
@@ -248,12 +251,32 @@ widget mostra, e só quando o widget está ligado:
 |---|---|---|
 | Tempo | [Open-Meteo](https://open-meteo.com) | O nome da cidade (para achá-la) e as coordenadas dela |
 | GitHub | api.github.com | O seu usuário do GitHub |
-| Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador |
+| Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador. Dá para desligar em **Configurações → Tocando agora → Capa em alta do YouTube** |
 | Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
 | Sistema, Pomodoro | Ninguém | |
-| Atualizações | api.github.com | Nada além do pedido da versão mais recente |
+| Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** (o botão "Procurar agora" continua lá) |
+
+Fora disso, o app não envia nenhuma informação para outros sistemas em rede, a não ser quando
+você pede (abrir um link, por exemplo). O instalador e o `install.ps1` mostram este resumo antes
+de instalar.
 
 As configurações ficam em `%APPDATA%\Widgets` (o `config.json` dá para ler e editar à mão).
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/).
+
+- **Committers and reviewers:** [lucasschn1](https://github.com/lucasschn1)
+- **Approvers:** [lucasschn1](https://github.com/lucasschn1)
+
+Em português: cada versão é compilada pelo
+[GitHub Actions](https://github.com/lucasschn1/Widgets/actions/workflows/release.yml) a partir do
+código público da tag, depois de passar nos testes. O `Widgets.exe` e o instalador só são
+assinados depois que um aprovador confere e aprova o pedido de assinatura daquela versão. Só é
+assinado o que é compilado deste repositório. Sobre os dados, veja [Privacidade](#privacidade):
+o app não envia nenhuma informação para outros sistemas em rede, a não ser nos casos descritos lá
+ou quando você pede.
 
 ---
 
@@ -429,7 +452,8 @@ autor em `build.rs`. Assim os seus usuários recebem as suas versões.
    `git push origin v3.11.0`.
 
 O GitHub Actions roda os testes de novo, compila o `Widgets.exe`, gera o `.zip` e o instalador e publica
-o Release. Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua
+o Release. Com a assinatura configurada, ele para duas vezes esperando você aprovar o pedido na
+SignPath (o do `Widgets.exe` e o do instalador); veja [docs/assinatura.md](docs/assinatura.md). Quem já tem o app instalado recebe o aviso de atualização. Para gerar o `.zip` na sua
 máquina, rode `packaging\build.ps1`.
 
 <details>

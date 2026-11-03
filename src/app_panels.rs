@@ -393,6 +393,15 @@ impl App {
                 let on = w.bool_of("auto").unwrap_or(false);
                 w.as_object_mut().unwrap().insert("auto".into(), json!(!on));
             }),
+            A::Toggle("capa_hd") => {
+                let on = widgets::media::hd_covers(&self.sh.cfg);
+                self.widget_or_cfg("midia", |w| {
+                    if !w.is_object() {
+                        *w = json!({});
+                    }
+                    w.as_object_mut().unwrap().insert("capa_hd".into(), json!(!on));
+                });
+            }
             A::Toggle("welcome_startup") => {
                 if let PanelKind::Welcome(st) = &mut self.panels[i].kind {
                     st.startup = !st.startup;

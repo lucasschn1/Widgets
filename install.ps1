@@ -6,6 +6,12 @@
 # no Menu Iniciar e uma entrada em "Aplicativos instalados" (para desinstalar), e abre o app.
 # Suas configurações ficam em %APPDATA%\Widgets e são mantidas nas atualizações.
 # (Para testar com um .zip local: $env:WIDGETS_ZIP = "caminho\Widgets-win64.zip" antes de rodar.)
+#
+# Antes de fechar os widgets abertos, confere se o Windows deixa a versão nova abrir (o
+# Controle Inteligente de Aplicativos barra programas novos sem assinatura digital); se não
+# deixar, nada é trocado. Códigos de saída (o botão "Atualizar" do app os lê):
+#   0 instalado e aberto; 3 o Windows barrou a versão nova (nada mudou);
+#   4 a versão nova não abriu depois de instalada (a anterior voltou); 1 outro erro.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # o Invoke-WebRequest fica muito mais rápido sem a barra
@@ -19,6 +25,11 @@ $UninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Widge
 
 Write-Host ''
 Write-Host '  Widgets' -ForegroundColor Cyan
+Write-Host ''
+# o que o app manda para a internet, antes de instalar (exigência da assinatura pela SignPath)
+Write-Host '  Privacidade: sem conta, telemetria nem anúncios. O app só busca na internet o que cada'
+Write-Host '  widget mostra (clima, GitHub, capa em alta do YouTube) e procura atualizações no GitHub.'
+Write-Host "  O que é enviado e como desligar: https://github.com/$Repo#privacidade"
 Write-Host ''
 
 # 1. o pacote: o último Release do GitHub (ou um .zip local, para testes)
@@ -35,7 +46,28 @@ if ($env:WIDGETS_ZIP) {
     Invoke-WebRequest $asset.browser_download_url -OutFile $zip -UseBasicParsing
 }
 
-# 2. fecha os Widgets, se estiverem abertos (os arquivos estariam em uso)
+# 2. extrai numa pasta temporária
+$tmp = Join-Path $env:TEMP ("Widgets-" + [guid]::NewGuid().ToString('N'))
+Expand-Archive -Path $zip -DestinationPath $tmp -Force
+$src = if (Test-Path (Join-Path $tmp 'Widgets\Widgets.exe')) { Join-Path $tmp 'Widgets' } else { $tmp }
+
+# 3. o Windows deixa a versão nova abrir? (com --versao ela só responde e fecha; versões antigas,
+# sem essa opção, veem os widgets já abertos e fecham sozinhas)
+try {
+    $probe = Start-Process -FilePath (Join-Path $src 'Widgets.exe') -ArgumentList '--versao' -WindowStyle Hidden -PassThru
+    if (-not $probe.WaitForExit(10000)) { $probe | Stop-Process -Force -ErrorAction SilentlyContinue }
+} catch {
+    Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host ''
+    Write-Host '  O Windows não deixou a versão nova abrir.' -ForegroundColor Yellow
+    Write-Host '  O Controle Inteligente de Aplicativos barra programas novos que ainda não têm'
+    Write-Host '  assinatura digital. Os Widgets continuam na versão que você já tinha.'
+    Write-Host "  ($($_.Exception.Message))"
+    Write-Host ''
+    exit 3
+}
+
+# 4. fecha os Widgets, se estiverem abertos (os arquivos estariam em uso)
 $running = Get-Process -Name 'Widgets' -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like "$Dir\*" }
 if ($running) {
     Write-Host '  Fechando os Widgets abertos...'
@@ -43,22 +75,21 @@ if ($running) {
     Start-Sleep -Milliseconds 800
 }
 
-# 3. extrai e troca os arquivos do programa (as configurações, em %APPDATA%, não são tocadas)
+# 5. troca os arquivos do programa (as configurações, em %APPDATA%, não são tocadas), guardando o
+# Widgets.exe anterior para voltar a ele se o novo não abrir
 Write-Host '  Instalando...'
-$tmp = Join-Path $env:TEMP ("Widgets-" + [guid]::NewGuid().ToString('N'))
-Expand-Archive -Path $zip -DestinationPath $tmp -Force
-$src = if (Test-Path (Join-Path $tmp 'Widgets\Widgets.exe')) { Join-Path $tmp 'Widgets' } else { $tmp }
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$backup = Join-Path $Dir 'Widgets.anterior.exe'
+if (Test-Path $backup) { Remove-Item $backup -Force }
+if (Test-Path $Exe) { Move-Item $Exe $backup -Force }
 # só o que é do programa (o desinstalador do Inno, se houver, fica); _internal era da versão 2.x, em Python
-foreach ($old in @('_internal', 'Widgets.exe')) {
-    $path = Join-Path $Dir $old
-    if (Test-Path $path) { Remove-Item $path -Recurse -Force }
-}
+$internal = Join-Path $Dir '_internal'
+if (Test-Path $internal) { Remove-Item $internal -Recurse -Force }
 Copy-Item -Path (Join-Path $src '*') -Destination $Dir -Recurse -Force
 Remove-Item $tmp -Recurse -Force
 if (-not $env:WIDGETS_ZIP) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
 
-# 4. atalho no Menu Iniciar
+# 6. atalho no Menu Iniciar
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($Shortcut)
 $link.TargetPath = $Exe
@@ -66,7 +97,7 @@ $link.WorkingDirectory = $Dir
 $link.Description = 'Widgets da área de trabalho'
 $link.Save()
 
-# 5. desinstalador e entrada em Configurações > Aplicativos > Aplicativos instalados
+# 7. desinstalador e entrada em Configurações > Aplicativos > Aplicativos instalados
 $uninstall = @'
 $ErrorActionPreference = 'SilentlyContinue'
 $Dir = Join-Path $env:LOCALAPPDATA 'Programs\Widgets'
@@ -94,8 +125,22 @@ foreach ($name in $props.Keys) { Set-ItemProperty -Path $UninstallKey -Name $nam
 Set-ItemProperty -Path $UninstallKey -Name 'NoModify' -Value 1 -Type DWord
 Set-ItemProperty -Path $UninstallKey -Name 'NoRepair' -Value 1 -Type DWord
 
-# 6. abre
-Start-Process -FilePath $Exe -WorkingDirectory $Dir
+# 8. abre; se a versão nova não abrir, volta a anterior (e abre ela)
+try {
+    Start-Process -FilePath $Exe -WorkingDirectory $Dir
+} catch {
+    if (Test-Path $backup) {
+        Remove-Item $Exe -Force -ErrorAction SilentlyContinue
+        Move-Item $backup $Exe -Force
+        Start-Process -FilePath $Exe -WorkingDirectory $Dir -ErrorAction SilentlyContinue
+    }
+    Write-Host ''
+    Write-Host '  A versão nova não abriu; os Widgets voltaram para a versão anterior.' -ForegroundColor Yellow
+    Write-Host "  ($($_.Exception.Message))"
+    Write-Host ''
+    exit 4
+}
+Remove-Item $backup -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host "  Pronto! Widgets $version instalado." -ForegroundColor Green
 Write-Host '  Ele está no Menu Iniciar; para desinstalar, use Configurações > Aplicativos.'
