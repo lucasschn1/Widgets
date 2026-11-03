@@ -61,6 +61,9 @@ A variável `SIGNPATH_ORGANIZATION_ID` é o que liga a assinatura no workflow.
 1. Rode o workflow à mão: **Actions → Release → Run workflow**. Ele para duas vezes esperando
    aprovação (primeiro o `Widgets.exe`, depois o instalador, que leva o `.exe` já assinado dentro).
    Aprove os dois pedidos no site da SignPath; cada um espera até 1 hora.
+   O Inno Setup grava a versão do instalador com espaços sobrando no fim ("3.11.0      "). Se a
+   SignPath recusar o pedido do instalador por causa da versão, tire o `product-version` de
+   [`.signpath/widgets-setup.xml`](../.signpath/widgets-setup.xml) (o nome continua conferido).
 2. Baixe o artefato gerado e confira: botão direito no `Widgets.exe` → Propriedades →
    Assinaturas Digitais, ou `Get-AuthenticodeSignature .\Widgets.exe` no PowerShell.
 3. A partir daí, cada tag `v*` gera um Release assinado, sempre com as duas aprovações.
