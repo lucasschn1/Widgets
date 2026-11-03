@@ -141,11 +141,20 @@ pub enum Control {
     Entry(&'static str, String, String, f32),
 }
 
+/// Slider das configurações: a trilha, o espaço do valor ("12 px") à direita dela, o tanto que a
+/// bolinha passa da ponta esquerda e o respiro até o texto da linha.
+const SLIDER_W: f32 = 160.0;
+const SLIDER_VALUE: f32 = 64.0;
+const SLIDER_KNOB: f32 = 10.0;
+const SLIDER_GAP: f32 = 20.0;
+
 impl Control {
+    /// Largura que o controle ocupa na direita da linha (o texto fica com o resto).
     fn width(&self, w: f32) -> f32 {
         match self {
             Control::None => 0.0,
             Control::Switch(..) => 70.0,
+            Control::Slider(..) => SLIDER_W + SLIDER_VALUE + SLIDER_KNOB + SLIDER_GAP,
             _ => w * 0.44,
         }
     }
@@ -160,9 +169,8 @@ impl Control {
                 ui.switch(id, rx - 40.0, cy - 11.0, *on, action.clone(), Some(row));
             }
             Control::Slider(id, value, lo, hi, step, label) => {
-                let width = 210.0;
                 ui.text(rx, cy, label, 12.0, MUTED, Face::Regular, Anchor::RM, None);
-                ui.slider(id, rx - 64.0 - width, cy, width, *value, *lo, *hi, *step);
+                ui.slider(id, rx - SLIDER_VALUE - SLIDER_W, cy, SLIDER_W, *value, *lo, *hi, *step);
             }
             Control::Seg(id, options, current) => {
                 ui.segmented(id, rx, cy - 16.0, options, current, true);
@@ -560,6 +568,8 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Mostrar".into(), Some("Qual player o widget acompanha quando há mais de um tocando".into()),
                     Control::Seg("fonte", options, wcfg.str_of("fonte").unwrap_or("auto").into())),
                 Row("Roda do mouse".into(), Some("Sobre o widget, ajusta o volume do app que está tocando (ou o do Windows)".into()), Control::None),
+                Row("Capa em alta do YouTube".into(), Some("O navegador só passa uma miniatura pequena; esta opção busca a original no youtube.com pelo título e canal do vídeo".into()),
+                    sw("capa_hd", widgets::media::hd_covers(&v.sh.cfg), A::Toggle("capa_hd"))),
             ])
         }
         "github" => {
@@ -663,7 +673,11 @@ fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
         Some(ver) => Control::Button("atualizar", format!("Atualizar para {ver}"), A::Widget("app", 1), "primary", Some("refresh")),
         None => Control::Button("procurar", "Procurar agora".into(), A::Widget("app", 2), "secondary", Some("refresh")),
     };
-    let y = rows(ui, x, 90.0, w, vec![Row("Atualizações".into(), Some(v.update_status.clone()), update)]);
+    let y = rows(ui, x, 90.0, w, vec![
+        Row("Atualizações".into(), Some(v.update_status.clone()), update),
+        Row("Procurar atualizações sozinho".into(), Some("A cada 6 horas, pergunta ao GitHub qual é a versão mais recente (não envia nada sobre você)".into()),
+            setting_switch(v, "procurar_atualizacoes")),
+    ]);
     let data = crate::config::data_dir().display().to_string();
     rows(ui, x, y, w, vec![
         Row("Boas-vindas".into(), Some("Rever a apresentação e escolher os widgets de novo".into()), btn("boas_vindas", "Abrir", A::Welcome)),
@@ -676,6 +690,18 @@ fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slider_rows_leave_room_for_the_text() {
+        // o texto da linha fica com o que sobra da largura do controle: ela tem que cobrir o
+        // slider inteiro (o valor, a trilha e a bolinha na ponta esquerda) e ainda um respiro
+        let slider = Control::Slider("x", 50.0, 0.0, 100.0, 1.0, "50%".into());
+        let drawn = SLIDER_VALUE + SLIDER_W + SLIDER_KNOB;
+        assert!(slider.width(600.0) >= drawn + 16.0, "slider encostado no texto: {} < {}", slider.width(600.0), drawn + 16.0);
+        // e não come a linha: o texto fica com mais da metade do cartão (a janela tem largura fixa)
+        let card = W - SIDEBAR - 64.0;
+        assert!(slider.width(card) < card * 0.5);
+    }
     use crate::panel::Anims;
 
     fn com() {

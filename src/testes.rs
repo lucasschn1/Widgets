@@ -59,10 +59,19 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("tempo sem cidade".into(), Box::new(Tempo::new(&cfg, &json!({}))), cfg.clone()));
     out.push(("tempo sem dados".into(), Box::new(Tempo::new(&tempo_cfg, &json!({}))), tempo_cfg));
     out.push(("sistema".into(), Box::new(System::sample()), cfg.clone()));
+    for which in [None, Some(1)] {
+        for mode in Mode::ALL {
+            let m = mode.code();
+            out.push((format!("sistema com ícones {which:?} {m}"), Box::new(System::sample_with_icons(which, mode)), cfg.clone()));
+        }
+    }
     out.push(("sistema no limite".into(), Box::new(System::sample_values([1.0, 1.0, 1.0])), cfg.clone()));
     out.push(("sistema zerado".into(), Box::new(System::sample_values([0.0, 0.0, 0.0])), cfg.clone()));
     out.push(("música".into(), Box::new(Media::sample()), cfg.clone()));
     out.push(("música parada".into(), Box::new(Media::sample_idle()), cfg.clone()));
+    out.push(("música com capa quadrada".into(), Box::new(Media::sample_art("spotify", 300, 300)), cfg.clone()));
+    out.push(("vídeo com miniatura do navegador".into(), Box::new(Media::sample_art("youtube", 150, 84)), cfg.clone()));
+    out.push(("vídeo com miniatura em alta".into(), Box::new(Media::sample_art("youtube", 1280, 720)), cfg.clone()));
     out.push(("github".into(), Box::new(GitHub::sample(&cfg, &json!({}))), cfg.clone()));
     out.push(("github sem usuário".into(), Box::new(GitHub::new(&cfg, &json!({}))), cfg.clone()));
     for fase in ["foco", "pausa", "longa"] {
@@ -76,6 +85,12 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("claude no limite".into(), Box::new(Claude::sample_limit()), cfg.clone()));
     out.push(("claude sem conectar".into(), Box::new(Claude::sample_unlinked()), cfg.clone()));
     out.push(("claude lendo".into(), Box::new(Claude::sample_reading()), cfg.clone()));
+    // o Clawd em cada animação, no meio dela, em cada humor
+    for anim in crate::widgets::clawd::ANIMS {
+        out.push((format!("clawd {anim:?}"), Box::new(Claude::sample().with_crab(anim, 0.5)), cfg.clone()));
+        out.push((format!("clawd dormindo {anim:?}"), Box::new(Claude::sample_unlinked().with_crab(anim, 0.5)), cfg.clone()));
+        out.push((format!("clawd suando {anim:?}"), Box::new(Claude::sample_limit().with_crab(anim, 0.3)), cfg.clone()));
+    }
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));
     out
 }

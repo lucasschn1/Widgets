@@ -6,6 +6,9 @@ use std::sync::mpsc::{channel, Receiver};
 
 pub const REPO: &str = "lucasschn1/Widgets";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `Widgets.exe --versao`: responde a versão e sai (o instalador usa para ver se o Windows deixa
+/// a versão nova abrir).
+pub const VERSION_FLAG: &str = "--versao";
 const RELEASES: &str = "https://github.com/lucasschn1/Widgets/releases";
 const INSTALL_SCRIPT: &str = "https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1";
 
@@ -66,23 +69,47 @@ pub fn installed() -> bool {
     }
 }
 
-/// Instalado: roda o install.ps1 escondido. Fora da pasta de instalação: abre a página dos Releases.
-pub fn install() {
+/// Instalado: roda o install.ps1 escondido e devolve o processo dele (para saber como terminou).
+/// Fora da pasta de instalação: abre a página dos Releases.
+pub fn install() -> Option<std::process::Child> {
     if !installed() {
         crate::win::open_target(RELEASES);
-        return;
+        return None;
     }
     use std::os::windows::process::CommandExt;
     let command = format!("irm {INSTALL_SCRIPT} | iex");
-    let _ = std::process::Command::new("powershell")
+    std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", &command])
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .spawn();
+        .spawn()
+        .ok()
+}
+
+/// O que dizer quando o install.ps1 termina com o código `code` e este app continua aberto (deu
+/// certo, ele teria sido fechado e trocado): (título, detalhe).
+pub fn failure_message(code: Option<i32>) -> (&'static str, &'static str) {
+    match code {
+        // o Controle Inteligente de Aplicativos barrou a versão nova antes de trocar qualquer coisa
+        Some(3) => (
+            "O Windows bloqueou a versão nova",
+            "O Controle Inteligente de Aplicativos barra programas novos sem assinatura digital. Os widgets continuam nesta versão.",
+        ),
+        Some(4) => ("A versão nova não abriu", "Os widgets voltaram para esta versão."),
+        _ => ("Não deu para atualizar", "Verifique a conexão e tente de novo."),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failures_are_explained() {
+        assert!(failure_message(Some(3)).1.contains("Controle Inteligente"), "bloqueio do Windows");
+        assert_eq!(failure_message(Some(4)).0, "A versão nova não abriu");
+        assert_eq!(failure_message(Some(1)).0, "Não deu para atualizar");
+        assert_eq!(failure_message(None).0, "Não deu para atualizar");
+    }
 
     #[test]
     fn versions() {

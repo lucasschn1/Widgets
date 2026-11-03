@@ -147,7 +147,7 @@ pub fn default_setting(name: &str) -> Value {
         "escurecimento" => json!(crate::theme::TINT_AMOUNT),
         "texto" => json!(0.0), // 0 = seguir o Windows
         "esmaecer" => json!(false),
-        "atalhos_clique" | "dicas" | "economia_bateria" => json!(true),
+        "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" => json!(true),
         "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("sempre"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true}),

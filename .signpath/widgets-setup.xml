@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Configuração de artefato "widgets-setup" da SignPath: o instalador do Inno Setup, gerado a
+     partir do Widgets.exe já assinado (por isso é um segundo pedido, depois do primeiro). -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file-set product-name="Widgets" product-version="${version}">
+      <include path="Widgets-Setup.exe" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

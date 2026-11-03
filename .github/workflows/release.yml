@@ -2,6 +2,11 @@
 # Para lançar uma versão: mude `version` no Cargo.toml, faça o commit e
 #   git tag v3.0.0 && git push origin v3.0.0
 # Também dá para rodar à mão (aba Actions > Release > Run workflow): gera os arquivos sem publicar.
+#
+# Assinatura digital (SignPath Foundation): com a variável SIGNPATH_ORGANIZATION_ID e o segredo
+# SIGNPATH_API_TOKEN no repositório, o Widgets.exe e o instalador são enviados à SignPath e só
+# seguem depois que o aprovador aprova os dois pedidos no site dela. Sem eles, sai sem assinatura.
+# Passo a passo em docs/assinatura.md.
 name: Release
 
 on:
@@ -12,9 +17,15 @@ on:
 permissions:
   contents: write
 
+env:
+  # a assinatura está configurada? (variáveis do repositório: Settings > Secrets and variables > Actions)
+  SIGN: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+
 jobs:
   build:
     runs-on: windows-latest
+    # cada pedido de assinatura espera a aprovação manual (até 1 hora cada)
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v5
 
@@ -48,6 +59,44 @@ jobs:
           $info = (Get-Item $exe).VersionInfo
           $info | Format-List ProductName, ProductVersion
           if ($info.ProductVersion -ne "${{ steps.version.outputs.version }}") { throw "Versão errada no Widgets.exe" }
+          if ($info.ProductName -ne "Widgets") { throw "Nome errado no Widgets.exe" }
+
+      # --- assinatura do Widgets.exe (antes do .zip e do instalador, que levam ele dentro) ---
+      - name: Envia o Widgets.exe para assinar
+        id: exe-unsigned
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Widgets-exe-sem-assinatura
+          path: dist/Widgets/Widgets.exe
+          if-no-files-found: error
+
+      - name: Assina o Widgets.exe (SignPath; espera a aprovação)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'Widgets' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: widgets-exe
+          github-artifact-id: ${{ steps.exe-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist/assinado-exe
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+
+      - name: Troca pelo Widgets.exe assinado e refaz o .zip
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item dist/assinado-exe/Widgets.exe dist\Widgets\Widgets.exe -Force
+          $sig = Get-AuthenticodeSignature dist\Widgets\Widgets.exe
+          $sig | Format-List Status, SignerCertificate
+          if ($sig.Status -ne 'Valid') { throw "Assinatura do Widgets.exe inválida: $($sig.Status)" }
+          Remove-Item dist\Widgets-win64.zip -Force
+          Compress-Archive -Path dist\Widgets -DestinationPath dist\Widgets-win64.zip -CompressionLevel Optimal
 
       - name: Instalador (Inno Setup)
         shell: pwsh
@@ -55,6 +104,43 @@ jobs:
           choco install innosetup -y --no-progress
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.version }}" packaging\Widgets.iss
           if ($LASTEXITCODE -ne 0) { throw "O Inno Setup falhou" }
+          $info = (Get-Item dist\Widgets-Setup.exe).VersionInfo
+          $info | Format-List ProductName, ProductVersion
+          if ($info.ProductVersion -ne "${{ steps.version.outputs.version }}" -or $info.ProductName -ne "Widgets") { throw "Nome ou versão errados no instalador" }
+
+      # --- assinatura do instalador ---
+      - name: Envia o instalador para assinar
+        id: setup-unsigned
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Widgets-Setup-sem-assinatura
+          path: dist/Widgets-Setup.exe
+          if-no-files-found: error
+
+      - name: Assina o instalador (SignPath; espera a aprovação)
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'Widgets' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: widgets-setup
+          github-artifact-id: ${{ steps.setup-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: dist/assinado-setup
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+
+      - name: Troca pelo instalador assinado
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item dist/assinado-setup/Widgets-Setup.exe dist\Widgets-Setup.exe -Force
+          $sig = Get-AuthenticodeSignature dist\Widgets-Setup.exe
+          if ($sig.Status -ne 'Valid') { throw "Assinatura do instalador inválida: $($sig.Status)" }
 
       - name: Guarda os arquivos (execução manual)
         if: github.ref_type != 'tag'
