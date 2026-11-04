@@ -888,31 +888,45 @@ pub fn fit_cover(img: &Image, w: u32, h: u32) -> Image {
 
 /// Tira as faixas pretas em volta da imagem (vídeos 16:9 dentro de uma miniatura 4:3, por
 /// exemplo). Uma faixa é uma linha (ou coluna) quase toda escura; tira no máximo 1/4 de cada lado.
+///
+/// As faixas de verdade ficam centralizadas e acabam antes de 1/4: tira o mesmo tanto dos dois
+/// lados (o menor dos dois, porque uma cena escura pode encostar numa das faixas), e nada se o
+/// escuro passa de 1/4 dos dois lados (é a própria imagem, como a capa preta do "AM"). Imagem
+/// quadrada não é miniatura de vídeo (é capa de música): fica como está.
 pub fn trim_bars(img: &Image) -> Image {
+    if img.w.abs_diff(img.h) * 50 <= img.w.max(img.h) {
+        return img.clone();
+    }
     let dark = |x: u32, y: u32| {
         let i = ((y * img.w + x) * 4) as usize;
         img.px[i].max(img.px[i + 1]).max(img.px[i + 2]) < 24
     };
     let row_dark = |y: u32| (0..img.w).filter(|&x| dark(x, y)).count() as u32 * 20 >= img.w * 19;
     let col_dark = |x: u32, y0: u32, y1: u32| (y0..y1).filter(|&y| dark(x, y)).count() as u32 * 20 >= (y1 - y0) * 19;
-    let (mut top, mut bottom) = (0, img.h);
-    while top < img.h / 4 && row_dark(top) {
+    // quanto tirar dos dois lados, a partir das faixas escuras de cada um
+    let both = |a: u32, b: u32, limit: u32| if a.min(b) >= limit { 0 } else { a.min(b) };
+    let (vlimit, hlimit) = (img.h / 4, img.w / 4);
+    let (mut top, mut bottom) = (0, 0);
+    while top < vlimit && row_dark(top) {
         top += 1;
     }
-    while bottom > img.h - img.h / 4 && row_dark(bottom - 1) {
-        bottom -= 1;
+    while bottom < vlimit && row_dark(img.h - 1 - bottom) {
+        bottom += 1;
     }
-    let (mut left, mut right) = (0, img.w);
-    while left < img.w / 4 && col_dark(left, top, bottom) {
+    let bar = both(top, bottom, vlimit);
+    let (y0, y1) = (bar, img.h - bar);
+    let (mut left, mut right) = (0, 0);
+    while left < hlimit && col_dark(left, y0, y1) {
         left += 1;
     }
-    while right > img.w - img.w / 4 && col_dark(right - 1, top, bottom) {
-        right -= 1;
+    while right < hlimit && col_dark(img.w - 1 - right, y0, y1) {
+        right += 1;
     }
-    if (top, bottom, left, right) == (0, img.h, 0, img.w) {
+    let side = both(left, right, hlimit);
+    if (bar, side) == (0, 0) {
         return img.clone();
     }
-    crop(img, left, top, right - left, bottom - top)
+    crop(img, side, bar, img.w - 2 * side, img.h - 2 * bar)
 }
 
 #[cfg(test)]
@@ -1012,6 +1026,33 @@ mod picture_tests {
         // sem faixas: fica igual
         let plain = target(300, 300, 30);
         assert_eq!((trim_bars(&plain).w, trim_bars(&plain).h), (300, 300));
+        // cena escura encostada na faixa de baixo: tira só o tanto das faixas, dos dois lados
+        let mut night = img.clone();
+        for p in night.px[(360 - 70) * 480 * 4..(360 - 45) * 480 * 4].chunks_mut(4) {
+            p[..3].copy_from_slice(&[5, 5, 5]);
+        }
+        let t = trim_bars(&night);
+        assert_eq!((t.w, t.h), (480, 270));
+    }
+
+    /// Uma faixa clara no meio de uma imagem preta (como a capa do "AM", do Arctic Monkeys).
+    fn dark_with_band(w: u32, h: u32, band: u32) -> Image {
+        let mut img = Image::new(w, h);
+        img.over(&target(w, band, 10), 0, ((h - band) / 2) as i32);
+        for p in img.px.chunks_mut(4) {
+            p[3] = 255;
+        }
+        img
+    }
+
+    #[test]
+    fn dark_covers_are_not_cropped() {
+        // capa quadrada de música, preta em cima e embaixo: inteira (antes virava uma tira)
+        let t = trim_bars(&dark_with_band(300, 300, 100));
+        assert_eq!((t.w, t.h), (300, 300));
+        // não quadrada, mas o escuro passa de 1/4 dos dois lados: é a imagem, não faixa
+        let t = trim_bars(&dark_with_band(400, 300, 100));
+        assert_eq!((t.w, t.h), (400, 300));
     }
 }
 
