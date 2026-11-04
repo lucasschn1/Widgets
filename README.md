@@ -60,26 +60,63 @@ as suas configurações.
 |---|---|
 | **Sistema** | Windows 10 ou 11, 64 bits |
 | **Tamanho** | 3,5 MB instalado (um `.exe` só, sem dependências) |
+| **Consumo** | Uns 40 MB de memória e pouca CPU (veja [quanto pesa no PC](#quanto-pesa-no-pc)) |
 | **Permissões** | Nenhuma de administrador; tudo fica na sua pasta de usuário |
 | **Desinstalar** | Configurações → Aplicativos → Widgets |
 
 <details>
-<summary><b>O Windows disse que "protegeu o computador"</b></summary>
+<summary><b>O Windows disse que "protegeu o computador" (ou o navegador desconfiou do download)</b></summary>
 
 <br>
 
-É o SmartScreen. Ele avisa em todo programa que ainda não tem uma assinatura digital paga, como
-este. Clique em **Mais informações** e depois em **Executar assim mesmo**. Se quiser conferir
-antes, veja a seção [Por que dá para confiar](#por-que-dá-para-confiar).
+Esses avisos aparecem porque as versões ainda saem **sem assinatura digital** (o pedido está em
+andamento; veja a [política de assinatura](#code-signing-policy)). O Windows e os navegadores
+desconfiam de todo programa novo, sem assinatura, que pouca gente baixou. O aviso não quer dizer
+que encontraram algo no arquivo. Se quiser conferir antes, veja
+[Por que dá para confiar](#por-que-dá-para-confiar).
 
-Com o **Controle Inteligente de Aplicativos** ligado (Windows 11), uma versão recém-lançada pode
-ser bloqueada nos primeiros dias, até o Windows conhecer o arquivo. Nesse caso, espere um pouco
-e instale de novo. O `install.ps1` confere isso antes de trocar a versão: se o Windows barrar a
-nova, os widgets continuam na que você tem (e, a partir da versão 3.11, o botão **Atualizar** do
-app mostra um aviso explicando o motivo). Para acabar com esses bloqueios, as versões vão passar
-a sair com assinatura digital (veja a [política de assinatura](#code-signing-policy)).
+**No navegador.** O Edge pode dizer que o arquivo "não é baixado com frequência". Clique nos três
+pontinhos ao lado do aviso → **Manter** → **Mostrar mais** → **Manter assim mesmo**. O Chrome
+também pode pedir que você confirme o download.
+
+**Ao abrir o instalador.** Uma tela azul diz "O Windows protegeu o computador". É o SmartScreen:
+clique em **Mais informações** e depois em **Executar assim mesmo**. Depois de instalado, o app
+abre sem esse aviso.
+
+**Pelo terminal, esses dois avisos não aparecem.** O `install.ps1` baixa a versão direto do
+GitHub, sem passar pelo navegador.
+
+**Se não houver o botão "Executar assim mesmo".** Nesse caso, quem barrou foi o
+**Controle Inteligente de Aplicativos** do Windows 11 (veja se ele está ligado em Segurança do
+Windows → Controle de aplicativos e navegador). Ele não abre exceção para um programa e costuma
+barrar uma versão recém-lançada nos primeiros dias, até o Windows conhecer o arquivo. Espere
+alguns dias e instale de novo; não precisa desligá-lo.
+
+Quem já tem os widgets não corre risco de ficar sem eles. Antes de trocar a versão, o
+`install.ps1` e o botão **Atualizar** do app conferem se o Windows deixa a nova abrir. Se não
+deixar, os widgets continuam na versão que você tem, e o app avisa o motivo (a partir da
+versão 3.11).
 
 </details>
+
+## Quanto pesa no PC
+
+Pouco. Os widgets só se redesenham quando algo muda (o relógio, uma música nova, um número do
+sistema), e um jogo ou vídeo em tela cheia pausa os widgets daquele monitor.
+
+Medido na versão 3.12 num notebook com Ryzen 7 7730U (8 núcleos, 16 threads), com cinco widgets
+na tela (Tempo, Sistema, Tocando agora, GitHub e Uso do Claude):
+
+| Situação | CPU de um núcleo | CPU do processador inteiro |
+|---|---|---|
+| Parado, sem música tocando | ~4% | 0,25% |
+| Com música tocando | ~6,5% | 0,4% |
+| Com o Claude Code trabalhando (o Clawd escreve no caderno) | ~10% | 0,6% |
+
+A memória fica em torno de **40 MB** (de 33 a 41 MB nas medições, na coluna Memória do
+Gerenciador de Tarefas). Em processadores com menos núcleos, a porcentagem do processador
+inteiro sobe um pouco, mas o trabalho é o mesmo. Para conferir na sua máquina, abra o
+Gerenciador de Tarefas e procure por **Widgets**.
 
 ## Por que dá para confiar
 
