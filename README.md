@@ -212,9 +212,18 @@ no dia e começa ou pausa com um clique (ou pelo clique direito, onde também mu
 ### Uso do Claude
 
 Quanto da sessão de 5 horas e da semana do seu plano você já usou no
-[Claude Code](https://code.claude.com). Um tracinho em cada medidor marca quanto do período já
-passou, o grande mostra os dias da semana em que você mais usa, e o widget avisa se, no ritmo de
-agora, a sessão acaba antes de reiniciar.
+[Claude Code](https://code.claude.com). No médio e no grande, embaixo de cada medidor aparece
+quando ele reinicia; o grande mostra os dias da semana em que você mais usa, e o widget avisa se,
+no ritmo de agora, a sessão acaba antes de reiniciar. O Clawd, o caranguejo do Claude Code,
+acompanha: enquanto o Claude Code trabalha, programa num notebook (no pequeno, de frente, no colo;
+no médio e no grande, de lado, com o código aparecendo na tela), cochila quando ele fica parado e
+diz o que está fazendo. Ao mudar de tamanho, os medidores andam até o lugar novo e o Clawd pula
+junto.
+
+Um clique no Clawd e ele pula para cima da barra de tarefas, ao lado do relógio, onde continua
+trabalhando por cima das janelas, com um balão dizendo o que o Claude Code faz agora ("Editando
+claude.rs", "Rodando cargo test"). Outro clique e ele volta. Para compartilhar a tela, as
+configurações do widget têm a opção de mostrar só a ação, sem os nomes de arquivos e comandos.
 
 Os números vêm do próprio Claude Code: ao clicar em **Conectar**, o widget vira a linha de status
 dele (só se ainda não houver outra; uma cópia das configurações do Claude Code fica em

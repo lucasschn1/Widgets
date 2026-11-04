@@ -21,6 +21,8 @@ use panels::{EditWhat, Panel};
 mod screens;
 #[path = "app_island.rs"]
 pub(crate) mod island;
+#[path = "app_perch.rs"]
+mod perch;
 use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
@@ -134,6 +136,8 @@ pub struct App {
     keep_saved_pos: bool,
     /// o Tocando agora como ilha flutuante (o cartão fica escondido no lugar dele)
     island: Option<island::Island>,
+    /// o Clawd na barra de tarefas
+    perch: Option<perch::Perch>,
     pub quit: bool,
 }
 
@@ -193,6 +197,7 @@ impl App {
             next_screens: Instant::now() + screens::SCREENS_EVERY,
             keep_saved_pos: false,
             island: None,
+            perch: None,
             quit: false,
         };
         let screens_change = app.begin_screens_startup();
@@ -218,6 +223,10 @@ impl App {
         // estava como ilha quando o app fechou: continua assim
         if app.sh.cfg["midia"].bool_of("ilha").unwrap_or(false) && app.find("midia").is_some() {
             app.open_island(false);
+        }
+        // e o Clawd, se estava na barra de tarefas
+        if app.sh.cfg["claude"].bool_of("na_barra").unwrap_or(false) && app.find("claude").is_some() {
+            app.open_perch(false);
         }
         app.sh.save();
         if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
@@ -260,6 +269,8 @@ impl App {
                     }
                 }
                 Request::Island => self.open_island(true),
+                Request::Perch(true) => self.open_perch(true),
+                Request::Perch(false) => self.close_perch(true),
                 Request::Ask(what) => {
                     let anchor = card.map(|i| self.cards[i].card_rect());
                     let purpose = if what == "city" { prompt::Purpose::City } else { prompt::Purpose::GitHubUser };
@@ -593,6 +604,10 @@ impl App {
                     self.drop_island();
                     self.sh.cfg.obj_mut("midia").insert("ilha".into(), json!(false));
                 }
+                if key == "claude" {
+                    self.drop_perch();
+                    self.sh.cfg.obj_mut("claude").insert("na_barra".into(), json!(false));
+                }
                 let card = self.cards.remove(i);
                 self.tooltip.hide();
                 events::destroy(card.hwnd);
@@ -644,8 +659,9 @@ impl App {
         let new = self.cards[i].card_rect_at(to, None);
         let dy = new.3 - old.3;
         let start = followers.into_iter().map(|j| (j, (self.cards[j].pos.0, self.cards[j].pos.1 + dy))).collect();
+        let ms = self.cards[i].resize_ms();
         for (j, to) in self.make_room(i, old, new, start) {
-            self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+            self.cards[j].slide_to(to, ms, &self.sh);
         }
     }
 
@@ -1173,7 +1189,7 @@ impl App {
     }
 
     fn menu_command(&mut self, id: u32, card: Option<usize>) {
-        if self.island_menu(id) {
+        if self.island_menu(id) || self.perch_menu(id) {
             return;
         }
         match id {
@@ -1645,6 +1661,10 @@ impl App {
                     self.island_mouse(kind, x, y, sx, sy);
                     return;
                 }
+                if self.perch_owns(hwnd) {
+                    self.perch_mouse(kind, sx, sy);
+                    return;
+                }
                 let Some(i) = self.index(hwnd) else { return };
                 match kind {
                     MouseKind::Move => {
@@ -1740,7 +1760,7 @@ impl App {
 
     pub fn next_deadline(&self) -> Instant {
         let mut next = self.next_backdrop.min(self.next_fullscreen).min(self.next_power).min(self.next_alerts).min(self.next_screens);
-        if let Some(t) = self.island_deadline() {
+        for t in [self.island_deadline(), self.perch_deadline()].into_iter().flatten() {
             next = next.min(t);
         }
         if let Some(t) = self.tooltip.next_due() {
@@ -1864,6 +1884,8 @@ impl App {
                 }
             }
         }
+        // o Clawd na barra de tarefas (depois dos widgets: o desenho dele acabou de mudar)
+        self.perch_tick();
         if now >= self.next_watch {
             self.next_watch = now + WATCH_EVERY;
             for i in 0..self.cards.len() {
@@ -1983,6 +2005,7 @@ impl App {
 
     pub fn exit(&mut self) {
         self.drop_island();
+        self.drop_perch();
         self.tray.remove();
         for c in self.cards.drain(..) {
             events::destroy(c.hwnd);

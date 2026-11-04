@@ -595,6 +595,12 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
             rows(ui, x, y, w, vec![
                 Row("Conexão".into(), Some(state.into()), control),
                 Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana".into()), Control::None),
+            ]);
+            let y = section(ui, x, y, "Clawd na barra de tarefas");
+            rows(ui, x, y, w, vec![
+                Row("Como levar".into(), Some("Clique no Clawd e ele pula para cima da barra de tarefas; outro clique o traz de volta".into()), Control::None),
+                Row("Nomes de arquivos no balão".into(), Some("O balão mostra o arquivo ou o comando em uso; desligado, só a ação (bom para compartilhar a tela)".into()),
+                    sw("claude_nomes", widgets::claude::show_names(&v.sh.cfg), A::Toggle("claude_nomes"))),
             ])
         }
         _ => {
