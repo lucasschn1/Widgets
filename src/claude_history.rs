@@ -144,12 +144,37 @@ pub fn projects_dir() -> Option<PathBuf> {
 // ---------- o que uma conversa está fazendo agora ----------
 
 /// Como está uma conversa, pelo fim do arquivo dela.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Turn {
     /// o Claude está trabalhando (None: nada reconhecível no fim do arquivo)
     pub busy: Option<bool>,
     /// passos (respostas e resultados de ferramentas) no último minuto
     pub steps: u32,
+    /// a ferramenta que a última resposta chamou (None: a última resposta foi texto)
+    pub tool: Option<Tool>,
+}
+
+/// Uma ferramenta chamada pelo Claude: o nome ("Edit", "Bash"...) e o principal do que recebeu
+/// (o caminho do arquivo, o comando, o que procurar).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tool {
+    pub name: String,
+    pub input: String,
+}
+
+impl Tool {
+    /// A última ferramenta chamada numa resposta (`content` da mensagem), se houver.
+    fn last_in(content: &serde_json::Value) -> Option<Tool> {
+        let call = content.as_array()?.iter().rev().find(|c| c["type"] == "tool_use")?;
+        let name = call["name"].as_str()?.to_string();
+        let i = &call["input"];
+        let input = ["file_path", "notebook_path", "command", "pattern", "query", "url", "description"]
+            .iter()
+            .find_map(|k| i[*k].as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(Tool { name, input })
+    }
 }
 
 /// Quanto do fim do arquivo ler: bastam as últimas linhas (os resultados de ferramentas podem
@@ -177,6 +202,8 @@ pub fn read_tail(path: &Path) -> Option<String> {
 /// linhas do usuário que começam com "<", como os do "!" e do "/") não contam.
 pub fn turn(tail: &str, now: f64) -> Turn {
     let mut t = Turn::default();
+    // a ferramenta vem da última resposta (o Claude Code grava cada parte numa linha)
+    let mut answered = false;
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let at = v["timestamp"].as_str().and_then(iso_epoch).map(|s| s as f64);
@@ -184,6 +211,10 @@ pub fn turn(tail: &str, now: f64) -> Turn {
         let state = match v["type"].as_str() {
             Some("assistant") => {
                 t.steps += recent as u32;
+                if !answered {
+                    answered = true;
+                    t.tool = Tool::last_in(&v["message"]["content"]);
+                }
                 Some(v["message"]["stop_reason"].as_str() != Some("end_turn"))
             }
             Some("user") if v["isMeta"].as_bool() != Some(true) => {
@@ -208,7 +239,7 @@ pub fn turn(tail: &str, now: f64) -> Turn {
             t.busy = state;
         }
         // já sabe o estado e passou do último minuto: o resto não muda nada
-        if t.busy.is_some() && at.is_some_and(|at| now - at > 60.0) {
+        if t.busy.is_some() && answered && at.is_some_and(|at| now - at > 60.0) {
             break;
         }
     }
@@ -284,7 +315,7 @@ mod tests {
             c.push(entry("assistant", TOOL, 10 + k * 10));
             c.push(entry("user", RESULT, 12 + k * 10));
         }
-        assert_eq!(at(&c, 60), Turn { busy: Some(true), steps: 10 });
+        assert_eq!((at(&c, 60).busy, at(&c, 60).steps), (Some(true), 10));
         assert_eq!(at(&c, 85).steps, 6, "só os do último minuto");
         // respondeu de vez: terminou (e o fim da vez, depois, também diz isso)
         c.push(entry("assistant", FINAL, 70));
@@ -303,6 +334,23 @@ mod tests {
         // começo cortado no meio de uma linha, ou nada que importe: não sabe
         assert_eq!(turn(r#"ype":"assistant"}"#, NOON).busy, None);
         assert_eq!(turn("", NOON), Turn::default());
+    }
+
+    #[test]
+    fn knows_the_last_tool_claude_called() {
+        let at = |lines: &[String]| turn(&lines.join("\n"), NOON + 30.0).tool;
+        let call = |name: &str, input: &str| format!(r#""message":{{"role":"assistant","stop_reason":"tool_use","content":[{{"type":"tool_use","name":"{name}","input":{input}}}]}}"#);
+        let edit = entry("assistant", &call("Edit", r#"{"file_path":"C:\\dev\\src\\claude.rs","old_string":"a"}"#), 10);
+        let bash = entry("assistant", &call("Bash", r#"{"command":"cargo test --release","description":"testes"}"#), 20);
+        // a última chamada vale, mesmo com o resultado dela depois
+        assert_eq!(at(&[entry("user", PROMPT, 0), edit.clone()]), Some(Tool { name: "Edit".into(), input: r"C:\dev\src\claude.rs".into() }));
+        let tool = at(&[edit.clone(), entry("user", RESULT, 12), bash.clone(), entry("user", RESULT, 22)]).unwrap();
+        assert_eq!((tool.name.as_str(), tool.input.as_str()), ("Bash", "cargo test --release"));
+        // depois de responder em texto, nenhuma
+        assert_eq!(at(&[bash, entry("assistant", FINAL, 25)]), None);
+        // uma ferramenta sem nada reconhecível: só o nome
+        let other = entry("assistant", &call("TodoWrite", r#"{"todos":[]}"#), 5);
+        assert_eq!(at(&[other]), Some(Tool { name: "TodoWrite".into(), input: String::new() }));
     }
 
     #[test]

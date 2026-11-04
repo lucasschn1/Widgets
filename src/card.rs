@@ -42,7 +42,15 @@ pub struct ResizeAnim {
     pub save: bool,
     /// na metade direita da tela, a borda direita fica parada
     right: bool,
+    /// o tamanho de antes e se o widget desenha cada quadro da troca (`Kind::draw_between`);
+    /// senão, a imagem de um tamanho vai dando lugar à do outro
+    from: Mode,
+    morph: bool,
 }
+
+/// Quanto dura a troca de tamanho desenhada quadro a quadro: mais que a de sempre, para dar tempo
+/// de cada coisa andar até o lugar novo.
+pub const MORPH_MS: u64 = 650;
 
 pub struct Slide {
     from: (i32, i32),
@@ -333,6 +341,8 @@ impl Card {
             dur: Duration::from_millis(if sh.animations { GROW_MS } else { 0 }),
             save: false,
             right: false,
+            from: self.mode,
+            morph: false,
         });
         self.hot = None;
         self.composed = None;
@@ -597,12 +607,19 @@ impl Card {
             return;
         }
         let right = self.grows_left(self.card_rect());
-        let old = self.render(self.mode, sh);
-        let r0 = self.radius_px(self.mode);
+        let from = self.mode;
+        let morph = sh.animations && self.kind.morphs(from, mode);
+        let old = self.render(from, sh);
+        let r0 = self.radius_px(from);
         self.mode = mode;
         let new = self.render(mode, sh);
         let r1 = self.radius_px(mode);
         let (x, y) = self.pos;
+        let ms = match (sh.animations, morph) {
+            (false, _) => 0,
+            (true, true) => MORPH_MS,
+            (true, false) => ANIM_MS,
+        };
         self.anim = Some(ResizeAnim {
             old,
             new,
@@ -612,30 +629,48 @@ impl Card {
             y,
             to,
             start: Instant::now(),
-            dur: Duration::from_millis(if sh.animations { ANIM_MS } else { 0 }),
+            dur: Duration::from_millis(ms),
             save,
             right,
+            from,
+            morph,
         });
         self.hot = None;
         self.content = None;
+    }
+
+    /// Quanto dura a troca de tamanho em andamento (os vizinhos saem da frente no mesmo tempo).
+    pub fn resize_ms(&self) -> u64 {
+        self.anim.as_ref().map_or(ANIM_MS, |a| a.dur.as_millis() as u64)
     }
 
     /// Um quadro da animação de tamanho; devolve true quando terminou.
     fn anim_step(&mut self, sh: &Shared) -> bool {
         let a = self.anim.as_ref().unwrap();
         let t = if a.dur.is_zero() { 1.0 } else { (a.start.elapsed().as_secs_f32() / a.dur.as_secs_f32()).min(1.0) };
-        let e = ease_in_out(t);
-        let w = (a.old.w as f32 + (a.new.w as f32 - a.old.w as f32) * e).round() as u32;
-        let h = (a.old.h as f32 + (a.new.h as f32 - a.old.h as f32) * e).round() as u32;
-        // conteúdo: os dois estados presos no mesmo canto, um sumindo e o outro aparecendo
-        let place = |card: &Image| {
-            let mut layer = Image::new(w, h);
-            let x = if a.right { w as i32 - card.w as i32 } else { 0 };
-            layer.over(card, x, 0);
-            layer
+        // desenhada quadro a quadro, o cartão cresce com uma mola (passa um pouco e volta), no
+        // mesmo ritmo dos vizinhos que saem da frente
+        let e = if a.morph { ease_spring(t) } else { ease_in_out(t) };
+        let w = (a.old.w as f32 + (a.new.w as f32 - a.old.w as f32) * e).round().max(1.0) as u32;
+        let h = (a.old.h as f32 + (a.new.h as f32 - a.old.h as f32) * e).round().max(1.0) as u32;
+        let content = if a.morph {
+            // o widget desenha o caminho de um tamanho ao outro
+            let mut c = Canvas::new(w, h, self.s);
+            c.text_scale = sh.text_scale;
+            let env = Env { cfg: &sh.cfg, key: self.key() };
+            self.kind.draw_between(&mut c, a.from, self.mode, t, &env);
+            c.finish()
+        } else {
+            // os dois estados presos no mesmo canto, um sumindo e o outro aparecendo
+            let place = |card: &Image| {
+                let mut layer = Image::new(w, h);
+                let x = if a.right { w as i32 - card.w as i32 } else { 0 };
+                layer.over(card, x, 0);
+                layer
+            };
+            let fade = ease_in_out(((t - 0.1) / 0.7).clamp(0.0, 1.0));
+            Image::blend(&place(&a.old), &place(&a.new), fade)
         };
-        let fade = ease_in_out(((t - 0.1) / 0.7).clamp(0.0, 1.0));
-        let content = Image::blend(&place(&a.old), &place(&a.new), fade);
         let m = self.margin;
         // a janela vai de onde estava até `to` junto com o tamanho
         let x = (a.x as f32 + (a.to.0 - a.x) as f32 * e).round() as i32;

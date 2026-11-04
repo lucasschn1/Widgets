@@ -134,6 +134,33 @@ fn every_widget_draws_in_every_size() {
 }
 
 #[test]
+fn widgets_that_draw_their_size_change_draw_every_frame() {
+    com();
+    let mut morphing = 0;
+    for (name, kind, cfg) in cases() {
+        for &from in kind.sizes() {
+            for &to in kind.sizes() {
+                if from == to || !kind.morphs(from, to) {
+                    continue;
+                }
+                morphing += 1;
+                let (a, b) = (Layout::of(from), Layout::of(to));
+                for k in 0..=8 {
+                    // o cartão no meio do caminho (com a mola, passa um pouco do tamanho novo)
+                    let p = k as f32 / 8.0;
+                    let e = crate::theme::ease_spring(p);
+                    let (w, h) = (a.w + (b.w - a.w) * e, a.h + (b.h - a.h) * e);
+                    let mut c = Canvas::new((w * S).round().max(1.0) as u32, (h * S).round().max(1.0) as u32, S);
+                    kind.draw_between(&mut c, from, to, p, &Env { cfg: &cfg, key: kind.key() });
+                    assert!(ink(&c.finish()) > 0.002, "{name} {from:?} → {to:?} em {p}: em branco");
+                }
+            }
+        }
+    }
+    assert!(morphing > 0, "nenhum widget desenha a troca de tamanho");
+}
+
+#[test]
 fn every_widget_answers_the_mouse_everywhere() {
     com();
     for (name, kind, cfg) in cases() {

@@ -12,11 +12,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::clawd::{self, Anim, Crab, Mood};
-use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Status, SMALL, WIDE};
-use crate::claude_history::{self as history, Turn, HISTORY_DAYS};
+use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Request, Status, SMALL, WIDE};
+use crate::claude_history::{self as history, Tool, Turn, HISTORY_DAYS};
 use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{Rgba, FG, MUTED, WHITE};
+use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
 
 // ---------- cores ----------
@@ -32,8 +32,10 @@ const TRACK: Rgba = Rgba(255, 255, 255, 30);
 pub const CONNECT: u32 = 1;
 pub const DISCONNECT: u32 = 2;
 const OPEN_USAGE: u32 = 3;
-/// clique no Clawd: ele pula
+/// clique no Clawd: ele vai para a barra de tarefas (ou volta de lá)
 const POKE_CRAB: u32 = 4;
+/// pelo clique direito: mandar o Clawd para a barra de tarefas, ou trazer de volta
+const PERCH_TOGGLE: u32 = 5;
 /// sem resposta do Claude Code por este tempo (segundos), o Clawd tira um cochilo
 const NAP_AFTER: f64 = 30.0 * 60.0;
 /// sem saber pelas conversas: a linha de status foi chamada há menos que isto (segundos), o
@@ -48,12 +50,14 @@ const CHECK_EVERY: Duration = Duration::from_secs(5);
 const CHECK_BUSY: Duration = Duration::from_secs(2);
 
 /// O que as conversas abertas do Claude Code estão fazendo.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Activity {
     /// alguma está trabalhando (None: não deu para saber pelas conversas)
     busy: Option<bool>,
     /// passos por minuto, somando todas
     steps: u32,
+    /// a última ferramenta chamada na conversa trabalhando que mudou por último
+    tool: Option<Tool>,
 }
 const USAGE_URL: &str = "https://claude.ai/settings/usage";
 
@@ -80,12 +84,21 @@ const BOLD: Face = Face::Custom("Outfit", 600);
 const HISTORY_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Intervalo entre os quadros enquanto anima.
 const FRAME: Duration = Duration::from_millis(16);
-/// O tamanho dos quadradinhos do Clawd embaixo dos medidores, e a altura do centro dele (na
-/// abertura de baixo dos anéis, onde ficava o ícone do diário).
-const CRAB_UNIT: f32 = 1.2;
+/// A altura do centro do Clawd sozinho embaixo de um medidor (na abertura de baixo do anel, no
+/// lugar do sol) e o tamanho dos quadradinhos dele aí.
 const CRAB_Y: f32 = 127.0;
-/// sozinho embaixo de um medidor (no lugar do sol), há espaço para ele maior
 const CRAB_UNIT_SOLO: f32 = 2.0;
+/// No médio com números, o Clawd fica no meio, entre os dois anéis: o centro dele e o tamanho
+/// dos quadradinhos (2,4 pontos: 3 pixels a 125%, como no pequeno). Embaixo dele, o que está
+/// fazendo; embaixo de cada anel, quando ele reinicia.
+const CRAB_MID_Y: f32 = 76.0;
+const CRAB_UNIT_MID: f32 = 2.4;
+const DOING_Y: f32 = 101.0;
+const NOTE_Y: f32 = 124.0;
+/// A largura que cabe a nota embaixo de cada anel (centrada nele, sem chegar à borda).
+const NOTE_W: f32 = 124.0;
+/// No médio, o centro do anel do diário (o do semanal fica à mesma distância da borda direita).
+const MID_GAUGE_X: f32 = 68.0;
 
 /// O arco indo de `from` a `to` (uso de 0 a 1), desde `start`.
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +141,66 @@ fn ease(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Quanto aparece de cada parte do grande (1: tudo; na troca de tamanho, elas entram e saem aos
+/// poucos): o nome e de onde vêm os números, a linha, os dias da semana (e quanto cada barra já
+/// subiu) e o ritmo do diário.
+struct Reveal {
+    head: f32,
+    line: f32,
+    days: f32,
+    bars: [f32; 7],
+    forecast: f32,
+}
+
+impl Reveal {
+    const ALL: Reveal = Reveal { head: 1.0, line: 1.0, days: 1.0, bars: [1.0; 7], forecast: 1.0 };
+}
+
+/// Desenha o que `f` desenha com a opacidade `alpha` (nada, se for 0).
+fn faded(c: &mut Canvas, alpha: f32, f: impl FnOnce(&mut Canvas)) {
+    if alpha <= 0.004 {
+        return;
+    }
+    if alpha >= 0.996 {
+        f(c);
+        return;
+    }
+    c.push_opacity(alpha);
+    f(c);
+    c.pop_clip();
+}
+
+// ---------- a troca de tamanho ----------
+/// O pulo do Clawd de um lugar para o outro: agacha até `JUMP.0` do caminho, voa até `JUMP.1`,
+/// pousa agachado até `LANDED` e volta ao que fazia. A altura do pulo, em pontos.
+const JUMP: (f32, f32) = (0.15, 0.8);
+const LANDED: f32 = 0.92;
+const JUMP_H: f32 = 30.0;
+
+/// Sai devagar, passa um pouco do ponto e volta (o que nasce na troca de tamanho).
+fn ease_back(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (c1, c3) = (1.3, 2.3);
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+/// Quanto aparece, a `p` do caminho, algo que existe só antes (`was`) ou só depois (`will`) da
+/// troca de tamanho: o que é novo entra depois de `delay`, em `dur`; o que sai some logo no
+/// começo, em `out`.
+fn presence(was: bool, will: bool, p: f32, delay: f32, dur: f32, out: f32) -> f32 {
+    match (was, will) {
+        (true, true) => 1.0,
+        (false, false) => 0.0,
+        (false, true) => 1.0 - (1.0 - ((p - delay) / dur).clamp(0.0, 1.0)).powi(3),
+        (true, false) => 1.0 - (p / out).clamp(0.0, 1.0),
+    }
+}
+
+/// O medidor `g` com o tamanho multiplicado por `s`, no mesmo centro.
+fn scaled(g: &Geom, s: f32) -> Geom {
+    Geom { r: g.r * s, w: g.w * s, num: g.num * s, cy: g.cy, gauges: &[] }
+}
+
 /// Os dois limites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Limit {
@@ -165,12 +238,36 @@ const WIDE_Q: f32 = WIDE / 4.0;
 const BRAND_X: f32 = 22.0;
 const BRAND_Y: f32 = 20.0;
 const BRAND_SIZE: f32 = 14.0;
+/// Embaixo do nome: a que distância dele e até onde vai (sem chegar ao Clawd).
+const SUBTITLE_DY: f32 = 21.0;
+const SUBTITLE_W: f32 = LARGE_CRAB_X - 9.0 * CRAB_UNIT_MID - 10.0 - BRAND_X;
+/// O Clawd no grande: no canto de cima à direita, com o notebook de lado chegando à margem.
+const LARGE_CRAB_X: f32 = WIDE - 22.0 - (clawd::SIDE_COLS - 9.0) * CRAB_UNIT_MID;
+const LARGE_CRAB_Y: f32 = 36.0;
 
 fn geom(mode: Mode) -> Geom {
     match mode {
         Mode::P => Geom { r: 55.0, w: 10.0, num: 38.0, cy: 79.0, gauges: &[(Limit::Daily, SMALL / 2.0)] },
-        Mode::M => Geom { r: 55.0, w: 10.0, num: 38.0, cy: 79.0, gauges: &[(Limit::Daily, WIDE_Q), (Limit::Weekly, 3.0 * WIDE_Q)] },
+        // anéis menores, para o Clawd caber maior no meio
+        Mode::M => Geom { r: 44.0, w: 9.0, num: 30.0, cy: 70.0, gauges: &[(Limit::Daily, MID_GAUGE_X), (Limit::Weekly, WIDE - MID_GAUGE_X)] },
         Mode::G => Geom { r: 57.0, w: 11.0, num: 40.0, cy: 132.0, gauges: &[(Limit::Daily, WIDE_Q), (Limit::Weekly, 3.0 * WIDE_Q)] },
+    }
+}
+
+/// O centro (x) dos dois medidores, no médio e no grande.
+fn gauge_xs(mode: Mode) -> [f32; 2] {
+    let g = geom(mode);
+    [g.gauges[0].1, g.gauges.get(1).map_or(g.gauges[0].1, |x| x.1)]
+}
+
+/// A nota de quando reinicia, embaixo de cada anel: (altura, largura máxima). O pequeno não tem.
+const LARGE_NOTE_Y: f32 = 202.0;
+const LARGE_NOTE_W: f32 = WIDE / 2.0 - 16.0;
+fn note_spot(mode: Mode) -> Option<(f32, f32)> {
+    match mode {
+        Mode::P => None,
+        Mode::M => Some((NOTE_Y, NOTE_W)),
+        Mode::G => Some((LARGE_NOTE_Y, LARGE_NOTE_W)),
     }
 }
 
@@ -221,6 +318,8 @@ pub struct Claude {
     activity: Activity,
     turns: HashMap<String, (SystemTime, Turn)>,
     busy_since: Option<Instant>,
+    /// o Clawd foi para a barra de tarefas (o lugar dele no widget fica vazio)
+    perched: bool,
 }
 
 impl Claude {
@@ -244,6 +343,7 @@ impl Claude {
             activity: Activity::default(),
             turns: HashMap::new(),
             busy_since: None,
+            perched: false,
         };
         c.reload(true);
         c.read_activity();
@@ -353,6 +453,7 @@ impl Claude {
             activity: Activity::default(),
             turns: HashMap::new(),
             busy_since: None,
+            perched: false,
         }
     }
 
@@ -471,21 +572,27 @@ impl Claude {
         let sessions = self.view.usage.as_ref().map(|u| u.sessions.clone()).unwrap_or_default();
         let mut act = Activity::default();
         let mut seen = Vec::new();
+        // a conversa trabalhando que mudou por último (a ferramenta dela vai para o balão)
+        let mut newest: Option<f64> = None;
         for (path, at) in sessions {
             if now - at > 3600.0 {
                 continue;
             }
             let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else { continue };
             let turn = match self.turns.get(&path) {
-                Some(&(m, t)) if m == modified => t,
+                Some((m, t)) if *m == modified => t.clone(),
                 _ => {
                     let t = history::read_tail(std::path::Path::new(&path)).map_or(Turn::default(), |tail| history::turn(&tail, now));
-                    self.turns.insert(path.clone(), (modified, t));
+                    self.turns.insert(path.clone(), (modified, t.clone()));
                     t
                 }
             };
             let still = modified.elapsed().map_or(0.0, |d| d.as_secs_f64());
             let busy = turn.busy.map(|b| b && still < STALE_AFTER);
+            if busy == Some(true) && newest.is_none_or(|s| still < s) {
+                newest = Some(still);
+                act.tool = turn.tool.clone();
+            }
             act.busy = match (act.busy, busy) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
                 (None, None) => None,
@@ -513,19 +620,18 @@ impl Claude {
         self
     }
 
-    /// Onde o Clawd fica em cada tamanho: (centro x, centro y, tamanho dos quadradinhos).
-    /// No grande, no título; sem números no pequeno, grande no meio; com um medidor só, na
-    /// abertura de baixo do anel (no lugar do ícone do diário); com dois, entre eles.
+    /// Onde o Clawd fica em cada tamanho: (centro x, centro y, tamanho dos quadradinhos; o
+    /// centro é o do corpo, o notebook de lado fica à direita). No grande, no canto de cima à
+    /// direita; sem números no pequeno, grande no meio; com um medidor só, na abertura de baixo
+    /// do anel (no lugar do ícone do diário); com dois, entre eles (um pouco para a esquerda,
+    /// para o notebook caber até o anel da direita).
     fn crab_spot(&self, mode: Mode) -> (f32, f32, f32) {
         match mode {
-            Mode::G => {
-                let unit = BRAND_SIZE / 10.0;
-                (BRAND_X + clawd::COLS * unit / 2.0, BRAND_Y + BRAND_SIZE * 0.55, unit)
-            }
+            Mode::G => (LARGE_CRAB_X, LARGE_CRAB_Y, CRAB_UNIT_MID),
             Mode::P if self.needs_connect() && self.view.link == Link::Off => (SMALL / 2.0, 50.0, 3.0),
             Mode::P => (SMALL / 2.0, CRAB_Y, CRAB_UNIT_SOLO),
-            Mode::M if !self.has_data() => (WIDE_Q, CRAB_Y, CRAB_UNIT_SOLO),
-            Mode::M => (WIDE / 2.0, CRAB_Y, CRAB_UNIT),
+            Mode::M if !self.has_data() => (MID_GAUGE_X, CRAB_Y, CRAB_UNIT_SOLO),
+            Mode::M => (WIDE / 2.0 - 2.0 * CRAB_UNIT_MID, CRAB_MID_Y, CRAB_UNIT_MID),
         }
     }
 
@@ -534,16 +640,62 @@ impl Claude {
         mode == Mode::P || (mode == Mode::M && !self.has_data())
     }
 
+    /// O medidor mostra o ícone (sol ou calendário) na abertura de baixo? No médio com números,
+    /// esse lugar é de quando ele reinicia; e não onde o Clawd está.
+    fn shows_icon(&self, limit: Limit, mode: Mode) -> bool {
+        !(mode == Mode::M && self.has_data()) && !(limit == Limit::Daily && self.crab_on_daily(mode))
+    }
+
+    /// O que escrever embaixo do lugar do Clawd: o que ele faz, ou que foi para a barra.
+    fn doing_here(&self) -> &'static str {
+        if self.perched { "na barra de tarefas" } else { self.doing() }
+    }
+
+    /// O que o Clawd está fazendo, escrito embaixo dele no médio ("" parado, sem nada a dizer).
+    fn doing(&self) -> &'static str {
+        if self.crab.is_playing(Anim::Done) {
+            return "pronto";
+        }
+        match self.mood() {
+            Mood::Busy if self.crab.is_playing(Anim::Think) => "pensando",
+            Mood::Busy if self.crab.is_playing(Anim::Idea) => "teve uma ideia",
+            Mood::Busy if self.crab.is_playing(Anim::Coffee) => "tomando café",
+            Mood::Busy => "programando",
+            Mood::Sleepy => "cochilando",
+            Mood::Worried => "perto do limite",
+            Mood::Normal => "",
+        }
+    }
+
     /// O ponto (x, y) está em cima do Clawd (com uma folga em volta)?
     fn on_crab(&self, x: f32, y: f32, mode: Mode) -> bool {
         let (cx, cy, unit) = self.crab_spot(mode);
         (x - cx).abs() <= clawd::COLS * unit / 2.0 + 4.0 && (y - cy).abs() <= clawd::ROWS * unit / 2.0 + 4.0
     }
 
-    /// Desenha o Clawd no lugar dele; devolve a largura.
-    fn crab(&self, c: &mut Canvas, mode: Mode) -> f32 {
+    /// O Clawd agora neste tamanho, trabalhando no notebook: no pequeno, de frente, no colo
+    /// (de lado não caberia entre as pontas do anel); no médio e no grande, de lado, com a tela à
+    /// mostra.
+    fn crab_pose(&self, mode: Mode) -> clawd::Pose {
+        if mode == Mode::P {
+            self.crab.laptop_pose(self.mood(), self.gaze)
+        } else {
+            self.crab.side_pose(self.mood(), self.gaze)
+        }
+    }
+
+    /// Desenha o Clawd no lugar dele (na barra de tarefas, o lugar fica vazio, com um aviso).
+    fn crab(&self, c: &mut Canvas, mode: Mode) {
         let (cx, cy, unit) = self.crab_spot(mode);
-        clawd::draw(c, cx, cy, unit, &self.crab.pose(self.mood(), self.gaze))
+        if self.perched {
+            // no pequeno, no lugar dele; no médio, onde ficaria o que ele faz; no grande, embaixo
+            // do nome
+            if mode == Mode::P {
+                c.text(cx, cy - 4.0, "na barra", TEXT, 10.0, MUTED, Anchor::MM, None);
+            }
+            return;
+        }
+        clawd::draw(c, cx, cy, unit, &self.crab_pose(mode));
     }
 
     fn session(&self) -> Option<Window> {
@@ -656,11 +808,9 @@ impl Claude {
             }
         }
         c.text(cx, base + 6.0, limit.name(), TEXT, label, MUTED, Anchor::MA, None);
-        let (iy, ir) = (cy + r * 0.86, w * 0.9);
-        match limit {
-            _ if !icon => {} // o Clawd está no lugar do ícone
-            Limit::Daily => sun(c, cx, iy, ir, ORANGE),
-            Limit::Weekly => calendar(c, cx, iy, ir, ORANGE),
+        // (sem o ícone, o Clawd ou a nota de quando reinicia está no lugar dele)
+        if icon {
+            gauge_icon(c, g, cx, limit);
         }
     }
 
@@ -669,16 +819,52 @@ impl Claude {
         for &(limit, cx) in g.gauges {
             if only.is_none_or(|o| o == limit) {
                 let since = self.grow[limit.index()].and_then(|g| g.since_hot());
-                let icon = !(limit == Limit::Daily && self.crab_on_daily(mode));
-                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since, icon);
+                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since, self.shows_icon(limit, mode));
             }
         }
     }
 
-    /// O Clawd e o nome, no alto à esquerda (no grande).
-    fn brand(&self, c: &mut Canvas, text: &str) {
-        let w = self.crab(c, Mode::G);
-        c.text(BRAND_X + w + 7.0, BRAND_Y, text, BOLD, BRAND_SIZE, FG, Anchor::LA, None);
+    /// Embaixo do nome, no grande: de onde vêm os números e o que o Clawd está fazendo.
+    fn subtitle(&self, now: f64) -> String {
+        match self.doing_here() {
+            "" => self.source_line(now),
+            doing => format!("{} · {doing}", self.source_line(now)),
+        }
+    }
+
+    /// As notas de quando cada anel reinicia (diário, semanal), e se são um aviso.
+    fn notes(&self, now: f64) -> [(String, bool); 2] {
+        [self.session_note(now), (self.week_note(now), false)]
+    }
+
+    /// As notas embaixo dos anéis com o centro em `xs`, na altura `y`.
+    fn draw_notes(&self, c: &mut Canvas, now: f64, xs: [f32; 2], y: f32, max_w: f32) {
+        for (cx, (note, warn)) in xs.into_iter().zip(self.notes(now)) {
+            c.text(cx, y, &note, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(max_w));
+        }
+    }
+
+    /// O que só o grande tem, além dos anéis e das notas: o nome no alto (o Clawd vai à parte),
+    /// de onde vêm os números, a linha, os dias da semana e o ritmo do diário.
+    fn draw_large_parts(&self, c: &mut Canvas, now: f64, r: &Reveal) {
+        let pad = 22.0;
+        faded(c, r.head, |c| {
+            // o nome desce um pouco enquanto aparece
+            let y = BRAND_Y - (1.0 - r.head) * 8.0;
+            c.text(BRAND_X, y, "Uso do Claude", BOLD, BRAND_SIZE, FG, Anchor::LA, None);
+            c.text(BRAND_X, y + SUBTITLE_DY, &self.subtitle(now), TEXT, 10.5, MUTED, Anchor::LA, Some(SUBTITLE_W));
+        });
+        // a linha abre do meio
+        if r.line > 0.0 {
+            let half = (WIDE / 2.0 - pad) * r.line.min(1.0);
+            c.fill_round_rect(WIDE / 2.0 - half, 232.0, WIDE / 2.0 + half, 233.0, 0.5, WHITE.alpha(0.1 * r.line.min(1.0)));
+        }
+        faded(c, r.days, |c| self.draw_weekdays(c, pad, 248.0, WIDE - pad, 394.0, &r.bars));
+        if let Some((text, warn)) = self.forecast(now) {
+            faded(c, r.forecast, |c| {
+                c.text(WIDE / 2.0, 416.0, &text, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE - 2.0 * pad));
+            });
+        }
     }
 
     fn draw_connect(&self, c: &mut Canvas, mode: Mode) {
@@ -730,14 +916,20 @@ impl Claude {
             return;
         }
         self.draw_gauges(c, Mode::M, now, None);
+        let doing = self.doing_here();
+        if !doing.is_empty() {
+            c.text(WIDE / 2.0, DOING_Y, doing, TEXT, 10.5, MUTED, Anchor::MA, None);
+        }
+        // embaixo de cada anel, quando ele reinicia (ou o aviso de que acaba antes)
+        self.draw_notes(c, now, gauge_xs(Mode::M), NOTE_Y, NOTE_W);
     }
 
     fn draw_large(&self, c: &mut Canvas, now: f64) {
         let pad = 22.0;
-        self.brand(c, "Uso do Claude");
+        self.crab(c, Mode::G);
         self.draw_gauges(c, Mode::G, now, None);
-        let g = geom(Mode::G);
         if !self.has_data() {
+            c.text(BRAND_X, BRAND_Y, "Uso do Claude", BOLD, BRAND_SIZE, FG, Anchor::LA, None);
             let (title, text) = self.waiting_text();
             let top = 262.0;
             c.text(WIDE / 2.0, top, title, BOLD, 13.0, FG, Anchor::MA, Some(WIDE - 2.0 * pad));
@@ -749,22 +941,15 @@ impl Claude {
             }
             return;
         }
-        c.text(WIDE - pad, 22.0, &self.source_line(now), TEXT, 10.5, MUTED, Anchor::RA, Some(WIDE / 2.0));
         // embaixo de cada medidor, quando ele reinicia
-        let (s_note, s_warn) = self.session_note(now);
-        for (&(_, cx), (note, warn)) in g.gauges.iter().zip([(s_note, s_warn), (self.week_note(now), false)]) {
-            c.text(cx, 202.0, &note, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE / 2.0 - 16.0));
-        }
-        c.fill_round_rect(pad, 232.0, WIDE - pad, 233.0, 0.5, WHITE.alpha(0.1));
-        self.draw_weekdays(c, pad, 248.0, WIDE - pad, 394.0);
-        if let Some((text, warn)) = self.forecast(now) {
-            c.text(WIDE / 2.0, 416.0, &text, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE - 2.0 * pad));
-        }
+        self.draw_notes(c, now, gauge_xs(Mode::G), LARGE_NOTE_Y, LARGE_NOTE_W);
+        self.draw_large_parts(c, now, &Reveal::ALL);
     }
 
     /// Os dias da semana em que mais se usa: uma barra por dia (o de mais uso em laranja cheio,
-    /// com a parte dele no total em cima) e o dia de hoje com o nome em branco.
-    fn draw_weekdays(&self, c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32) {
+    /// com a parte dele no total em cima) e o dia de hoje com o nome em branco. `bars`: quanto
+    /// cada barra já subiu (1: inteira; na troca de tamanho, sobem uma depois da outra).
+    fn draw_weekdays(&self, c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, bars: &[f32; 7]) {
         const NAMES: [&str; 7] = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
         let days = self.weekdays();
         let total: f64 = days.iter().sum();
@@ -779,19 +964,25 @@ impl Claude {
         let slot = (x1 - x0) / 7.0;
         let bw = 20.0;
         for (i, name) in NAMES.iter().enumerate() {
+            let grow = bars[i];
+            if grow <= 0.01 {
+                continue;
+            }
             let cx = x0 + slot * (i as f32 + 0.5);
             let (bx0, bx1) = (cx - bw / 2.0, cx + bw / 2.0);
-            c.fill_round_rect(bx0, bars_top, bx1, base, 6.0, WHITE.alpha(0.06));
-            if max > 0.0 && days[i] > 0.0 {
-                let h = ((base - bars_top) * (days[i] / max) as f32).max(12.0);
-                let color = if Some(i) == top { ORANGE } else { ORANGE.mix(WHITE, 0.2).alpha(0.5) };
-                c.fill_round_rect(bx0, base - h, bx1, base, 6.0, color);
-                if Some(i) == top {
-                    let share = format!("{}%", (days[i] / total * 100.0).round());
-                    c.text(cx, base - h - 6.0, &share, TEXT, 10.5, FG, Anchor::MS, None);
+            faded(c, (grow * 1.5).min(1.0), |c| {
+                c.fill_round_rect(bx0, bars_top, bx1, base, 6.0, WHITE.alpha(0.06));
+                if max > 0.0 && days[i] > 0.0 {
+                    let h = ((base - bars_top) * (days[i] / max) as f32).max(12.0) * grow;
+                    let color = if Some(i) == top { ORANGE } else { ORANGE.mix(WHITE, 0.2).alpha(0.5) };
+                    c.fill_round_rect(bx0, base - h, bx1, base, 6.0_f32.min(h / 2.0), color);
+                    if Some(i) == top {
+                        let share = format!("{}%", (days[i] / total * 100.0).round());
+                        c.text(cx, base - h - 6.0, &share, TEXT, 10.5, FG, Anchor::MS, None);
+                    }
                 }
-            }
-            c.text(cx, base + 7.0, name, TEXT, 10.0, if i == today { FG } else { MUTED }, Anchor::MA, None);
+                c.text(cx, base + 7.0, name, TEXT, 10.0, if i == today { FG } else { MUTED }, Anchor::MA, None);
+            });
         }
         if top.is_none() {
             let note = if self.weekdays.is_none() { "Lendo as conversas do Claude Code…" } else { "Sem uso do Claude Code nestas semanas" };
@@ -800,6 +991,185 @@ impl Claude {
             c.fill_round_rect((x0 + x1 - nw) / 2.0, mid - 12.0, (x0 + x1 + nw) / 2.0, mid + 12.0, 12.0, Rgba(0, 0, 0, 60));
             c.text((x0 + x1) / 2.0, mid, note, TEXT, 10.5, FG.alpha(0.85), Anchor::MM, None);
         }
+    }
+}
+
+impl Claude {
+    /// Onde e como o Clawd está a `p` (0 a 1) da troca de `from` para `to`: (centro x, centro y,
+    /// tamanho dos quadradinhos, quadro). Agacha, pula num arco até o lugar novo (os
+    /// quadradinhos trocam de tamanho no alto do pulo), pousa agachado e volta ao que fazia.
+    fn crab_between(&self, from: Mode, to: Mode, p: f32) -> (f32, f32, f32, clawd::Pose) {
+        let ((ax, ay, au), (bx, by, bu)) = (self.crab_spot(from), self.crab_spot(to));
+        if p < JUMP.0 {
+            return (ax, ay, au, clawd::jump_pose(true));
+        }
+        if p >= LANDED {
+            return (bx, by, bu, self.crab_pose(to));
+        }
+        if p >= JUMP.1 {
+            return (bx, by, bu, clawd::jump_pose(true));
+        }
+        let s = ease_in_out((p - JUMP.0) / (JUMP.1 - JUMP.0));
+        let (x, y) = (ax + (bx - ax) * s, ay + (by - ay) * s - JUMP_H * 4.0 * s * (1.0 - s));
+        (x, y, if s < 0.5 { au } else { bu }, clawd::jump_pose(false))
+    }
+
+    /// Um quadro da troca de tamanho, a `p` (0 a 1) do caminho de `from` para `to`, com tudo no
+    /// meio do caminho: o que existe nos dois tamanhos anda (e muda de tamanho) de um lugar para
+    /// o outro; o que é novo entra depois (o semanal crescendo do centro, as barras dos dias
+    /// subindo uma depois da outra); o que sai some logo no começo; e o Clawd pula.
+    fn draw_morph(&self, c: &mut Canvas, from: Mode, to: Mode, p: f32) {
+        let now = self.now();
+        let e = ease_in_out(p);
+        let mix = |a: f32, b: f32| a + (b - a) * e;
+        let (ga, gb) = (geom(from), geom(to));
+        for limit in [Limit::Daily, Limit::Weekly] {
+            let at = |g: &Geom| g.gauges.iter().find(|x| x.0 == limit).map(|x| x.1);
+            let (g, cx, alpha) = match (at(&ga), at(&gb)) {
+                (Some(x0), Some(x1)) => {
+                    let g = Geom { r: mix(ga.r, gb.r), w: mix(ga.w, gb.w), num: mix(ga.num, gb.num), cy: mix(ga.cy, gb.cy), gauges: &[] };
+                    (g, mix(x0, x1), 1.0)
+                }
+                // o semanal nasce crescendo do centro dele (passa um pouco e volta), ou some
+                // encolhendo
+                (None, Some(x1)) => (scaled(&gb, ease_back((p - 0.2) / 0.6)), x1, ((p - 0.2) / 0.35).clamp(0.0, 1.0)),
+                (Some(x0), None) => (scaled(&ga, 1.0 - ease_in_out((p / 0.45).min(1.0))), x0, 1.0 - (p / 0.4).min(1.0)),
+                (None, None) => continue,
+            };
+            if g.r < 2.0 {
+                continue;
+            }
+            faded(c, alpha, |c| Self::gauge(c, &g, cx, limit, self.shown(limit, now), None, false));
+            // o sol e o calendário (só no grande)
+            let icon = |m: Mode| self.shows_icon(limit, m) && at(&geom(m)).is_some();
+            faded(c, alpha * presence(icon(from), icon(to), p, 0.45, 0.4, 0.3), |c| gauge_icon(c, &g, cx, limit));
+        }
+        // as notas de quando reinicia andam junto com os anéis
+        let (na, nb) = (note_spot(from), note_spot(to));
+        if let (Some(n0), Some(n1)) = (na.or(nb), nb.or(na)) {
+            let (x0, x1) = (gauge_xs(if na.is_some() { from } else { to }), gauge_xs(if nb.is_some() { to } else { from }));
+            let xs = [mix(x0[0], x1[0]), mix(x0[1], x1[1])];
+            faded(c, presence(na.is_some(), nb.is_some(), p, 0.5, 0.35, 0.25), |c| self.draw_notes(c, now, xs, mix(n0.0, n1.0), mix(n0.1, n1.1)));
+        }
+        // o que ele está fazendo, embaixo dele no médio
+        let doing = self.doing_here();
+        if !doing.is_empty() {
+            faded(c, presence(from == Mode::M, to == Mode::M, p, 0.7, 0.3, 0.2), |c| {
+                c.text(WIDE / 2.0, DOING_Y, doing, TEXT, 10.5, MUTED, Anchor::MA, None);
+            });
+        }
+        // o grande: o nome desce, a linha abre do meio e as barras sobem uma depois da outra; na
+        // volta, tudo sai antes, de uma vez
+        let (was, will) = (from == Mode::G, to == Mode::G);
+        if was || will {
+            let bars = std::array::from_fn(|i| {
+                let i = i as f32;
+                // (a última termina de subir junto com a troca)
+                if will { ease_back((p - 0.4 - i * 0.04) / 0.36) } else { 1.0 - ease_in_out(((p - i * 0.025) / 0.3).clamp(0.0, 1.0)) }
+            });
+            let head = presence(was, will, p, 0.4, 0.4, 0.25);
+            let r = Reveal { head, line: head, days: presence(was, will, p, 0.5, 0.35, 0.2), bars, forecast: presence(was, will, p, 0.75, 0.25, 0.2) };
+            self.draw_large_parts(c, now, &r);
+        }
+        // e o Clawd, por cima de tudo (se não foi para a barra de tarefas)
+        if !self.perched {
+            let (x, y, unit, pose) = self.crab_between(from, to, p);
+            clawd::draw(c, x, y, unit, &pose);
+        }
+    }
+}
+
+// ---------- na barra de tarefas ----------
+
+/// A janela do Clawd na barra de tarefas, em pontos: o balão em cima e o Clawd embaixo à direita,
+/// com as patas na borda de baixo (em cima da barra). O centro do corpo dele e o tamanho dos
+/// quadradinhos.
+pub const PERCH_W: f32 = 240.0;
+pub const PERCH_H: f32 = 74.0;
+pub const PERCH_UNIT: f32 = 2.4;
+pub const PERCH_CRAB: (f32, f32) = (PERCH_W - 6.0 - (clawd::SIDE_COLS - 9.0) * PERCH_UNIT, PERCH_H - 5.0 * PERCH_UNIT);
+/// O balão: altura e onde fica a borda de baixo (a ponta desce até perto da cabeça dele).
+const BALLOON_H: f32 = 26.0;
+const BALLOON_BOTTOM: f32 = 32.0;
+
+/// As cores do pontinho do balão: editando, lendo, rodando, procurando, outras e pronto.
+const EDITING: Rgba = ORANGE;
+const READING: Rgba = Rgba::rgb(120, 196, 255);
+const RUNNING: Rgba = Rgba::rgb(112, 214, 128);
+const SEARCHING: Rgba = Rgba::rgb(242, 132, 164);
+const OTHER: Rgba = Rgba::rgb(255, 226, 92);
+
+/// O balão mostra os nomes de arquivos e comandos? (Desligado, só a ação: para compartilhar a
+/// tela sem mostrar no que se está trabalhando.)
+pub fn show_names(cfg: &serde_json::Value) -> bool {
+    cfg["claude"]["balao_nomes"].as_bool().unwrap_or(true)
+}
+
+/// O que dizer no balão sobre uma ferramenta do Claude Code: a frase e a cor do pontinho.
+fn tool_line(tool: &Tool, names: bool) -> (String, Rgba) {
+    let input = tool.input.trim();
+    let file = input.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+    let short = |t: &str, max: usize| if t.chars().count() > max { format!("{}…", t.chars().take(max - 1).collect::<String>()) } else { t.to_string() };
+    let named = |doing: &str, what: String, plain: &str| if names && !what.is_empty() { format!("{doing} {what}") } else { plain.to_string() };
+    match tool.name.as_str() {
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => (named("Editando", short(&file, 26), "Editando um arquivo"), EDITING),
+        "Read" => (named("Lendo", short(&file, 26), "Lendo um arquivo"), READING),
+        "Bash" | "PowerShell" => {
+            let cmd = input.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+            (named("Rodando", short(&cmd, 24), "Rodando um comando"), RUNNING)
+        }
+        "Grep" | "Glob" => (named("Procurando", if input.is_empty() { String::new() } else { format!("\"{}\"", short(input, 20)) }, "Procurando no código"), SEARCHING),
+        "WebFetch" | "WebSearch" => ("Pesquisando na web".into(), READING),
+        "Task" | "Agent" => ("Chamando um ajudante".into(), OTHER),
+        "TodoWrite" => ("Organizando as tarefas".into(), OTHER),
+        other => {
+            // ferramentas de MCP: "mcp__servidor__ferramenta"
+            let name = other.rsplit("__").next().unwrap_or(other);
+            (format!("Usando {}", short(name, 24)), OTHER)
+        }
+    }
+}
+
+impl Claude {
+    /// O Clawd na barra: sempre com o notebook de lado, sem ninguém com o mouse em cima.
+    fn perch_pose(&self) -> clawd::Pose {
+        self.crab.side_pose(self.mood(), None)
+    }
+
+    /// O que o balão diz agora (a frase e a cor do pontinho); None: sem balão (parado ou
+    /// cochilando).
+    fn balloon(&self, names: bool) -> Option<(String, Rgba)> {
+        if self.crab.is_playing(Anim::Done) {
+            return Some(("✓ Pronto".into(), RUNNING));
+        }
+        match self.mood() {
+            Mood::Busy if self.crab.is_playing(Anim::Coffee) => Some(("Hora do café".into(), Rgba::rgb(196, 140, 98))),
+            Mood::Busy => Some(match &self.activity.tool {
+                Some(tool) => tool_line(tool, names),
+                None => ("Pensando…".into(), Rgba::rgb(190, 170, 255)),
+            }),
+            Mood::Worried => Some(("Perto do limite diário".into(), ALERT)),
+            _ => None,
+        }
+    }
+
+    /// A janela da barra de tarefas: o balão (se houver o que dizer) e o Clawd.
+    fn draw_perch_window(&self, c: &mut Canvas, names: bool) {
+        let (cx, cy) = PERCH_CRAB;
+        if let Some((text, dot)) = self.balloon(names) {
+            let size = 11.0;
+            let w = (c.text_width(&text, TEXT, size) + 32.0).min(PERCH_W - 8.0);
+            // à esquerda do Clawd, com a ponta apontando para a cabeça dele
+            let x1 = (cx + 34.0).min(PERCH_W - 4.0);
+            let (x0, y0, y1) = (x1 - w, BALLOON_BOTTOM - BALLOON_H, BALLOON_BOTTOM);
+            let glass = Rgba(28, 22, 44, 235);
+            c.fill_round_rect(x0, y0, x1, y1, BALLOON_H / 2.0, glass);
+            c.stroke_round_rect(x0, y0, x1, y1, BALLOON_H / 2.0, Rgba(255, 255, 255, 40), 1.0);
+            c.polygon(&[(cx - 6.0, y1 - 0.5), (cx + 4.0, y1 - 0.5), (cx - 2.0, y1 + 6.0)], glass);
+            c.fill_circle(x0 + 13.0, (y0 + y1) / 2.0, 3.2, dot);
+            c.text(x0 + 22.0, (y0 + y1) / 2.0, &text, TEXT, size, FG, Anchor::LM, Some(w - 30.0));
+        }
+        clawd::draw(c, cx, cy, PERCH_UNIT, &self.perch_pose());
     }
 }
 
@@ -816,6 +1186,16 @@ fn percent(c: &mut Canvas, x: f32, y: f32, v: f64, size: f32) {
     let nw = c.text_width(&num, NUM, size);
     c.text(x - nw / 2.0, y, &num, NUM, size, FG, Anchor::LS, None);
     c.text(x + nw / 2.0 + 1.0, y, "%", NUM, size * 0.42, FG.alpha(0.7), Anchor::LS, None);
+}
+
+/// O ícone na abertura de baixo do medidor `g` com o centro em `cx`: o sol (diário) ou o
+/// calendário (semanal).
+fn gauge_icon(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit) {
+    let (iy, ir) = (g.cy + g.r * 0.86, g.w * 0.9);
+    match limit {
+        Limit::Daily => sun(c, cx, iy, ir, ORANGE),
+        Limit::Weekly => calendar(c, cx, iy, ir, ORANGE),
+    }
 }
 
 /// Sol: um círculo e oito raios, cabendo num círculo de raio `r`.
@@ -885,6 +1265,39 @@ impl Kind for Claude {
         }
     }
 
+    fn perch_from(&self, mode: Mode) -> Option<(f32, f32)> {
+        let (cx, cy, _) = self.crab_spot(mode);
+        Some((cx, cy))
+    }
+
+    fn set_perched(&mut self, on: bool) {
+        self.perched = on;
+        // na barra, ninguém está com o mouse em cima dele
+        self.pointer = None;
+        self.gaze = None;
+    }
+
+    fn draw_perch(&self, c: &mut Canvas, env: &Env) {
+        self.draw_perch_window(c, show_names(env.cfg));
+    }
+
+    fn perch_key(&self, env: &Env) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", clawd::cells(&self.perch_pose())).hash(&mut h);
+        self.balloon(show_names(env.cfg)).map(|b| b.0).hash(&mut h);
+        h.finish()
+    }
+
+    fn morphs(&self, from: Mode, to: Mode) -> bool {
+        // sem números, cada tamanho tem um texto diferente: fica a troca de sempre
+        from != to && self.has_data()
+    }
+
+    fn draw_between(&self, c: &mut Canvas, from: Mode, to: Mode, p: f32, _env: &Env) {
+        self.draw_morph(c, from, to, p);
+    }
+
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
         if self.on_crab(x, y, mode) {
             return Some(POKE_CRAB);
@@ -934,15 +1347,15 @@ impl Kind for Claude {
                 self.reload(true);
             }
             OPEN_USAGE => ctx.open(USAGE_URL),
-            // (já pulou ao apertar; só pula aqui se o clique veio de outro jeito)
-            POKE_CRAB if !self.crab.is_playing(Anim::Hop) => self.crab.play(Anim::Hop),
+            // (já pulou ao apertar) e vai para a barra de tarefas; lá, outro clique o traz
+            POKE_CRAB | PERCH_TOGGLE => ctx.out.push(Request::Perch(!self.perched)),
             _ => {}
         }
     }
 
     fn pressed(&mut self, action: u32) -> bool {
-        // clique no Clawd: pula na hora, ao apertar
-        if action == POKE_CRAB {
+        // clique no Clawd: agacha para o pulo na hora, ao apertar
+        if action == POKE_CRAB && !self.perched {
             self.crab.play(Anim::Hop);
             return true;
         }
@@ -951,6 +1364,8 @@ impl Kind for Claude {
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
         let mut items = vec![MenuItem::Cmd("Ver uso no claude.ai".into(), OPEN_USAGE)];
+        let perch = if self.perched { "Trazer o Clawd de volta" } else { "Mandar o Clawd para a barra de tarefas" };
+        items.push(MenuItem::Cmd(perch.into(), PERCH_TOGGLE));
         match self.view.link {
             Link::Connected => items.push(MenuItem::Cmd("Desconectar do Claude Code".into(), DISCONNECT)),
             Link::Off => items.push(MenuItem::Cmd("Conectar ao Claude Code".into(), CONNECT)),
@@ -1060,14 +1475,15 @@ mod tests {
         for (name, w) in [("com números", Claude::sample()), ("sem conectar", Claude::sample_unlinked())] {
             for mode in Mode::ALL {
                 let l = super::super::Layout::of(mode);
-                // no grande, os "z" (até 4 quadradinhos à direita da grade) não chegam ao título
-                if mode == Mode::G {
-                    let (_, _, unit) = w.crab_spot(mode);
-                    assert!((clawd::COLS + 4.0) * unit <= clawd::COLS * unit + 7.0, "os \"z\" encostam no título");
-                }
                 let (cx, cy, unit) = w.crab_spot(mode);
                 let (hw, hh) = (clawd::COLS * unit / 2.0, clawd::ROWS * unit / 2.0);
-                let (x0, y0, x1, y1) = (cx - hw, cy - hh - 3.0 * unit, cx + hw, cy + hh);
+                // no médio e no grande, o notebook de lado vai até a coluna 26 (à direita)
+                let right = if mode == Mode::P { hw } else { (clawd::SIDE_COLS - clawd::COLS / 2.0) * unit };
+                let (x0, y0, x1, y1) = (cx - hw, cy - hh - 3.0 * unit, cx + right, cy + hh);
+                // no grande, o que está escrito embaixo do nome não chega a ele
+                if mode == Mode::G {
+                    assert!(BRAND_X + SUBTITLE_W < x0 - 6.0, "o texto do título encosta no Clawd");
+                }
                 assert!(x0 >= 6.0 && y0 >= 6.0 && x1 <= l.w - 6.0 && y1 <= l.h - 6.0, "{name} {mode:?}: fora do cartão");
                 if mode == Mode::G || (mode == Mode::P && w.needs_connect()) {
                     continue; // no título do grande e sozinho no meio do pequeno
@@ -1079,15 +1495,14 @@ mod tests {
                     }
                     // nenhum canto do Clawd em cima do trilho do anel (fora do vão de baixo)
                     // (nem os "z", que vão até 4 quadradinhos à direita)
-                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0), (x1 + 4.0 * unit, y0)] {
+                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0), (cx + hw + 4.0 * unit, y0)] {
                         let d = (px - gx).hypot(py - g.cy);
                         let angle = (py - g.cy).atan2(px - gx).to_degrees().rem_euclid(360.0);
                         let in_gap = (45.0..=135.0).contains(&angle);
                         assert!(in_gap || d < g.r - g.w || d > g.r + g.w, "{name} {mode:?}: em cima do anel em ({px}, {py})");
                     }
                     // nem em cima do ícone que ficou (sol ou calendário)
-                    let icon_here = !(limit == Limit::Daily && w.crab_on_daily(mode));
-                    if icon_here {
+                    if w.shows_icon(limit, mode) {
                         let (ix, iy, ir) = (gx, g.cy + g.r * 0.86, g.w * 0.9 + 3.0);
                         assert!(x1 < ix - ir || x0 > ix + ir || y1 < iy - ir || y0 > iy + ir, "{name} {mode:?}: em cima do ícone");
                     }
@@ -1098,6 +1513,200 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn medium_has_a_bigger_crab_between_smaller_rings() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let w = Claude::sample();
+        let (cx, cy, unit) = w.crab_spot(Mode::M);
+        // do tamanho do pequeno: a 125%, 3 pixels por quadradinho (antes eram 2)
+        let px = |u: f32| (u * 1.25).round();
+        assert_eq!(px(unit), 3.0);
+        assert_eq!(px(unit), px(w.crab_spot(Mode::P).2), "do mesmo tamanho que no pequeno");
+        // no meio (o corpo um pouco à esquerda: com o notebook de lado, o desenho fica no meio)
+        assert!((cx + (clawd::SIDE_COLS / 2.0 - clawd::COLS / 2.0) * unit - WIDE / 2.0).abs() <= 2.0 * unit + 0.01, "fora do meio");
+        // no médio com números, nenhum anel tem ícone: o lugar é da nota de quando reinicia
+        assert!(!w.shows_icon(Limit::Daily, Mode::M) && !w.shows_icon(Limit::Weekly, Mode::M));
+        assert!(w.shows_icon(Limit::Weekly, Mode::G) && !w.shows_icon(Limit::Daily, Mode::P));
+        // o que ele faz fica embaixo dele (mesmo de patas esticadas), sem encostar nos anéis
+        let g = geom(Mode::M);
+        assert!(cy + (clawd::ROWS / 2.0 + 1.0) * unit < DOING_Y, "a palavra encosta no Clawd");
+        // na altura do alto da palavra, até onde vai o anel da esquerda (por fora)
+        let (outer, dy) = (g.r + g.w / 2.0, DOING_Y - g.cy);
+        let ring_right = g.gauges[0].1 + (outer * outer - dy * dy).max(0.0).sqrt();
+        let c = Canvas::new(10, 10, 1.0);
+        for word in ["escrevendo", "pensando", "teve uma ideia", "tomando café", "pronto", "cochilando", "perto do limite"] {
+            let half = c.text_width(word, TEXT, 10.5) / 2.0;
+            assert!(WIDE / 2.0 - half > ring_right + 4.0, "\"{word}\" encosta no anel");
+        }
+        // as notas: embaixo dos anéis e dentro do cartão
+        let ring_bottom = g.cy + g.r * 45f32.to_radians().sin() + g.w / 2.0;
+        assert!(NOTE_Y > ring_bottom + 8.0 && NOTE_Y + 14.0 <= SMALL - 6.0);
+        for &(_, gx) in g.gauges {
+            assert!(gx - NOTE_W / 2.0 >= 4.0 && gx + NOTE_W / 2.0 <= WIDE - 4.0);
+        }
+    }
+
+    #[test]
+    fn small_crab_works_on_the_laptop_on_his_lap() {
+        // trabalhando, o pequeno tem o notebook de frente, no colo; o médio e o grande, de lado,
+        // com a tela à mostra
+        let w = Claude::sample_busy().with_crab(Anim::Write, 0.3);
+        let small = w.crab_pose(Mode::P);
+        assert!(small.laptop.is_some_and(|l| l.open) && small.side.is_none() && small.notebook.is_none());
+        for mode in [Mode::M, Mode::G] {
+            let p = w.crab_pose(mode);
+            assert!(p.side.is_some_and(|s| s.open) && p.laptop.is_none() && p.notebook.is_none(), "{mode:?}");
+        }
+        // parado, sem notebook em nenhum tamanho
+        assert!(Mode::ALL.iter().all(|&m| {
+            let p = Claude::sample().crab_pose(m);
+            p.laptop.is_none() && p.side.is_none()
+        }));
+    }
+
+    /// O widget na tela de `w` × `h` pontos, a `p` da troca de `from` para `to` (`p` None: só
+    /// `to`, desenhado do jeito normal).
+    fn frame(w: &Claude, from: Mode, to: Mode, p: Option<f32>, size: (f32, f32)) -> crate::gfx::Image {
+        let s = 1.25;
+        let mut c = Canvas::new((size.0 * s).round() as u32, (size.1 * s).round() as u32, s);
+        let cfg = cfg();
+        let env = Env { cfg: &cfg, key: "claude" };
+        match p {
+            Some(p) => w.draw_between(&mut c, from, to, p, &env),
+            None => w.draw(&mut c, to, &env),
+        }
+        c.finish()
+    }
+
+    #[test]
+    fn changing_size_moves_everything_to_its_new_place() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let size = |m: Mode| {
+            let l = super::super::Layout::of(m);
+            (l.w, l.h)
+        };
+        for w in [Claude::sample(), Claude::sample_busy(), Claude::sample_limit()] {
+            for (from, to) in [(Mode::P, Mode::M), (Mode::M, Mode::G), (Mode::G, Mode::P), (Mode::M, Mode::P), (Mode::G, Mode::M), (Mode::P, Mode::G)] {
+                assert!(w.morphs(from, to));
+                // no fim, igual ao tamanho novo desenhado do jeito normal: não pula ao terminar
+                let (end, real) = (frame(&w, from, to, Some(1.0), size(to)), frame(&w, from, to, None, size(to)));
+                let differ = end.px.chunks(4).zip(real.px.chunks(4)).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 24)).count();
+                assert!(differ as f32 / (end.w * end.h) as f32 <= 0.002, "{from:?} → {to:?}: o último quadro é outro ({differ} pixels)");
+                // no meio do caminho, num cartão de tamanho intermediário, sempre desenha algo
+                for k in 0..=10 {
+                    let p = k as f32 / 10.0;
+                    let (a, b) = (size(from), size(to));
+                    let img = frame(&w, from, to, Some(p), (a.0 + (b.0 - a.0) * p, a.1 + (b.1 - a.1) * p));
+                    let ink = img.px.chunks(4).filter(|px| px[3] > 8).count();
+                    assert!(ink as f32 / (img.w * img.h) as f32 > 0.01, "{from:?} → {to:?} em {p}: em branco");
+                }
+                // o Clawd agacha onde estava, sobe num arco acima dos dois lugares e pousa no novo
+                let ((ax, ay, au), (bx, by, bu)) = (w.crab_spot(from), w.crab_spot(to));
+                let (x, y, u, pose) = w.crab_between(from, to, 0.05);
+                assert!((x, y, u) == (ax, ay, au) && pose == clawd::jump_pose(true));
+                let (x, y, _, pose) = w.crab_between(from, to, (JUMP.0 + JUMP.1) / 2.0);
+                assert!(y < (ay + by) / 2.0 - JUMP_H * 0.9 && pose == clawd::jump_pose(false), "{from:?} → {to:?}: não pula");
+                assert!((x - (ax + bx) / 2.0).abs() < 1.0, "{from:?} → {to:?}: não vai em linha");
+                let (x, y, u, _) = w.crab_between(from, to, 0.85);
+                assert_eq!((x, y, u), (bx, by, bu));
+                assert_eq!(w.crab_between(from, to, 1.0).3, w.crab_pose(to), "não volta ao que fazia");
+                // a altura do pulo, mesmo saindo do título do grande, não passa muito do cartão
+                assert!(ay.min(by) - JUMP_H >= -10.0);
+            }
+        }
+        // sem números, cada tamanho tem um texto: fica a troca de sempre
+        assert!(!Claude::sample_unlinked().morphs(Mode::P, Mode::M));
+    }
+
+    /// Folha com os quadros da troca de tamanho (pequeno → médio → grande → pequeno), com o
+    /// Clawd trabalhando (%TEMP%\claude_troca.png):
+    ///   cargo test --release claude_resize_sheet -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn claude_resize_sheet() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let w = Claude::sample_busy().with_crab(Anim::Write, 0.4);
+        let steps = 9;
+        let (cell_w, cell_h, s) = (340.0, 470.0, 1.25);
+        let pairs = [(Mode::P, Mode::M), (Mode::M, Mode::G), (Mode::G, Mode::P)];
+        let perch_h = PERCH_H + 20.0;
+        let mut sheet = Canvas::new((cell_w * steps as f32 * s) as u32, ((cell_h * pairs.len() as f32 + 2.0 * perch_h) * s) as u32, s);
+        sheet.fill_round_rect(0.0, 0.0, cell_w * steps as f32, cell_h * pairs.len() as f32 + 2.0 * perch_h, 0.0, Rgba::rgb(60, 50, 110));
+        // embaixo: a janela da barra de tarefas em vários momentos (com a barra embaixo)
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        let mut editing = Claude::sample_busy().with_crab(Anim::Write, 0.5);
+        editing.activity.tool = Some(Tool { name: "Edit".into(), input: r"C:\dev\src\claude.rs".into() });
+        let mut running = Claude::sample_busy().with_crab(Anim::Tap, 0.3);
+        running.activity.tool = Some(Tool { name: "Bash".into(), input: "cargo test --release".into() });
+        let states = [
+            editing,
+            running,
+            Claude::sample_busy().with_crab(Anim::Think, 0.8),
+            Claude::sample_busy().with_crab(Anim::Coffee, 0.5),
+            Claude::sample_busy().with_crab(Anim::Coffee, 0.15),
+            Claude::sample().with_crab(Anim::Done, 0.1),
+            Claude::sample().with_crab(Anim::Done, 0.8),
+            Claude::sample(),
+            Claude::sample().idle_for(NAP_AFTER + 60.0).with_crab(Anim::Snooze, 0.3),
+        ];
+        let base = cell_h * pairs.len() as f32;
+        for (k, st) in states.iter().enumerate() {
+            let (x, y) = ((k % 5) as f32 * (PERCH_W + 30.0) + 10.0, base + (k / 5) as f32 * perch_h + 4.0);
+            sheet.fill_round_rect(x, y + PERCH_H, x + PERCH_W, y + PERCH_H + 14.0, 0.0, Rgba::rgb(28, 28, 34));
+            let mut pc = Canvas::new((PERCH_W * s) as u32, (PERCH_H * s) as u32, s);
+            Kind::draw_perch(st, &mut pc, &env);
+            sheet.image(&pc.finish(), x, y);
+        }
+        for (row, &(from, to)) in pairs.iter().enumerate() {
+            let (a, b) = (super::super::Layout::of(from), super::super::Layout::of(to));
+            for k in 0..steps {
+                let p = k as f32 / (steps - 1) as f32;
+                let e = crate::theme::ease_spring(p);
+                let (cw, ch) = (a.w + (b.w - a.w) * e, a.h + (b.h - a.h) * e);
+                let img = frame(&w, from, to, Some(p), (cw, ch));
+                let (x, y) = (k as f32 * cell_w + 10.0, row as f32 * cell_h + 10.0);
+                sheet.fill_round_rect(x, y, x + cw, y + ch, 22.0, Rgba(32, 22, 72, 200));
+                sheet.image(&img, x, y);
+            }
+        }
+        let path = std::env::temp_dir().join("claude_troca.png");
+        crate::gfx::save_png(&sheet.finish(), &path).unwrap();
+        println!("{}", path.display());
+    }
+
+    #[test]
+    fn new_parts_come_in_after_and_old_ones_leave_first() {
+        // o que é novo entra depois de começar e chega inteiro no fim; o que sai some no começo
+        assert_eq!(presence(false, true, 0.3, 0.45, 0.4, 0.3), 0.0);
+        assert_eq!(presence(false, true, 1.0, 0.45, 0.4, 0.3), 1.0);
+        assert_eq!(presence(true, false, 0.3, 0.45, 0.4, 0.3), 0.0);
+        assert!(presence(true, false, 0.1, 0.45, 0.4, 0.3) > 0.5);
+        assert_eq!(presence(true, true, 0.5, 0.45, 0.4, 0.3), 1.0);
+        // o semanal nasce do zero, passa um pouco do tamanho e acaba no tamanho certo
+        assert_eq!(ease_back(0.0), 0.0);
+        assert!((ease_back(1.0) - 1.0).abs() < 1e-6);
+        assert!((0..100).any(|k| ease_back(k as f32 / 100.0) > 1.02), "não passa do ponto");
+    }
+
+    #[test]
+    fn says_what_the_crab_is_doing() {
+        assert_eq!(Claude::sample().doing(), "", "parado: nada a dizer");
+        assert_eq!(Claude::sample_busy().doing(), "programando");
+        assert_eq!(Claude::sample_busy().with_crab(Anim::Think, 0.5).doing(), "pensando");
+        assert_eq!(Claude::sample_busy().with_crab(Anim::Idea, 0.5).doing(), "teve uma ideia");
+        assert_eq!(Claude::sample_busy().with_crab(Anim::Coffee, 0.5).doing(), "tomando café");
+        assert_eq!(Claude::sample().with_crab(Anim::Done, 0.5).doing(), "pronto");
+        assert_eq!(Claude::sample().idle_for(NAP_AFTER + 60.0).doing(), "cochilando");
+        assert_eq!(Claude::sample_limit().doing(), "perto do limite");
     }
 
     #[test]
@@ -1213,21 +1822,133 @@ mod tests {
     }
 
     #[test]
-    fn clicking_the_crab_makes_it_hop() {
+    fn clicking_the_crab_sends_it_to_the_taskbar_and_back() {
         let c = cfg();
         let env = Env { cfg: &c, key: "claude" };
+        let act = |w: &mut Claude, action: u32| {
+            let mut req = Vec::new();
+            let (mut c2, mut cache) = (cfg(), serde_json::json!({}));
+            Kind::act(w, action, &mut Ctx { cfg: &mut c2, cache: &mut cache, key: "claude", out: &mut req });
+            req
+        };
         for (name, sample) in [("com números", Claude::sample as fn() -> Claude), ("sem conectar", Claude::sample_unlinked)] {
             for mode in Mode::ALL {
                 let mut w = sample();
                 let (cx, cy, _) = w.crab_spot(mode);
-                // o clique nele vale mais que o do medidor embaixo
+                // o clique nele vale mais que o do medidor embaixo; ao apertar, agacha para o pulo
                 assert_eq!(Kind::hit(&w, cx, cy, mode, &env), Some(POKE_CRAB), "{name} {mode:?}");
-                let mut req = Vec::new();
-                let (mut c2, mut cache) = (cfg(), serde_json::json!({}));
-                Kind::act(&mut w, POKE_CRAB, &mut Ctx { cfg: &mut c2, cache: &mut cache, key: "claude", out: &mut req });
-                assert!(w.crab.animating(), "{name} {mode:?}: não pulou");
+                assert!(Kind::pressed(&mut w, POKE_CRAB) && w.crab.animating(), "{name} {mode:?}: não pulou");
+                // ao soltar, pede para ir para a barra
+                assert!(matches!(act(&mut w, POKE_CRAB)[..], [Request::Perch(true)]), "{name} {mode:?}");
+                // lá: o lugar dele fica vazio, mas clicável; o clique o traz de volta
+                Kind::set_perched(&mut w, true);
+                assert_eq!(Kind::hit(&w, cx, cy, mode, &env), Some(POKE_CRAB), "{name} {mode:?}: sem como trazer de volta");
+                assert!(!Kind::pressed(&mut w, POKE_CRAB));
+                assert!(matches!(act(&mut w, POKE_CRAB)[..], [Request::Perch(false)]), "{name} {mode:?}");
             }
         }
+        // pelo clique direito também
+        let mut w = Claude::sample();
+        assert!(Kind::menu(&w, &env).iter().any(|m| matches!(m, MenuItem::Cmd(t, PERCH_TOGGLE) if t.contains("barra de tarefas"))));
+        assert!(matches!(act(&mut w, PERCH_TOGGLE)[..], [Request::Perch(true)]));
+    }
+
+    #[test]
+    fn the_spot_stays_empty_while_the_crab_is_on_the_taskbar() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        for mode in Mode::ALL {
+            let l = super::super::Layout::of(mode);
+            let (cx, cy, unit) = Claude::sample_busy().crab_spot(mode);
+            // a área do Clawd, sem os textos em volta
+            let (x0, y0) = (((cx - 6.0 * unit) * 1.25) as u32, ((cy - 3.0 * unit) * 1.25) as u32);
+            let orange = |w: &Claude| {
+                let mut canvas = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
+                w.draw(&mut canvas, mode, &env);
+                let img = canvas.finish();
+                let mut n = 0;
+                for y in y0..y0 + (6.0 * unit * 1.25) as u32 {
+                    for x in x0..x0 + (12.0 * unit * 1.25) as u32 {
+                        let px = &img.px[((y * img.w + x) * 4) as usize..][..4];
+                        // (BGRA) o laranja do corpo
+                        n += (px[2] > 180 && px[1] > 90 && px[1] < 140 && px[0] < 110) as u32;
+                    }
+                }
+                n
+            };
+            let mut w = Claude::sample_busy();
+            assert!(orange(&w) > 20, "{mode:?}: o Clawd não aparece");
+            Kind::set_perched(&mut w, true);
+            assert_eq!(orange(&w), 0, "{mode:?}: o Clawd continua no widget");
+        }
+        // e o lugar diz onde ele está
+        let mut w = Claude::sample();
+        Kind::set_perched(&mut w, true);
+        assert_eq!(w.doing_here(), "na barra de tarefas");
+        assert!(w.subtitle(w.now()).ends_with("na barra de tarefas"));
+    }
+
+    #[test]
+    fn the_balloon_says_what_claude_code_is_doing() {
+        let tool = |name: &str, input: &str| Tool { name: name.into(), input: input.into() };
+        let says = |t: Tool, names: bool| tool_line(&t, names).0;
+        assert_eq!(says(tool("Edit", r"C:\dev\src\widgets\claude.rs"), true), "Editando claude.rs");
+        assert_eq!(says(tool("Write", "/home/eu/notas.md"), true), "Editando notas.md");
+        assert_eq!(says(tool("Read", "README.md"), true), "Lendo README.md");
+        assert_eq!(says(tool("Bash", "cargo test --release"), true), "Rodando cargo test");
+        assert_eq!(says(tool("Grep", "crab_spot"), true), "Procurando \"crab_spot\"");
+        assert_eq!(says(tool("WebFetch", "https://x"), true), "Pesquisando na web");
+        assert_eq!(says(tool("mcp__ai-memory__memory_query", ""), true), "Usando memory_query");
+        // sem nomes: só a ação (para compartilhar a tela)
+        assert_eq!(says(tool("Edit", "claude.rs"), false), "Editando um arquivo");
+        assert_eq!(says(tool("Bash", "rm -rf segredo"), false), "Rodando um comando");
+        assert_eq!(says(tool("Grep", "senha"), false), "Procurando no código");
+        // nomes compridos são cortados
+        assert!(says(tool("Read", &"x".repeat(80)), true).chars().count() < 40);
+        assert!(show_names(&serde_json::json!({})) && !show_names(&serde_json::json!({"claude": {"balao_nomes": false}})));
+        // o balão: pensando sem ferramenta, a ferramenta quando há, pronto no fim, nada parado
+        let mut w = Claude::sample_busy();
+        assert_eq!(w.balloon(true).unwrap().0, "Pensando…");
+        w.activity.tool = Some(tool("Edit", "clawd.rs"));
+        assert_eq!(w.balloon(true).unwrap().0, "Editando clawd.rs");
+        assert_eq!(w.with_crab(Anim::Coffee, 0.5).balloon(true).unwrap().0, "Hora do café");
+        assert_eq!(Claude::sample().with_crab(Anim::Done, 0.5).balloon(true).unwrap().0, "✓ Pronto");
+        assert!(Claude::sample().balloon(true).is_none());
+    }
+
+    #[test]
+    fn the_taskbar_window_has_the_crab_and_the_balloon() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        let draw = |w: &Claude| {
+            let mut canvas = Canvas::new((PERCH_W * 1.25) as u32, (PERCH_H * 1.25) as u32, 1.25);
+            Kind::draw_perch(w, &mut canvas, &env);
+            canvas.finish()
+        };
+        let ink = |img: &crate::gfx::Image, y0: f32, y1: f32| {
+            let rows = (y0 * 1.25) as u32..(y1 * 1.25) as u32;
+            rows.flat_map(|y| (0..img.w).map(move |x| (x, y))).filter(|&(x, y)| img.px[((y * img.w + x) * 4 + 3) as usize] > 8).count()
+        };
+        // trabalhando: o balão em cima e o Clawd com o notebook embaixo
+        let busy = draw(&Claude::sample_busy());
+        assert!(ink(&busy, 0.0, BALLOON_BOTTOM) > 500, "sem balão");
+        assert!(ink(&busy, BALLOON_BOTTOM + 8.0, PERCH_H) > 500, "sem o Clawd");
+        // parado, só o Clawd; o desenho muda de chave quando algo muda
+        let idle = Claude::sample();
+        assert_eq!(ink(&draw(&idle), 0.0, BALLOON_BOTTOM - 4.0), 0, "balão sem nada a dizer");
+        assert_ne!(Kind::perch_key(&idle, &env), Kind::perch_key(&Claude::sample_busy(), &env));
+        assert_eq!(Kind::perch_key(&idle, &env), Kind::perch_key(&idle, &env));
+        // tudo dentro da janela: o notebook chega perto da borda direita e as patas na de baixo
+        let (cx, cy) = PERCH_CRAB;
+        assert!(cx + (clawd::SIDE_COLS - 9.0) * PERCH_UNIT <= PERCH_W - 4.0);
+        assert!((cy + 5.0 * PERCH_UNIT - PERCH_H).abs() < 0.01);
+        assert!(cy - 8.0 * PERCH_UNIT > BALLOON_BOTTOM + 6.0, "o balão encosta no Clawd (ou na lâmpada)");
     }
 
     #[test]

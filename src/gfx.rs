@@ -602,6 +602,24 @@ impl Canvas {
         self.layers += 1;
     }
 
+    /// Daqui até `pop_clip`, tudo é desenhado com a opacidade `alpha` (0 a 1), como uma camada só.
+    pub fn push_opacity(&mut self, alpha: f32) {
+        unsafe {
+            let layer = self.rt.CreateLayer(None).expect("layer");
+            let params = D2D1_LAYER_PARAMETERS {
+                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
+                geometricMask: std::mem::ManuallyDrop::new(None),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: windows_numerics::Matrix3x2::identity(),
+                opacity: alpha.clamp(0.0, 1.0),
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+            };
+            self.rt.PushLayer(&params, &layer);
+        }
+        self.layers += 1;
+    }
+
     pub fn pop_clip(&mut self) {
         if self.layers > 0 {
             unsafe { self.rt.PopLayer() };

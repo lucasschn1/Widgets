@@ -220,6 +220,8 @@ pub enum Request {
     Ask(&'static str),
     /// o Tocando agora vira a ilha flutuante
     Island,
+    /// o bichinho do widget vai para a barra de tarefas (true) ou volta de lá (false)
+    Perch(bool),
 }
 
 /// O que a ilha flutuante mostra (vem do Tocando agora).
@@ -316,6 +318,27 @@ pub trait Kind {
     }
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);
+    /// O bichinho que pode sair do widget para a barra de tarefas (o Clawd): onde ele fica no
+    /// cartão neste tamanho (centro, em pontos). None: o widget não tem.
+    fn perch_from(&self, _mode: Mode) -> Option<(f32, f32)> {
+        None
+    }
+    /// Ele foi para a barra de tarefas (true) ou voltou para o widget.
+    fn set_perched(&mut self, _on: bool) {}
+    /// Desenha a janela dele na barra de tarefas (ver `claude::PERCH_W`).
+    fn draw_perch(&self, _c: &mut Canvas, _env: &Env) {}
+    /// Muda quando o desenho da barra de tarefas muda (só então ela é redesenhada).
+    fn perch_key(&self, _env: &Env) -> u64 {
+        0
+    }
+    /// Sabe desenhar a troca de tamanho de `from` para `to` quadro a quadro (`draw_between`)?
+    /// Senão, o cartão muda de tamanho trocando a imagem de um pela do outro aos poucos.
+    fn morphs(&self, _from: Mode, _to: Mode) -> bool {
+        false
+    }
+    /// Um quadro da troca de tamanho, a `p` (0 a 1, no tempo) do caminho de `from` para `to`,
+    /// numa tela do tamanho do cartão nesse momento.
+    fn draw_between(&self, _c: &mut Canvas, _from: Mode, _to: Mode, _p: f32, _env: &Env) {}
     /// Camada redesenhada a cada quadro por cima do cartão pronto (animações leves); (ox, oy) é
     /// onde fica o canto do cartão na tela de desenho.
     fn overlay(&self, _c: &mut Canvas, _mode: Mode, _ox: f32, _oy: f32) {}

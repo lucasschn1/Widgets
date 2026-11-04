@@ -402,6 +402,15 @@ impl App {
                     w.as_object_mut().unwrap().insert("capa_hd".into(), json!(!on));
                 });
             }
+            A::Toggle("claude_nomes") => {
+                let on = widgets::claude::show_names(&self.sh.cfg);
+                self.widget_or_cfg("claude", |w| {
+                    if !w.is_object() {
+                        *w = json!({});
+                    }
+                    w.as_object_mut().unwrap().insert("balao_nomes".into(), json!(!on));
+                });
+            }
             A::Toggle("welcome_startup") => {
                 if let PanelKind::Welcome(st) = &mut self.panels[i].kind {
                     st.startup = !st.startup;

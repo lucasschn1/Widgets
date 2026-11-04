@@ -38,6 +38,25 @@ const BULB_OFF: Rgba = Rgba::rgb(150, 150, 162);
 const MUG: Rgba = Rgba::rgb(236, 236, 240);
 const COFFEE: Rgba = Rgba::rgb(122, 74, 44);
 const CHECK: Rgba = Rgba::rgb(112, 214, 128);
+/// O notebook (no pequeno, no lugar do caderno): a tampa de alumínio com o símbolo laranja, o
+/// teclado (com a tecla apertada mais clara), a base e a luz da tela no rosto dele.
+const ALU: Rgba = Rgba::rgb(201, 204, 214);
+const ALU_DARK: Rgba = Rgba::rgb(139, 143, 156);
+const KEYS: Rgba = Rgba::rgb(93, 96, 110);
+const KEY_LIT: Rgba = Rgba::rgb(158, 162, 176);
+const LOGO: Rgba = Rgba::rgb(242, 140, 40);
+const SCREEN_LIGHT: Rgba = Rgba::rgb(235, 164, 138);
+/// O notebook de lado (médio, grande e na barra de tarefas): a moldura escura e a tela, com o
+/// código em cores.
+const BEZEL: Rgba = Rgba::rgb(42, 44, 54);
+const SCREEN: Rgba = Rgba::rgb(27, 35, 54);
+const CODE: [Rgba; 5] = [Rgba::rgb(242, 140, 40), Rgba::rgb(120, 196, 255), Rgba::rgb(112, 214, 128), Rgba::rgb(242, 132, 164), Rgba::rgb(255, 226, 92)];
+/// As linhas de código que aparecem na tela: (recuo, letras, cor).
+const LINES: [(i32, i32, usize); 10] = [(0, 4, 0), (1, 3, 1), (1, 4, 2), (2, 2, 3), (1, 3, 1), (0, 2, 4), (1, 4, 0), (2, 3, 2), (1, 2, 1), (0, 3, 3)];
+/// Quantas letras de código cada letra da página vira (a página inteira enche a tela).
+const CODE_PER_LETTER: i32 = 3;
+/// A largura do desenho com o notebook de lado, em quadradinhos (o Clawd e o notebook à direita).
+pub const SIDE_COLS: f32 = 26.0;
 
 /// Quantas vezes por segundo confere o quadro enquanto anima; só redesenha quando o desenho
 /// muda, então conferir mais vezes deixa os movimentos no tempo certo sem custar desenhos.
@@ -187,7 +206,48 @@ pub struct Pose {
     pub mug: Option<(bool, bool)>,
     /// o ✓ de quando o Claude Code termina
     pub check: bool,
+    /// o notebook no colo, de frente (a tampa virada para nós), no lugar do caderno
+    pub laptop: Option<Laptop>,
+    /// as garras fora do lugar de sempre (no teclado): o canto de cima de cada uma
+    pub claws: Option<[(i32, i32); 2]>,
+    /// o notebook de lado, no chão, à direita, com a tela à mostra
+    pub side: Option<Side>,
+    /// a garra esquerda atrás das costas (indo pegar ou guardar a caneca): só a ponta aparece
+    pub reach_back: bool,
+    /// a caneca na frente da boca (tomando café, com o notebook de lado)
+    pub mug_front: bool,
 }
+
+/// O notebook de lado.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Side {
+    /// a tampa aberta (fechada: deitado no chão)
+    pub open: bool,
+    pub screen: Screen,
+}
+
+/// O que aparece na tela do notebook de lado.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Screen {
+    /// o código, com tantas letras escritas (e o cursor no fim)
+    Code(i32),
+    /// o ✓ verde de quando o Claude Code termina
+    Done,
+}
+
+/// O notebook no colo.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Laptop {
+    /// aberto (a tampa em pé, a tela acesa no rosto dele) ou fechado, deitado
+    pub open: bool,
+    /// a tecla apertada agora (coluna), se ele está digitando
+    pub key: Option<i32>,
+}
+
+/// As garras paradas em cima do teclado (por dentro do corpo, para aparecerem em laranja contra
+/// o cinza do notebook) e a linha de uma delas apertando uma tecla.
+const ON_KEYS: [(i32, i32); 2] = [(4, 6), (12, 6)];
+const TAP_DOWN: i32 = 7;
 
 /// As palavras que ele escreve na página: (linha, primeira coluna, letras), em quadradinhos.
 const WORDS: [(i32, i32, i32); 4] = [(7, 6, 3), (7, 10, 2), (8, 6, 2), (8, 9, 3)];
@@ -328,6 +388,8 @@ const DOTS: [(i32, i32); 3] = [(16, 2), (18, 1), (20, 0)];
 /// A caneca no chão, à direita, e levantada até a altura da garra.
 const MUG_DOWN: (i32, i32) = (16, 7);
 const MUG_UP: (i32, i32) = (16, 3);
+/// Com o notebook de lado, a caneca vem na frente da boca, segura pela garra esquerda.
+const MUG_FRONT: (i32, i32) = (3, 3);
 
 /// Os "z" do cochilo: (desenho, canto de cima no começo, quando nasce e quando some, em `t`).
 /// Um de cada vez, em escadinha: o pequeno do lado da cabeça, depois o grande, mais acima e à
@@ -500,6 +562,140 @@ pub fn pose(mood: Mood, anim: Option<(Anim, f32)>, gaze: Option<(i32, i32)>) -> 
     p
 }
 
+/// O mesmo quadro com o notebook de frente, no colo, no lugar do caderno (no pequeno, em que o
+/// caderno ficaria pequeno demais): onde o lápis escreveria uma letra, uma garra bate numa
+/// tecla, uma de cada vez; com o lápis no ar, as duas ficam paradas no teclado. Os olhos ficam na
+/// tela (a não ser que estejam no mouse ou pensando); fechar o caderno vira fechar a tampa.
+pub fn on_laptop(mut p: Pose, gaze: Option<(i32, i32)>) -> Pose {
+    if p.closed {
+        p.closed = false;
+        p.laptop = Some(Laptop { open: false, key: None });
+        return p;
+    }
+    let Some(page) = p.notebook.take() else { return p };
+    let [mut left, mut right] = ON_KEYS;
+    let mut key = None;
+    if page.pen.is_some_and(|pen| pen.down) {
+        // cada letra nova troca de garra; a tecla acesa, ao lado dela, muda junto
+        let n = page.ink.count_ones() as i32;
+        if n % 2 == 0 {
+            left.1 = TAP_DOWN;
+            key = Some(6 + (n / 2) % 2);
+        } else {
+            right.1 = TAP_DOWN;
+            key = Some(10 + (n / 2) % 2);
+        }
+    }
+    // a folha e a bolinha não existem no notebook: os olhos ficam na tela
+    if gaze.is_none() && (matches!(p.eyes, Eyes::Look(_, 1)) || page.ball.is_some()) {
+        p.eyes = Eyes::Open;
+    }
+    // garras levantadas (acenando, com uma ideia) e a caneca na boca saem do teclado
+    if p.left_up {
+        left = (1, 2);
+    }
+    if p.right_up {
+        right = (15, 2);
+    }
+    if p.mug.is_some_and(|(up, _)| up) {
+        right = (15, 4);
+    }
+    p.claws = Some([left, right]);
+    p.laptop = Some(Laptop { open: true, key });
+    p
+}
+
+/// O mesmo quadro com o notebook de lado, no chão à direita, com a tela à mostra (no médio, no
+/// grande e na barra de tarefas): onde o lápis escreveria, o código aparece na tela, letra a
+/// letra, e a garra direita bate no teclado; a folha virando é a tela cheia de código. O café
+/// não fica à mostra: a garra vai atrás das costas, volta com a caneca na frente da boca e a
+/// guarda de novo. Quando o Claude Code termina, o ✓ aparece na tela e depois a tampa fecha.
+pub fn on_side_laptop(mut p: Pose, gaze: Option<(i32, i32)>) -> Pose {
+    let look_at_screen = |p: &mut Pose| {
+        if gaze.is_none() {
+            p.eyes = Eyes::Look(1, 0);
+        }
+    };
+    if p.closed {
+        // terminou: o ✓ na tela, com as garras para cima
+        p.closed = false;
+        p.side = Some(Side { open: true, screen: Screen::Done });
+        p.left_up = true;
+        p.right_up = true;
+        look_at_screen(&mut p);
+        return p;
+    }
+    if p.legs == Legs::Stretch || p.check {
+        // e, já se espreguiçando, a tampa fechada no chão
+        p.side = Some(Side { open: false, screen: Screen::Code(0) });
+        return p;
+    }
+    let Some(page) = p.notebook.take() else { return p };
+    let full = LINES.iter().map(|l| l.1).sum::<i32>();
+    let n = page.ink.count_ones() as i32;
+    let screen = match page.pen {
+        Some(_) => Screen::Code((n * CODE_PER_LETTER).min(full)),
+        // a página virando ou amassada: a tela cheia
+        None => Screen::Code(full),
+    };
+    // a garra direita no teclado: batendo a cada letra, parada entre as palavras
+    let typing = page.pen.is_some_and(|pen| pen.down);
+    let right = if p.right_up {
+        (15, 2)
+    } else if typing {
+        (15, 5 + (n % 2 == 0) as i32)
+    } else {
+        (15, 5)
+    };
+    let left = if p.left_up { (1, 2) } else { (1, 4) };
+    // o café: a caneca vem de trás das costas
+    match p.mug {
+        Some((true, _)) => p.mug_front = true,
+        Some((false, _)) => {
+            p.mug = None;
+            p.reach_back = true;
+        }
+        None => {}
+    }
+    p.claws = Some([left, right]);
+    if gaze.is_none() && (matches!(p.eyes, Eyes::Look(_, 1)) || page.ball.is_some()) {
+        p.eyes = Eyes::Look(1, 0);
+    }
+    p.side = Some(Side { open: true, screen });
+    p
+}
+
+/// As letras de código na tela, linha a linha: (coluna, linha, letras, cor), as últimas 5
+/// linhas (as de cima sobem quando a tela enche), e onde fica o cursor.
+fn code_cells(chars: i32) -> (Vec<(i32, i32, i32, Rgba)>, (i32, i32)) {
+    let mut shown = Vec::new();
+    let mut left = chars;
+    for &(indent, len, color) in &LINES {
+        if left <= 0 {
+            break;
+        }
+        shown.push((indent, len.min(left), CODE[color]));
+        left -= len;
+    }
+    let skip = shown.len().saturating_sub(5);
+    let view: Vec<_> = shown[skip..].iter().enumerate().map(|(i, &(ind, n, c))| (19 + ind, 2 + i as i32, n, c)).collect();
+    let cursor = match view.last() {
+        Some(&(x, y, n, _)) => ((x + n).min(24), y),
+        None => (19, 2),
+    };
+    (view, cursor)
+}
+
+/// O Clawd pulando de um lugar para outro (quando o widget muda de tamanho): agachado antes de
+/// subir e ao pousar, de olhos fechados; no ar, com as patas encolhidas e as garras para cima.
+pub fn jump_pose(crouch: bool) -> Pose {
+    if crouch {
+        Pose { dy: 1, legs: Legs::Tucked, eyes: Eyes::Closed, limp: true, ..Pose::default() }
+    } else {
+        Pose { legs: Legs::Tucked, eyes: Eyes::Look(0, -1), left_up: true, right_up: true, ..Pose::default() }
+    }
+}
+
 /// Um retângulo do desenho, em quadradinhos: (x, y, largura, altura, cor).
 pub type Cell = (i32, i32, i32, i32, Rgba);
 
@@ -527,13 +723,23 @@ fn glyph(put: &mut impl FnMut(i32, i32, i32, i32, Rgba), rows: &[&str], gx: i32,
 pub fn cells(p: &Pose) -> Vec<Cell> {
     let mut v = Vec::new();
     let mut put = |x: i32, y: i32, w: i32, h: i32, c: Rgba| v.push((x + p.dx, y + p.dy, w, h, c));
+    // a garra atrás das costas: antes do corpo, só a ponta aparece em cima
+    if p.reach_back {
+        put(3, -1, 2, 2, BODY);
+    }
     // corpo
     put(3, 0, 12, 8, BODY);
+    // a luz da tela do notebook aberto no rosto
+    if p.laptop.is_some_and(|l| l.open) {
+        put(4, 3, 10, 1, SCREEN_LIGHT.alpha(0.6));
+    }
     // garras: dos lados do meio do corpo; levantadas, sobem até a altura dos olhos
-    // (dormindo, caídas um quadradinho)
-    let rest = if p.limp { 5 } else { 4 };
-    put(1, if p.left_up { 2 } else { rest }, 2, 2, BODY);
-    put(15, if p.right_up { 2 } else { rest }, 2, 2, BODY);
+    // (dormindo, caídas um quadradinho); no teclado, vão por cima do notebook, mais abaixo
+    if p.claws.is_none() {
+        let rest = if p.limp { 5 } else { 4 };
+        put(1, if p.left_up { 2 } else { rest }, 2, 2, BODY);
+        put(15, if p.right_up { 2 } else { rest }, 2, 2, BODY);
+    }
     // olhos: abertos, um quadradinho de largura e dois de altura; fechados, um tracinho deitado
     match p.eyes {
         Eyes::Closed => {
@@ -603,6 +809,50 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
         put(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2, COVER);
         put(x0 + 1, y1 - 1, x1 - x0 - 2, 1, PAGE);
     }
+    // o notebook no colo: aberto, a tampa em pé (vista por trás, com o símbolo), o teclado e a
+    // base; fechado, deitado
+    if let Some(Laptop { open, key }) = p.laptop {
+        if open {
+            put(4, 4, 10, 3, ALU);
+            put(8, 5, 2, 1, LOGO.alpha(0.85));
+            put(3, 7, 12, 1, KEYS);
+            if let Some(k) = key {
+                put(k, 7, 1, 1, KEY_LIT);
+            }
+        } else {
+            put(3, 7, 12, 1, ALU);
+        }
+        put(3, 8, 12, 1, ALU_DARK);
+    }
+    // o notebook de lado, no chão à direita: aberto, a moldura e a tela (com o código e o
+    // cursor, ou o ✓), o teclado e a base; fechado, deitado
+    if let Some(Side { open, screen }) = p.side {
+        if open {
+            put(18, 1, 8, 7, BEZEL);
+            put(19, 2, 6, 5, SCREEN);
+            match screen {
+                Screen::Code(chars) => {
+                    let (lines, (cx, cy)) = code_cells(chars);
+                    for (x, y, n, c) in lines {
+                        put(x, y, n, 1, c);
+                    }
+                    put(cx, cy, 1, 1, FG.alpha(0.85));
+                }
+                Screen::Done => glyph(&mut put, &CHECK_MARK, 19, 2, CHECK),
+            }
+            put(17, 8, 9, 1, KEYS);
+        } else {
+            put(17, 8, 9, 1, ALU);
+        }
+        put(17, 9, 9, 1, ALU_DARK);
+    }
+    if let Some([(lx, ly), (rx, ry)]) = p.claws {
+        // (a esquerda atrás das costas já foi desenhada, antes do corpo)
+        if !p.reach_back {
+            put(lx, ly, 2, 2, BODY);
+        }
+        put(rx, ry, 2, 2, BODY);
+    }
     // os pontinhos de quem está pensando
     for &(x, y) in DOTS.iter().take(p.dots as usize) {
         put(x, y, 1, 1, FG);
@@ -619,7 +869,7 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
     }
     // a caneca: café em cima, a caneca e a asa; e o vapor subindo
     if let Some((up, steam)) = p.mug {
-        let (mx, my) = if up { MUG_UP } else { MUG_DOWN };
+        let (mx, my) = if p.mug_front { MUG_FRONT } else if up { MUG_UP } else { MUG_DOWN };
         put(mx, my, 2, 1, COFFEE);
         put(mx, my + 1, 2, 2, MUG);
         put(mx + 2, my + 1, 1, 1, MUG);
@@ -741,6 +991,16 @@ impl Crab {
 
     pub fn pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
         pose(mood, self.current(), gaze)
+    }
+
+    /// O quadro com o notebook no colo, no lugar do caderno (o pequeno).
+    pub fn laptop_pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
+        on_laptop(self.pose(mood, gaze), gaze)
+    }
+
+    /// O quadro com o notebook de lado, com a tela à mostra (o médio, o grande e a barra).
+    pub fn side_pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
+        on_side_laptop(self.pose(mood, gaze), gaze)
     }
 
     /// Quando acordar: o próximo quadro, se está animando; senão, a próxima animação.
@@ -976,6 +1236,119 @@ mod tests {
     }
 
     #[test]
+    fn types_on_the_laptop_on_his_lap() {
+        let at = |anim, t| on_laptop(pose(Mood::Busy, Some((anim, t)), None), None);
+        // parado: o notebook aberto no colo, as garras no teclado, olhando a tela; sem o caderno
+        let still = on_laptop(pose(Mood::Busy, None, None), None);
+        assert_eq!(still.laptop, Some(Laptop { open: true, key: None }));
+        assert!(still.notebook.is_none() && still.claws == Some(ON_KEYS) && still.eyes == Eyes::Open);
+        // escrevendo uma página: uma garra de cada vez bate numa tecla, e elas se revezam
+        let mut sides = Vec::new();
+        for k in 0..=400 {
+            let p = at(Anim::Write, k as f32 / 400.0 * write_end(Anim::Write) * 0.999);
+            let [l, r] = p.claws.unwrap();
+            assert!(!(l.1 == TAP_DOWN && r.1 == TAP_DOWN), "as duas garras batem juntas");
+            if l.1 == TAP_DOWN || r.1 == TAP_DOWN {
+                let key = p.laptop.unwrap().key.expect("bate sem tecla acesa");
+                assert!((3..15).contains(&key));
+                let side = l.1 == TAP_DOWN;
+                if sides.last() != Some(&side) {
+                    sides.push(side);
+                }
+            }
+        }
+        assert!(sides.len() >= 8, "não reveza as garras: {sides:?}");
+        // a tampa fica embaixo dos olhos (ele enxerga a tela), e tudo dentro da grade, com as
+        // garras por cima do notebook
+        for anim in [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Wave, Anim::Blink, Anim::Look] {
+            for k in 0..=40 {
+                let p = at(anim, k as f32 / 40.0);
+                assert!(p.notebook.is_none() && p.laptop.is_some(), "{anim:?}: sem o notebook");
+                let cells = cells(&p);
+                assert!(cells.iter().filter(|c| c.4 == EYE).all(|c| c.1 + c.3 <= 4), "{anim:?}: a tampa cobre os olhos");
+                let lid = cells.iter().position(|c| c.4 == ALU).unwrap();
+                let claw = cells.iter().rposition(|c| c.4 == BODY).unwrap();
+                assert!(claw > lid, "{anim:?}: a garra fica atrás do notebook");
+                assert!(grid(&p).iter().all(|&(x, y)| (-2..COLS as i32 + 5).contains(&x) && (-3..ROWS as i32 + 1).contains(&y)), "{anim:?} sai da grade");
+            }
+        }
+        // com uma ideia, levanta as garras do teclado; com a caneca na boca, a da direita a segura
+        assert_eq!(at(Anim::Idea, 0.5).claws, Some([(1, 2), (15, 2)]));
+        assert_eq!(at(Anim::Coffee, 0.5).claws.unwrap()[1], (15, 4));
+        // pensando, continua olhando para cima, para os pontinhos
+        assert_eq!(at(Anim::Think, 0.5).eyes, Eyes::Look(1, -1));
+        // o mouse por perto: olha para ele, não para a tela
+        assert_eq!(on_laptop(pose(Mood::Busy, Some((Anim::Write, 0.3)), Some((1, 1))), Some((1, 1))).eyes, Eyes::Look(1, 1));
+        // terminou: fecha a tampa, depois se espreguiça sem o notebook
+        let done = |t| on_laptop(pose(Mood::Normal, Some((Anim::Done, t)), None), None);
+        assert_eq!(done(0.1).laptop, Some(Laptop { open: false, key: None }));
+        assert!(!done(0.1).closed, "fechou o caderno em vez da tampa");
+        assert!(done(0.35).laptop.is_none() && done(0.9).laptop.is_none());
+        // sem trabalho, nada muda
+        assert_eq!(on_laptop(pose(Mood::Normal, None, None), None), pose(Mood::Normal, None, None));
+    }
+
+    #[test]
+    fn programs_on_the_side_laptop_with_the_screen_showing() {
+        let at = |anim, t| on_side_laptop(pose(Mood::Busy, Some((anim, t)), None), None);
+        let code = |p: &Pose| match p.side.unwrap().screen {
+            Screen::Code(n) => n,
+            Screen::Done => -1,
+        };
+        // parado: a tela aberta, ainda vazia, olhando para ela
+        let still = on_side_laptop(pose(Mood::Busy, None, None), None);
+        assert!(still.side == Some(Side { open: true, screen: Screen::Code(0) }) && still.notebook.is_none());
+        assert_eq!(still.eyes, Eyes::Look(1, 0));
+        // escrevendo uma página: o código cresce letra a letra, a garra direita bate no teclado
+        let (mut before, mut taps, mut last_y) = (0, 0, 0);
+        for k in 0..=400 {
+            let p = at(Anim::Write, k as f32 / 400.0 * write_end(Anim::Write) * 0.999);
+            let n = code(&p);
+            assert!(n >= before && n - before <= CODE_PER_LETTER, "o código pula em {k}");
+            before = n;
+            let y = p.claws.unwrap()[1].1;
+            taps += (y != last_y) as i32;
+            last_y = y;
+        }
+        let full: i32 = LINES.iter().map(|l| l.1).sum();
+        assert!(before >= full - CODE_PER_LETTER && taps >= 8, "{before} {taps}");
+        // a tela mostra no máximo 5 linhas, dentro dela, com o cursor também dentro
+        for n in 0..=full {
+            let (lines, (cx, cy)) = code_cells(n);
+            assert!(lines.len() <= 5);
+            assert!(lines.iter().all(|&(x, y, w, _)| x >= 19 && x + w <= 25 && (2..7).contains(&y)), "{n}");
+            assert!((19..25).contains(&cx) && (2..7).contains(&cy), "cursor fora da tela em {n}");
+        }
+        // tudo dentro do espaço reservado (até a coluna 26), em todas as animações
+        for anim in [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Wave, Anim::Blink, Anim::Look] {
+            for k in 0..=40 {
+                let p = at(anim, k as f32 / 40.0);
+                assert!(grid(&p).iter().all(|&(x, y)| (-2..SIDE_COLS as i32).contains(&x) && (-3..ROWS as i32 + 1).contains(&y)), "{anim:?} sai da grade");
+            }
+        }
+        // o café não fica à mostra: a garra vai atrás das costas, a caneca vem à boca
+        assert!(at(Anim::Coffee, 0.1).reach_back && at(Anim::Coffee, 0.1).mug.is_none());
+        let sip = at(Anim::Coffee, 0.5);
+        assert!(sip.mug_front && !sip.reach_back && sip.eyes == Eyes::Closed);
+        assert!(at(Anim::Coffee, 0.99).mug.is_none() && !at(Anim::Coffee, 0.99).reach_back);
+        // terminou: o ✓ na tela, com as garras para cima; depois a tampa fecha no chão
+        let done = |t| on_side_laptop(pose(Mood::Normal, Some((Anim::Done, t)), None), None);
+        assert_eq!(done(0.1).side.unwrap().screen, Screen::Done);
+        assert!(done(0.1).left_up && done(0.1).right_up && !done(0.1).closed);
+        assert!(done(0.35).side.is_some_and(|s| !s.open) && done(0.9).side.is_some_and(|s| !s.open));
+        // sem trabalho, nada muda
+        assert_eq!(on_side_laptop(pose(Mood::Normal, None, None), None), pose(Mood::Normal, None, None));
+    }
+
+    #[test]
+    fn jumps_crouched_and_with_claws_up() {
+        let (crouch, air) = (jump_pose(true), jump_pose(false));
+        assert!(crouch.dy > 0 && crouch.eyes == Eyes::Closed);
+        assert!(air.left_up && air.right_up && air.legs == Legs::Tucked);
+        assert!(crouch.notebook.is_none() && crouch.laptop.is_none() && air.laptop.is_none(), "pula com o notebook");
+    }
+
+    #[test]
     fn crumples_the_page_and_throws_it_over_the_shoulder() {
         // a bolinha nasce na frente dele e cai do lado esquerdo, passando por cima
         let balls: Vec<(i32, i32)> = (0..=200).filter_map(|k| page_at(Anim::Crumple, k as f32 / 200.0).ball).collect();
@@ -1163,19 +1536,25 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let rows: Vec<(Mood, Option<Anim>)> = std::iter::once((Mood::Normal, None))
-            .chain([Anim::Blink, Anim::Look, Anim::Scuttle, Anim::Hop, Anim::Wave].map(|a| (Mood::Normal, Some(a))))
-            .chain([(Mood::Sleepy, None), (Mood::Sleepy, Some(Anim::Snooze)), (Mood::Busy, None)])
-            .chain([Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee].map(|a| (Mood::Busy, Some(a))))
-            .chain([(Mood::Normal, Some(Anim::Done)), (Mood::Worried, Some(Anim::Sweat)), (Mood::Worried, Some(Anim::Shake))])
+        // (o último bloco: o mesmo trabalho com o notebook no colo, como no pequeno)
+        let busy = [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee];
+        let rows: Vec<(Mood, Option<Anim>, bool)> = std::iter::once((Mood::Normal, None, false))
+            .chain([Anim::Blink, Anim::Look, Anim::Scuttle, Anim::Hop, Anim::Wave].map(|a| (Mood::Normal, Some(a), false)))
+            .chain([(Mood::Sleepy, None, false), (Mood::Sleepy, Some(Anim::Snooze), false), (Mood::Busy, None, false)])
+            .chain(busy.map(|a| (Mood::Busy, Some(a), false)))
+            .chain([(Mood::Normal, Some(Anim::Done), false), (Mood::Worried, Some(Anim::Sweat), false), (Mood::Worried, Some(Anim::Shake), false)])
+            .chain(std::iter::once((Mood::Busy, None, true)))
+            .chain(busy.map(|a| (Mood::Busy, Some(a), true)))
+            .chain(std::iter::once((Mood::Normal, Some(Anim::Done), true)))
             .collect();
         let (cell_w, cell_h, frames) = (110.0, 80.0, 16);
         let mut c = Canvas::new((cell_w * frames as f32) as u32, (cell_h * rows.len() as f32) as u32, 1.0);
         c.fill_round_rect(0.0, 0.0, c.w as f32, c.h as f32, 0.0, Rgba::rgb(60, 50, 90));
-        for (r, (mood, anim)) in rows.iter().enumerate() {
+        for (r, (mood, anim, laptop)) in rows.iter().enumerate() {
             for f in 0..frames {
                 let t = f as f32 / (frames - 1) as f32;
                 let p = pose(*mood, anim.map(|a| (a, t)), None);
+                let p = if *laptop { on_laptop(p, None) } else { p };
                 draw(&mut c, cell_w * (f as f32 + 0.5), cell_h * (r as f32 + 0.6), 4.0, &p);
             }
         }

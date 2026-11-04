@@ -766,7 +766,7 @@ fn claude_widget_images() {
     std::fs::create_dir_all(&out).unwrap();
     let cfg = empty_cfg();
     let gap = (WIDGET_GAP * S).round() as i32;
-    let cases = [("claude", Claude::sample as fn() -> Claude), ("claude_limite", Claude::sample_limit), ("claude_conectar", Claude::sample_unlinked), ("claude_lendo", Claude::sample_reading)];
+    let cases = [("claude", Claude::sample as fn() -> Claude), ("claude_limite", Claude::sample_limit), ("claude_conectar", Claude::sample_unlinked), ("claude_lendo", Claude::sample_reading), ("claude_trabalhando", Claude::sample_busy)];
     for (name, make) in cases {
         let (g, gr) = content(&make(), Mode::G, &cfg);
         let (m, mr) = content(&make(), Mode::M, &cfg);
