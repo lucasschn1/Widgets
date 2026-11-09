@@ -1,16 +1,24 @@
 //! O Clawd, o caranguejo do Claude Code, em pixel art, com animações curtas.
 //!
-//! O desenho é o do logo que o Claude Code mostra no terminal (blocos ▐▛███▜▌), passado para
-//! uma grade de 18 × 10 quadradinhos: o corpo, dois olhos, uma garra de cada lado e quatro
-//! patinhas. Cada quadradinho cai em pixels inteiros da tela, então ele fica nítido em qualquer
-//! escala, sem borrar.
+//! O desenho é o do logo que o Claude Code mostra no terminal, numa grade de 27 × 15
+//! quadradinhos, com volume: uma linha de luz em cima e à esquerda, sombra à direita e embaixo,
+//! brilho nos olhos, garras com pinça e patas de dois quadradinhos. Cada quadradinho tem 2/3 do
+//! `unit` de cada lugar (o tamanho dos quadradinhos da grade antiga, de 18 × 10), então ele ocupa
+//! o mesmo espaço de antes, e cai em pixels inteiros da tela: fica nítido em qualquer escala.
 //!
-//! As animações tocam em episódios de um ou dois segundos (piscar, olhar para os lados, andar de
-//! lado, pular, acenar as garras...), com intervalos parados entre eles: parado, o widget não
-//! redesenha nada. O humor muda o repertório: dormindo sem números, suando perto do limite e,
-//! enquanto o Claude Code trabalha, com um caderno: escreve (no ritmo do Claude Code), apaga,
-//! amassa a folha, pensa, tem ideias, batuca o lápis e, depois de um bom tempo, toma um café.
-//! Quando o Claude Code termina, ele fecha o caderno, se espreguiça e mostra um ✓.
+//! As animações tocam em episódios curtos, com intervalos parados entre eles: parado, o widget
+//! não redesenha nada. O humor muda o repertório:
+//! - parado: pisca, olha para os lados, anda de lado, acena, pula e, às vezes, põe o fone e fica
+//!   ouvindo música;
+//! - dormindo (sem números, ou muito tempo sem o Claude Code): sentado, de gorro, cochila com os
+//!   "z"; acorda devagar quando o Claude Code volta, ou num susto com o mouse;
+//! - trabalhando: no notebook (de frente, no colo, no pequeno; de lado, com o código na tela, no
+//!   médio, no grande e na barra de tarefas), digita, pensa, tem ideias e, depois de um bom tempo,
+//!   toma um café; de vez em quando, a tarefa inteira de Sherlock Holmes (chapéu de detetive,
+//!   lupa e, de lado, cachimbo); no fim, fecha o notebook, se espreguiça e mostra um ✓;
+//! - perto do limite: corado, suando e tremendo;
+//! - no limite: finca a plaquinha "VOLTO LOGO" do lado e fica lendo até o limite reiniciar;
+//!   aí recolhe a placa e comemora com confete.
 
 use std::time::{Duration, Instant};
 
@@ -18,398 +26,1472 @@ use crate::gfx::Canvas;
 use crate::theme::*;
 
 /// A grade do desenho, em quadradinhos.
-pub const COLS: f32 = 18.0;
-pub const ROWS: f32 = 10.0;
+pub const COLS: f32 = 27.0;
+pub const ROWS: f32 = 15.0;
+/// A largura do desenho com o notebook de lado, à direita (até a coluna 36).
+pub const SIDE_COLS: f32 = 37.0;
+/// O tamanho de um quadradinho, em `unit` (o quadradinho da grade antiga, de 18 × 10): a grade
+/// nova ocupa o mesmo espaço, 18 × 10 `unit`.
+pub const CELL: f32 = 2.0 / 3.0;
 
-/// A cor do Clawd no Claude Code e a dos olhos.
+// ---------- cores ----------
+/// o corpo: a cor do Clawd no Claude Code, a luz e a sombra
 const BODY: Rgba = Rgba::rgb(215, 119, 87);
+const LIGHT: Rgba = Rgba::rgb(235, 152, 116);
+const SHADE: Rgba = Rgba::rgb(182, 94, 64);
+/// os olhos (com o brilho), a boca e a língua
 const EYE: Rgba = Rgba::rgb(28, 20, 18);
-const SWEAT: Rgba = Rgba::rgb(120, 196, 255);
-/// O caderno: a folha, a capa (a faixa de cima), a escrita e o lápis (com a borracha na ponta).
-const PAGE: Rgba = Rgba::rgb(246, 241, 228);
-const COVER: Rgba = Rgba::rgb(92, 128, 214);
-const INK: Rgba = Rgba::rgb(66, 70, 92);
-const PENCIL: Rgba = Rgba::rgb(255, 206, 74);
-const GRAPHITE: Rgba = Rgba::rgb(40, 36, 40);
-const ERASER: Rgba = Rgba::rgb(242, 132, 164);
-/// A lâmpada da ideia (acesa e apagada), a caneca de café e o ✓ de quando termina.
-const BULB: Rgba = Rgba::rgb(255, 226, 92);
-const BULB_OFF: Rgba = Rgba::rgb(150, 150, 162);
-const MUG: Rgba = Rgba::rgb(236, 236, 240);
-const COFFEE: Rgba = Rgba::rgb(122, 74, 44);
-const CHECK: Rgba = Rgba::rgb(112, 214, 128);
-/// O notebook (no pequeno, no lugar do caderno): a tampa de alumínio com o símbolo laranja, o
-/// teclado (com a tecla apertada mais clara), a base e a luz da tela no rosto dele.
+const SHINE: Rgba = Rgba::rgb(255, 243, 234);
+const MOUTH: Rgba = Rgba::rgb(91, 29, 26);
+const TONGUE: Rgba = Rgba::rgb(226, 104, 122);
+/// o gorro de dormir
+const CAP: Rgba = Rgba::rgb(111, 141, 230);
+const CAP_LIGHT: Rgba = Rgba::rgb(169, 188, 245);
+const CAP_WHITE: Rgba = Rgba::rgb(243, 243, 250);
+/// os notebooks: o alumínio, o teclado, o símbolo laranja, a moldura e a tela, o código
 const ALU: Rgba = Rgba::rgb(201, 204, 214);
+const ALU_LIGHT: Rgba = Rgba::rgb(230, 232, 240);
 const ALU_DARK: Rgba = Rgba::rgb(139, 143, 156);
 const KEYS: Rgba = Rgba::rgb(93, 96, 110);
-const KEY_LIT: Rgba = Rgba::rgb(158, 162, 176);
+const KEY_LIT: Rgba = Rgba::rgb(212, 216, 232);
 const LOGO: Rgba = Rgba::rgb(242, 140, 40);
-const SCREEN_LIGHT: Rgba = Rgba::rgb(235, 164, 138);
-/// O notebook de lado (médio, grande e na barra de tarefas): a moldura escura e a tela, com o
-/// código em cores.
 const BEZEL: Rgba = Rgba::rgb(42, 44, 54);
 const SCREEN: Rgba = Rgba::rgb(27, 35, 54);
 const CODE: [Rgba; 5] = [Rgba::rgb(242, 140, 40), Rgba::rgb(120, 196, 255), Rgba::rgb(112, 214, 128), Rgba::rgb(242, 132, 164), Rgba::rgb(255, 226, 92)];
-/// As linhas de código que aparecem na tela: (recuo, letras, cor).
-const LINES: [(i32, i32, usize); 10] = [(0, 4, 0), (1, 3, 1), (1, 4, 2), (2, 2, 3), (1, 3, 1), (0, 2, 4), (1, 4, 0), (2, 3, 2), (1, 2, 1), (0, 3, 3)];
-/// Quantas letras de código cada letra da página vira (a página inteira enche a tela).
-const CODE_PER_LETTER: i32 = 3;
-/// A largura do desenho com o notebook de lado, em quadradinhos (o Clawd e o notebook à direita).
-pub const SIDE_COLS: f32 = 26.0;
+/// o ✓, a lâmpada, o suor, o coração, o "!"
+const CHECK: Rgba = Rgba::rgb(112, 214, 128);
+const BULB: Rgba = Rgba::rgb(255, 226, 92);
+const BULB_OFF: Rgba = Rgba::rgb(154, 154, 168);
+const SWEAT: Rgba = Rgba::rgb(134, 203, 255);
+const HEART: Rgba = Rgba::rgb(255, 111, 145);
+const BANG: Rgba = Rgba::rgb(255, 226, 92);
+/// a plaquinha "VOLTO LOGO"
+const WOOD: Rgba = Rgba::rgb(217, 160, 102);
+const WOOD_DARK: Rgba = Rgba::rgb(154, 100, 52);
+const SIGN_TEXT: Rgba = Rgba::rgb(58, 36, 22);
+/// o livro: as páginas, a capa, a lombada e o título dourado
+const PAGE: Rgba = Rgba::rgb(246, 241, 228);
+const COVER: Rgba = Rgba::rgb(92, 128, 214);
+const COVER_DARK: Rgba = Rgba::rgb(62, 90, 168);
+const GOLD: Rgba = Rgba::rgb(255, 209, 102);
+/// o chapéu de detetive
+const HAT: Rgba = Rgba::rgb(110, 93, 82);
+const HAT_TWEED: Rgba = Rgba::rgb(127, 108, 95);
+const HAT_LIGHT: Rgba = Rgba::rgb(147, 128, 111);
+const HAT_SEAM: Rgba = Rgba::rgb(76, 63, 55);
+const HAT_BAND: Rgba = Rgba::rgb(58, 47, 41);
+const HAT_FLAP: Rgba = Rgba::rgb(133, 114, 99);
+const HAT_PEAK: Rgba = Rgba::rgb(100, 83, 71);
+const HAT_LINE: Rgba = Rgba::rgb(35, 28, 25);
+/// a lupa: o aro, o vidro, o brilho e o cabo
+const LENS: Rgba = Rgba::rgb(43, 43, 51);
+const GLINT: Rgba = Rgba::rgb(255, 255, 255);
+const HANDLE: Rgba = Rgba::rgb(107, 78, 51);
+/// o cachimbo e a brasa
+const PIPE_WOOD: Rgba = Rgba::rgb(138, 78, 43);
+const PIPE_STEM: Rgba = Rgba::rgb(58, 36, 24);
+const PIPE_RIM: Rgba = Rgba::rgb(46, 26, 16);
+const EMBER: Rgba = Rgba::rgb(242, 140, 40);
+const SMOKE: Rgba = Rgba::rgb(217, 217, 227);
+/// a caneca: a borda, o café, a louça, a sombra e a asa; o vapor
+const CUP_RIM: Rgba = Rgba::rgb(255, 248, 236);
+const BREW: Rgba = Rgba::rgb(74, 42, 24);
+const CUP: Rgba = Rgba::rgb(245, 233, 211);
+const CUP_SHADE: Rgba = Rgba::rgb(214, 191, 152);
+const CUP_HANDLE: Rgba = Rgba::rgb(230, 211, 178);
+const STEAM: Rgba = Rgba::rgb(235, 203, 156);
+/// o fone: o contorno, o azul, o azul claro e a espuma do arco; as notas
+const PHONE_LINE: Rgba = Rgba::rgb(15, 35, 80);
+const PHONE: Rgba = Rgba::rgb(36, 81, 158);
+const PHONE_LIGHT: Rgba = Rgba::rgb(74, 130, 214);
+const PHONE_PAD: Rgba = Rgba::rgb(242, 242, 246);
+const NOTE: Rgba = Rgba::rgb(255, 209, 102);
+
+fn glow() -> Rgba {
+    Rgba::rgb(255, 196, 170).alpha(0.5)
+}
+fn blush(hot: bool) -> Rgba {
+    if hot { Rgba::rgb(255, 72, 72).alpha(0.62) } else { Rgba::rgb(255, 128, 138).alpha(0.6) }
+}
+fn glass() -> Rgba {
+    Rgba::rgb(222, 232, 246).alpha(0.82)
+}
+
+// ---------- desenhos em texto ----------
+const Z1: [&str; 4] = ["###", "..#", ".#.", "###"];
+const Z2: [&str; 5] = ["####", "...#", "..#.", ".#..", "####"];
+const Z3: [&str; 6] = ["#####", "....#", "...#.", "..#..", ".#...", "#####"];
+const BANG_MARK: [&str; 6] = ["##", "##", "##", "##", "..", "##"];
+const HEART_S: [&str; 3] = ["#.#", "###", ".#."];
+const HEART_L: [&str; 5] = [".#.#.", "#####", "#####", ".###.", "..#.."];
+const CHECK_MARK: [&str; 6] = ["......#", ".....##", "#...##.", "##.##..", ".###...", "..#...."];
+const BULB_GLASS: [&str; 4] = [".###.", "#####", "#####", ".###."];
+const BULB_BASE: [&str; 2] = [".###.", "..#.."];
+const LOGO_MARK: [&str; 5] = ["#.#.#", ".###.", "#####", ".###.", "#.#.#"];
+/// as letras da plaquinha (3 × 4)
+fn sign_letter(ch: char) -> [&'static str; 4] {
+    match ch {
+        'V' => ["#.#", "#.#", "#.#", ".#."],
+        'O' => ["###", "#.#", "#.#", "###"],
+        'L' => ["#..", "#..", "#..", "###"],
+        'T' => ["###", ".#.", ".#.", ".#."],
+        _ => ["###", "#..", "#.#", "###"], // G
+    }
+}
+/// o gorro de dormir (desenhado espelhado: a ponta e o pompom caem para a esquerda): b azul,
+/// l azul claro, w branco
+const CAP_ART: [&str; 6] = ["......bbbbb", "....bbbblbbbb", "...bbblbbbbbbbb", "..bbbbbblbbbb..bb", ".wwwwwwwwwwwww..ww", "................ww"];
+/// o chapéu de detetive (deerstalker), das colunas 2 a 24: o laço das abas amarrado em cima, a
+/// copa em gomos de tweed (costura no meio, luz à esquerda), a faixa, as abas de orelha
+/// dobradas para cima e a pala sobre a testa. o contorno, h tweed, t ponto do tweed, l luz,
+/// m costura, d faixa, F aba de orelha, b pala
+const HAT_ART: [&str; 9] = [
+    "........oo...oo........",
+    ".......ooohhhooo.......",
+    ".....oohlhtmhhlhoo.....",
+    "....ohlhthhmhthhlho....",
+    "...ohlhhhhtmhhhhthho...",
+    "..oFFhthhhhmhhthhhFFo..",
+    "..oFFdddddddddddddFFo..",
+    "...oo...obbbbbo...oo...",
+    ".......................",
+];
+/// a lupa: lente redonda (7 × 7, com brilho) e o cabo descendo para a esquerda
+const MAG_ART: [&str; 10] = ["....KKK..", "...KGGWK.", "..KGGGGWK", "..KGGGGGK", "..KGGGGGK", "...KGGGK.", "....KKK..", "...HH....", "..HH.....", ".HH......"];
+/// o cachimbo no canto da boca
+const PIPE_ART: [&str; 4] = ["oEo...", "PPPTTT", "PPP...", ".P...."];
+/// a caneca, com a asa à direita (para o gole, espelhada)
+const CUP_ART: [&str; 5] = ["RkkkR..", "MMMMMHH", "MMMMS.H", "MMMMSHH", ".SSS..."];
+const CUP_SIP: [&str; 5] = ["..RkkkR", "HHMMMMM", "H.SMMMM", "HHSMMMM", "...SSS."];
+/// o fone: o arco por cima da cabeça (colunas 1 a 25) e as conchas dos lados
+const PHONES_ART: [&str; 10] = [
+    ".......nnnnnnnnnnn.......",
+    ".....nnbbbbbbbbbbbnn.....",
+    "....nbbwwwwwwwwwwwbbn....",
+    "...nbn.............nbn...",
+    "..nbn...............nbn..",
+    ".nn...................nn.",
+    "nBbn.................nbBn",
+    "nBbn.................nbBn",
+    "nbbn.................nbbn",
+    ".nn...................nn.",
+];
+/// a colcheia e a nota pequena
+const NOTE8: [&str; 5] = [".##.", ".#.#", ".#..", "##..", "##.."];
+const NOTE1: [&str; 1] = ["#"];
+/// o livro aberto, visto por trás (ele lê olhando para baixo, os olhos espiando por cima)
+const READ_ART: [&str; 7] = [".PPPP.PPPP.", "CCCCCSCCCCC", "C.g.CSCCCCC", "CgggCSCCCCC", "C.g.CSCCCCC", "CCCCCSCCCCC", "DDDDDSDDDDD"];
+
+/// os "z": desenho, canto de cima, quando nasce e quando some (fração do ciclo)
+const ZS: [(&[&str], i32, i32, f32, f32); 3] = [(&Z1, 21, -1, 0.0, 0.45), (&Z2, 22, -4, 0.28, 0.72), (&Z3, 22, -8, 0.55, 0.98)];
+/// os pontinhos de quem pensa: (coluna, linha, tamanho)
+const DOTS: [(i32, i32, i32); 3] = [(23, 1, 1), (25, -1, 2), (28, -4, 2)];
+/// as linhas de código na tela do notebook de lado: (recuo, letras, cor)
+const LINES: [(i32, i32, usize); 10] = [(0, 4, 0), (1, 3, 1), (1, 5, 2), (2, 3, 3), (1, 4, 1), (0, 2, 4), (1, 5, 0), (2, 4, 2), (1, 3, 1), (0, 4, 3)];
+/// as letras de uma tela cheia
+pub const CODE_TOTAL: i32 = 37;
+/// as teclas que cada garra aperta no notebook de frente
+const KEYS_LEFT: [i32; 6] = [8, 10, 7, 12, 9, 11];
+const KEYS_RIGHT: [i32; 6] = [17, 15, 18, 14, 16, 19];
+/// a lupa investigando: perto do rosto (de frente) ou passando pelo código na tela (de lado),
+/// com a cor da linha aumentada dentro da lente
+const MAG_FRONT: [(i32, i32); 4] = [(20, -2), (19, -1), (20, -1), (19, -2)];
+const MAG_SIDE: [(i32, i32, usize); 6] = [(26, 2, 0), (27, 2, 1), (26, 3, 2), (27, 3, 3), (26, 4, 4), (27, 4, 0)];
 
 /// Quantas vezes por segundo confere o quadro enquanto anima; só redesenha quando o desenho
 /// muda, então conferir mais vezes deixa os movimentos no tempo certo sem custar desenhos.
 const FPS: u64 = 30;
-/// A parte do pulo em que ele agacha antes de subir.
-const CROUCH: f32 = 0.1;
-/// Segundos por página, sem saber o ritmo do Claude Code; e o mais rápido e o mais devagar.
+/// Segundos de digitação por vez, sem saber o ritmo do Claude Code; e o mais rápido e o mais
+/// devagar.
 pub const PACE: f32 = 4.2;
 const PACE_FAST: f32 = 2.4;
 const PACE_SLOW: f32 = 7.0;
+/// Teclas por segundo, digitando.
+const KEYS_PER_SEC: f32 = 6.0;
 /// Trabalhando há tanto tempo, ele pode parar para um café; e não toma outro antes de tanto.
 pub const COFFEE_AFTER: Duration = Duration::from_secs(20 * 60);
 const COFFEE_EVERY: Duration = Duration::from_secs(12 * 60);
+/// Uma tarefa em cada tantas é de Sherlock Holmes.
+const SHERLOCK_ONE_IN: u64 = 4;
 
 /// Como o Clawd está: muda as animações que ele faz.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mood {
     Normal,
     /// sem números para mostrar (não conectado ou esperando o Claude Code): dorme
     Sleepy,
-    /// o Claude Code está trabalhando agora: fica com o caderno
+    /// o Claude Code está trabalhando agora: fica no notebook
     Busy,
     /// o diário perto do limite: sua e treme
     Worried,
+    /// o diário chegou ao limite: a plaquinha "VOLTO LOGO" e um livro
+    Limit,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+/// De onde ele é visto trabalhando: o notebook de frente, no colo (o pequeno), ou de lado, no
+/// chão, com a tela à mostra (o médio, o grande e a barra de tarefas).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Front,
+    Side,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Anim {
     Blink,
     Look,
     Scuttle,
     Hop,
     Wave,
+    /// fecha os olhos sorrindo, fica corado e sobe um coração
+    Love,
+    /// põe o fone e fica curtindo, balançando no ritmo, com notinhas subindo
+    Music,
+    /// o limite reiniciou: dois pulinhos com confete
+    Party,
+    /// dormindo: respira, a boquinha abre e os "z" saem em fila
     Snooze,
+    /// o Claude Code voltou: acorda devagar (um olho, bocejo, espreguiçada, o gorro sai)
+    Wake,
+    /// o mouse chegou com ele dormindo: acorda num susto e pula
+    Startle,
     Sweat,
     Shake,
-    /// escreve uma página e vira
-    Write,
-    /// escreve, apaga a última palavra com a borracha e escreve de novo
-    Erase,
-    /// escreve, arranca a folha, amassa e joga longe
-    Crumple,
+    /// digita (de frente, as garras se revezando; de lado, o código aparece na tela)
+    Type,
     /// para, olha para cima e aparecem uns pontinhos
     Think,
-    /// acende uma lâmpada; a página seguinte sai mais rápido
+    /// acende uma lâmpada; a digitação seguinte sai mais rápida
     Idea,
-    /// batuca o lápis no caderno, esperando
-    Tap,
-    /// toma um gole de café
+    /// toma um café: caneca do lado, olhos ^ ^, um gole
     Coffee,
-    /// o Claude Code terminou: fecha o caderno, se espreguiça e mostra um ✓
+    /// de Sherlock: põe o chapéu de detetive no começo da tarefa
+    HatOn,
+    /// de Sherlock: no lugar de pensar, investiga com a lupa
+    Investigate,
+    /// o Claude Code terminou: fecha o notebook, se espreguiça e mostra um ✓
     Done,
+    /// chegou ao limite: leva um susto, anda de lado, finca a placa e abre o livro
+    SignUp,
+    /// o limite reiniciou: fecha o livro, recolhe a placa e volta para o meio
+    SignDown,
+    /// lendo: a página vira
+    Read,
+    /// ri de alguma parte do livro
+    Laugh,
+    /// cochila lendo e acorda
+    Nod,
 }
 
 #[cfg(test)]
-pub const ANIMS: [Anim; 16] = [
+pub const ANIMS: [Anim; 25] = [
     Anim::Blink,
     Anim::Look,
     Anim::Scuttle,
     Anim::Hop,
     Anim::Wave,
+    Anim::Love,
+    Anim::Music,
+    Anim::Party,
     Anim::Snooze,
+    Anim::Wake,
+    Anim::Startle,
     Anim::Sweat,
     Anim::Shake,
-    Anim::Write,
-    Anim::Erase,
-    Anim::Crumple,
+    Anim::Type,
     Anim::Think,
     Anim::Idea,
-    Anim::Tap,
     Anim::Coffee,
+    Anim::HatOn,
+    Anim::Investigate,
     Anim::Done,
+    Anim::SignUp,
+    Anim::SignDown,
+    Anim::Read,
+    Anim::Laugh,
+    Anim::Nod,
 ];
 
+/// Os trechos (em ms) das animações de várias partes.
+const MUSIC: [f32; 7] = [260.0, 300.0, 4800.0, 1600.0, 2800.0, 260.0, 700.0];
+const WAKE: [f32; 13] = [550.0, 380.0, 120.0, 380.0, 700.0, 700.0, 260.0, 120.0, 260.0, 120.0, 520.0, 520.0, 900.0];
+const STARTLE: [f32; 7] = [110.0, 420.0, 150.0, 500.0, 120.0, 900.0, 600.0];
+const DONE_FRONT: [f32; 3] = [800.0, 900.0, 1400.0];
+const DONE_SIDE: [f32; 3] = [1100.0, 900.0, 1100.0];
+const SIGN_UP: [f32; 7] = [500.0, 700.0, 90.0, 90.0, 90.0, 800.0, 300.0];
+const SIGN_DOWN: [f32; 6] = [600.0, 90.0, 90.0, 90.0, 700.0, 700.0];
+const NOD: [f32; 3] = [900.0, 1300.0, 450.0];
+/// a parte do pulo em que ele agacha antes de subir
+const CROUCH: f32 = 0.1;
+
+fn total(segs: &[f32]) -> f32 {
+    segs.iter().sum::<f32>() / 1000.0
+}
+
 impl Anim {
-    /// Duração, em segundos, escrevendo uma página a cada `pace` segundos.
-    fn secs(self, pace: f32) -> f32 {
+    /// Duração, em segundos, digitando `pace` segundos por vez.
+    pub fn secs(self, pace: f32) -> f32 {
         match self {
             Anim::Blink => 0.2,
             Anim::Look => 1.8,
-            Anim::Scuttle => 2.0,
+            Anim::Scuttle => 1.7,
             Anim::Hop => 0.9,
-            Anim::Wave => 1.4,
-            Anim::Snooze => 3.6,
+            Anim::Wave => 1.1,
+            Anim::Love => 2.2,
+            Anim::Music => total(&MUSIC),
+            Anim::Party => 3.2,
+            Anim::Snooze => 5.6,
+            Anim::Wake => total(&WAKE),
+            Anim::Startle => total(&STARTLE),
             Anim::Sweat => 1.6,
             Anim::Shake => 0.8,
-            // o mesmo tempo por letra nas três: só a quantidade de passos muda
-            Anim::Write => pace,
-            Anim::Erase => pace * 1.6,
-            Anim::Crumple => pace * 1.4,
-            Anim::Think => 2.6,
-            Anim::Idea => 1.8,
-            Anim::Tap => 1.6,
+            Anim::Type => pace,
+            Anim::Think => 1.5,
+            Anim::Idea => 1.5,
             Anim::Coffee => 3.4,
-            Anim::Done => 2.8,
+            Anim::HatOn => 0.3,
+            Anim::Investigate => 2.8,
+            // (de frente e de lado, os mesmos 3,1 s)
+            Anim::Done => total(&DONE_FRONT),
+            Anim::SignUp => total(&SIGN_UP),
+            Anim::SignDown => total(&SIGN_DOWN),
+            Anim::Read => 3.2,
+            Anim::Laugh => 1.1,
+            Anim::Nod => total(&NOD),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+/// Em que trecho de `segs` (durações em ms) está `ms`, e quanto dele já foi (0 a 1).
+fn seg(ms: f32, segs: &[f32]) -> (usize, f32) {
+    let mut acc = 0.0;
+    for (i, &d) in segs.iter().enumerate() {
+        if ms < acc + d || i == segs.len() - 1 {
+            return (i, ((ms - acc) / d).clamp(0.0, 1.0));
+        }
+        acc += d;
+    }
+    (0, 0.0)
+}
+
+// ---------- o quadro ----------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Eyes {
-    #[default]
-    Open,
-    Closed,
-    /// olhando para um lado: (-1, 0, 1) na horizontal e na vertical
-    Look(i32, i32),
+    /// abertos, olhando para um lado: (-1, 0, 1) na horizontal e na vertical
+    Open(i32, i32),
+    Blink,
+    /// dormindo: fechados em arco
+    Sleep,
+    /// felizes: ^ ^
+    Happy,
+    Half,
+    /// um aberto e o outro fechado
+    Peek,
+    /// apertados: > <
+    Squeeze,
+    Wide,
+    /// de detetive: o esquerdo bem aberto, o direito apertado
+    Sherlock(i32, i32),
+    /// fechados em traço, curtindo, com as bochechas coradas
+    Chill,
+}
+
+impl Default for Eyes {
+    fn default() -> Self {
+        Eyes::Open(0, 0)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Mouth {
+    Yawn,
+    O,
+    Tiny,
+    Smile,
+    Grin,
+    Wavy,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Legs {
     #[default]
     Stand,
-    /// andando: um par de patas levantado
+    /// sentado: as patas dobradas
+    Sit,
+    /// no ar, encolhidas
+    Tuck,
+    Half,
+    /// esticadas (se espreguiçando)
+    Stretch,
+    /// andando: um par levantado
     StepA,
     StepB,
-    /// no ar, encolhidas
-    Tucked,
-    /// esticadas (se espreguiçando, com o corpo um quadradinho mais alto)
-    Stretch,
+    /// batendo o pé
+    Tap,
+}
+
+impl Legs {
+    fn heights(self) -> [i32; 4] {
+        match self {
+            Legs::Stand => [3, 3, 3, 3],
+            Legs::Sit | Legs::Tuck => [1, 1, 1, 1],
+            Legs::Half => [2, 2, 2, 2],
+            Legs::Stretch => [4, 4, 4, 4],
+            Legs::StepA => [2, 3, 2, 3],
+            Legs::StepB => [3, 2, 3, 2],
+            Legs::Tap => [3, 3, 3, 2],
+        }
+    }
+}
+
+/// Onde e como fica cada garra (a da direita é o espelho da da esquerda).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Claw {
+    #[default]
+    Rest,
+    Up,
+    High,
+    /// caída no chão (dormindo)
+    Limp,
+    /// no teclado do notebook de frente, e apertando uma tecla
+    Key,
+    KeyDown,
+    /// no teclado do notebook de lado
+    SideKey,
+    SideKeyDown,
+    /// para baixo (pegando ou guardando a placa)
+    Down,
+    /// segurando a caneca do lado, e na frente da boca
+    CupSide,
+    CupFront,
+    /// segurando o livro
+    Book,
+    /// fora do desenho (a da lupa vai junto com ela)
+    Hidden,
+}
+
+impl Claw {
+    fn art(self) -> Option<(&'static [&'static str], i32, i32)> {
+        const REST: [&str; 3] = ["LBB", ".BB", "BBK"];
+        const UP: [&str; 3] = ["L.B", "BBB", "BKK"];
+        const FLAT: [&str; 2] = ["LBB", "BBK"];
+        Some(match self {
+            Claw::Rest => (&REST, 1, 6),
+            Claw::Up => (&UP, 1, 2),
+            Claw::High => (&UP, 1, 0),
+            Claw::Limp => (&[".BBB", "KKKK"], 0, 11),
+            Claw::Key => (&FLAT, 5, 11),
+            Claw::KeyDown => (&FLAT, 5, 12),
+            Claw::SideKey => (&["LBB", "KKK"], 1, 11),
+            Claw::SideKeyDown => (&["LBB", "KKK"], 1, 12),
+            Claw::Down => (&REST, 1, 9),
+            Claw::CupSide => (&FLAT, 3, 6),
+            Claw::CupFront => (&FLAT, 8, 6),
+            Claw::Book => (&FLAT, 6, 8),
+            Claw::Hidden => return None,
+        })
+    }
+}
+
+/// O notebook de frente, no colo.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Front {
+    /// aberto (a tampa em pé) ou fechado, deitado
+    pub open: bool,
+    /// a tecla apertada agora (coluna)
+    pub key: Option<i32>,
+}
+
+/// O notebook de lado, no chão à direita.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Side {
+    pub open: bool,
+    /// as letras de código na tela
+    pub code: i32,
+    /// o ✓ na tela (terminou)
+    pub done: bool,
+    pub key: Option<i32>,
+}
+
+/// A plaquinha: a altura (subindo do chão até 11), a coluna da esquerda e os pezinhos.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Sign {
+    pub h: i32,
+    pub x: i32,
 }
 
 /// Um quadro do Clawd.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Pose {
-    /// deslocamento, em quadradinhos (inteiros: o desenho não sai da grade)
+    /// deslocamento, em quadradinhos
     pub dx: i32,
     pub dy: i32,
+    /// o corpo um quadradinho mais alto (respirando)
+    pub breath: bool,
     pub eyes: Eyes,
+    pub mouth: Option<Mouth>,
     pub legs: Legs,
-    pub left_up: bool,
-    pub right_up: bool,
-    /// garras caídas, relaxadas (dormindo)
-    pub limp: bool,
-    /// gota de suor descendo (0 a 1)
-    pub sweat: Option<f32>,
-    /// "z" subindo (0 a 1)
+    pub claws: [Claw; 2],
+    /// a luz da tela no rosto
+    pub glow: bool,
+    /// bochechas coradas (vermelhas de verdade, perto do limite)
+    pub blush: Option<bool>,
+    pub front: Option<Front>,
+    pub side: Option<Side>,
+    pub sign: Option<Sign>,
+    /// o livro aberto: (quanto mais alto, a página virando: 0 parada, 1 a 3 passando)
+    pub book: Option<(i32, u8)>,
+    /// a caneca: (na boca, o vapor subindo)
+    pub cup: Option<(bool, Option<f32>)>,
+    /// o chapéu de detetive (e quanto acima da cabeça)
+    pub hat: Option<i32>,
+    /// a lupa: (coluna, linha, a cor da linha de código aumentada dentro dela)
+    pub mag: Option<(i32, i32, Option<usize>)>,
+    /// o cachimbo (com a fumaça subindo)
+    pub pipe: Option<Option<f32>>,
+    /// o fone (e quanto acima da cabeça) e as notas subindo
+    pub phones: Option<i32>,
+    pub notes: Option<f32>,
+    /// o gorro de dormir: (quanto acima, opacidade)
+    pub cap: Option<(i32, f32)>,
+    /// os "z" (0 a 1 do ciclo) e quanto mais à direita
     pub zzz: Option<f32>,
-    /// o caderno na frente dele, com a página como está
-    pub notebook: Option<Page>,
-    /// o caderno fechado
-    pub closed: bool,
-    /// pontinhos de quem está pensando (0 a 3)
-    pub dots: u8,
+    pub zzz_x: i32,
+    pub bang: bool,
+    pub sweat: Option<f32>,
+    pub heart: Option<f32>,
+    pub confetti: Option<f32>,
+    pub check: bool,
     /// a lâmpada da ideia: (acesa, com os raios)
     pub bulb: Option<(bool, bool)>,
-    /// a caneca de café: (levantada até a boca, o vapor de um lado ou do outro)
-    pub mug: Option<(bool, bool)>,
-    /// o ✓ de quando o Claude Code termina
-    pub check: bool,
-    /// o notebook no colo, de frente (a tampa virada para nós), no lugar do caderno
-    pub laptop: Option<Laptop>,
-    /// as garras fora do lugar de sempre (no teclado): o canto de cima de cada uma
-    pub claws: Option<[(i32, i32); 2]>,
-    /// o notebook de lado, no chão, à direita, com a tela à mostra
-    pub side: Option<Side>,
-    /// a garra esquerda atrás das costas (indo pegar ou guardar a caneca): só a ponta aparece
-    pub reach_back: bool,
-    /// a caneca na frente da boca (tomando café, com o notebook de lado)
-    pub mug_front: bool,
+    /// pontinhos de quem está pensando (0 a 3)
+    pub dots: u8,
 }
 
-/// O notebook de lado.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Side {
-    /// a tampa aberta (fechada: deitado no chão)
-    pub open: bool,
-    pub screen: Screen,
+/// De pé, olhando para a frente.
+fn stand() -> Pose {
+    Pose::default()
 }
 
-/// O que aparece na tela do notebook de lado.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Screen {
-    /// o código, com tantas letras escritas (e o cursor no fim)
-    Code(i32),
-    /// o ✓ verde de quando o Claude Code termina
-    Done,
-}
-
-/// O notebook no colo.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Laptop {
-    /// aberto (a tampa em pé, a tela acesa no rosto dele) ou fechado, deitado
-    pub open: bool,
-    /// a tecla apertada agora (coluna), se ele está digitando
-    pub key: Option<i32>,
-}
-
-/// As garras paradas em cima do teclado (por dentro do corpo, para aparecerem em laranja contra
-/// o cinza do notebook) e a linha de uma delas apertando uma tecla.
-const ON_KEYS: [(i32, i32); 2] = [(4, 6), (12, 6)];
-const TAP_DOWN: i32 = 7;
-
-/// As palavras que ele escreve na página: (linha, primeira coluna, letras), em quadradinhos.
-const WORDS: [(i32, i32, i32); 4] = [(7, 6, 3), (7, 10, 2), (8, 6, 2), (8, 9, 3)];
-/// A folha do caderno: colunas e linhas (o fim não entra).
-const PAGE_X: (i32, i32) = (5, 13);
-const PAGE_Y: (i32, i32) = (5, 10);
-
-/// O lápis: onde está a ponta (coluna, linha), se encosta na folha e se está virado (com a
-/// borracha para baixo).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Pen {
-    pub x: i32,
-    pub y: i32,
-    pub down: bool,
-    pub eraser: bool,
-}
-
-/// O lápis parado, no começo da página.
-const PEN_REST: Pen = Pen { x: WORDS[0].1, y: WORDS[0].0, down: false, eraser: false };
-
-/// Uma página do caderno.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Page {
-    /// as letras escritas: um bit por quadradinho das duas linhas
-    pub ink: u16,
-    /// o lápis (None: guardado, enquanto a folha vira ou é arrancada)
-    pub pen: Option<Pen>,
-    /// a folha subindo (virando ou sendo arrancada)
-    pub lifted: bool,
-    /// a bolinha de papel voando: (coluna, linha) do canto de cima
-    pub ball: Option<(i32, i32)>,
-}
-
-/// A página em branco, com o lápis parado.
-const PAGE_REST: Page = Page { ink: 0, pen: Some(PEN_REST), lifted: false, ball: None };
-
-/// O bit de uma letra da página.
-fn bit(x: i32, y: i32) -> u16 {
-    1 << ((y - WORDS[0].0) * 8 + (x - PAGE_X.0))
-}
-
-/// Um passo do lápis.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Step {
-    /// levanta e leva até aí
-    Move(i32, i32),
-    /// escreve uma letra
-    Ink(i32, i32),
-    /// apaga uma letra com a borracha
-    Rub(i32, i32),
-    /// vira o lápis (borracha para baixo, ou de volta)
-    Turn,
-}
-
-/// Os passos de uma página: escreve as palavras; apagando, depois apaga a última, da direita
-/// para a esquerda, e escreve de novo.
-fn script(anim: Anim) -> Vec<Step> {
-    let mut s = Vec::new();
-    let write = |s: &mut Vec<Step>, (y, x, n): (i32, i32, i32)| {
-        s.push(Step::Move(x, y));
-        s.extend((x..x + n).map(|x| Step::Ink(x, y)));
-    };
-    for w in WORDS {
-        write(&mut s, w);
+/// Dormindo, sentado: as garras caídas, de gorro; `ms` faz a respiração e os "z".
+fn asleep(ms: Option<f32>) -> Pose {
+    let mut p = Pose { dy: 2, legs: Legs::Sit, eyes: Eyes::Sleep, claws: [Claw::Limp; 2], cap: Some((0, 1.0)), ..stand() };
+    if let Some(ms) = ms {
+        let inhale = (ms / 1400.0) as i32 % 2 == 0;
+        p.breath = inhale;
+        p.mouth = (!inhale).then_some(Mouth::Tiny);
+        p.zzz = Some((ms / 3600.0).fract());
     }
-    if anim == Anim::Erase {
-        let (y, x, n) = WORDS[WORDS.len() - 1];
-        s.push(Step::Turn);
-        s.extend((x..x + n).rev().map(|x| Step::Rub(x, y)));
-        s.push(Step::Turn);
-        write(&mut s, (y, x, n));
-    }
-    s
+    p
 }
 
-/// Até onde (0 a 1) da animação ele escreve; depois vira a página (ou amassa).
-fn write_end(anim: Anim) -> f32 {
-    match anim {
-        Anim::Erase => 0.86,
-        Anim::Crumple => 0.6,
-        _ => 0.84,
+/// No notebook de frente: olhando a tela, a luz no rosto, as garras no teclado.
+fn front_base() -> Pose {
+    Pose { eyes: Eyes::Open(0, 1), glow: true, front: Some(Front { open: true, key: None }), claws: [Claw::Key; 2], ..stand() }
+}
+
+/// No notebook de lado: olhando a tela, a garra direita no teclado.
+fn side_base(code: i32) -> Pose {
+    Pose { eyes: Eyes::Open(1, 0), side: Some(Side { open: true, code, done: false, key: None }), claws: [Claw::Rest, Claw::SideKey], ..stand() }
+}
+
+fn work_base(view: View, code: i32) -> Pose {
+    match view {
+        View::Front => front_base(),
+        View::Side => side_base(code),
     }
 }
 
-/// A página em `t` (0 a 1) de uma animação de escrever (`Write`, `Erase` ou `Crumple`).
-pub fn page_at(anim: Anim, t: f32) -> Page {
-    let end = write_end(anim);
-    if t < end {
-        let steps = script(anim);
-        let k = ((t.max(0.0) / end * steps.len() as f32) as usize).min(steps.len() - 1);
-        let (mut ink, mut pen) = (0u16, PEN_REST);
-        for step in &steps[..=k] {
-            match *step {
-                Step::Move(x, y) => pen = Pen { x, y, down: false, ..pen },
-                Step::Ink(x, y) => {
-                    ink |= bit(x, y);
-                    pen = Pen { x, y, down: true, ..pen };
-                }
-                Step::Rub(x, y) => {
-                    ink &= !bit(x, y);
-                    pen = Pen { x, y, down: true, ..pen };
-                }
-                Step::Turn => pen = Pen { down: false, eraser: !pen.eraser, ..pen },
+/// Digitando: `n` teclas em `u` (0 a 1); de lado, o código vai de `a` a `b` letras.
+fn typing(view: View, u: f32, n: i32, a: i32, b: i32) -> Pose {
+    let k = (u * n as f32) as i32;
+    let down = (u * n as f32).fract() < 0.55;
+    match view {
+        View::Front => {
+            let left = k % 2 == 0;
+            let mut p = front_base();
+            let keys = if left { KEYS_LEFT } else { KEYS_RIGHT };
+            p.front = Some(Front { open: true, key: down.then_some(keys[((k >> 1) % 6) as usize]) });
+            p.claws = [if left && down { Claw::KeyDown } else { Claw::Key }, if !left && down { Claw::KeyDown } else { Claw::Key }];
+            p
+        }
+        View::Side => {
+            let mut p = side_base(a + ((b - a) as f32 * u).round() as i32);
+            if let Some(s) = &mut p.side {
+                s.key = down.then_some(25 + (k * 5) % 11);
+            }
+            p.claws[1] = if down { Claw::SideKeyDown } else { Claw::SideKey };
+            p
+        }
+    }
+}
+
+/// A ideia: a lâmpada aparece apagada, pisca e acende de vez; ele levanta as garras.
+fn idea(view: View, code: i32, u: f32) -> Pose {
+    let lit = (0.25..0.32).contains(&u) || u >= 0.42;
+    let up = (0.42..0.8).contains(&u);
+    let mut p = work_base(view, code);
+    p.eyes = if up { Eyes::Happy } else if lit { Eyes::Open(0, 0) } else { Eyes::Open(1, -1) };
+    if u > 0.08 {
+        p.bulb = Some((lit, lit && (u * 10.0) as i32 % 2 == 0));
+    }
+    if up {
+        p.claws = [Claw::Up; 2];
+    }
+    p
+}
+
+/// O café: pega a caneca e a segura do lado (olhos ^ ^), dá um gole e solta o "ahh".
+fn coffee(view: View, code: i32, u: f32, ms: f32) -> Pose {
+    let mut p = work_base(view, code);
+    let steam = Some((ms / 1500.0).fract());
+    match u {
+        u if u < 0.12 => {
+            p.eyes = Eyes::Open(-1, 0);
+            p.cup = Some((false, None));
+            p.claws[0] = Claw::CupSide;
+        }
+        u if u < 0.42 => {
+            p.eyes = Eyes::Happy;
+            p.cup = Some((false, steam));
+            p.claws[0] = Claw::CupSide;
+        }
+        u if u < 0.7 => {
+            p.eyes = Eyes::Happy;
+            p.blush = Some(false);
+            p.cup = Some((true, steam));
+            p.claws[0] = Claw::CupFront;
+        }
+        _ => {
+            p.eyes = Eyes::Happy;
+            p.mouth = Some(Mouth::Smile);
+            p.cup = Some((false, steam));
+            p.claws[0] = Claw::CupSide;
+        }
+    }
+    p
+}
+
+/// Investigando com a lupa: perto do rosto (de frente) ou passando pelo código na tela (de
+/// lado), com um olho apertado; no fim, uns pontinhos ("hmm...").
+fn investigate(view: View, u: f32) -> Pose {
+    let mut p = work_base(view, 20);
+    p.mag = Some(match view {
+        View::Front => {
+            let (x, y) = MAG_FRONT[((u * MAG_FRONT.len() as f32) as usize).min(MAG_FRONT.len() - 1)];
+            (x, y, None)
+        }
+        View::Side => {
+            let (x, y, c) = MAG_SIDE[((u * MAG_SIDE.len() as f32) as usize).min(MAG_SIDE.len() - 1)];
+            (x, y, Some(c))
+        }
+    });
+    p.eyes = Eyes::Sherlock(1, 0);
+    p.claws[1] = Claw::Hidden;
+    if u > 0.86 {
+        p.dots = (((u - 0.86) * 25.0) as u8).min(3);
+    }
+    p
+}
+
+/// Terminou: fecha o notebook (de lado, primeiro o ✓ na tela), se espreguiça e mostra o ✓.
+fn done(view: View, ms: f32) -> Pose {
+    let stretch = Pose { dy: -1, legs: Legs::Stretch, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::High; 2], ..stand() };
+    match view {
+        View::Front => {
+            let closed = Some(Front { open: false, key: None });
+            let (i, u) = seg(ms, &DONE_FRONT);
+            match i {
+                0 => Pose { eyes: Eyes::Open(0, 1), front: closed, ..stand() },
+                1 => Pose { front: closed, ..stretch },
+                _ => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), check: !(0.4..0.48).contains(&u), front: closed, ..stand() },
             }
         }
-        return Page { ink, pen: Some(pen), ..PAGE_REST };
-    }
-    let u = (t - end) / (1.0 - end);
-    let lifted = Page { ink: 0, pen: None, lifted: true, ball: None };
-    if anim != Anim::Crumple {
-        // vira a página e volta ao começo
-        return if u < 0.55 { lifted } else { PAGE_REST };
-    }
-    // arranca a folha, amassa numa bolinha e joga por cima do ombro, para a esquerda
-    match u {
-        u if u < 0.2 => lifted,
-        u if u < 0.35 => Page { ball: Some((9, 3)), ..lifted },
-        u if u < 0.9 => {
-            let s = (u - 0.35) / 0.55;
-            let x = 9 - (11.0 * s).round() as i32;
-            let y = 3 - (4.0 * (s * std::f32::consts::PI).sin()).round() as i32;
-            Page { ink: 0, pen: None, lifted: false, ball: Some((x, y)) }
+        View::Side => {
+            let closed = Some(Side { open: false, code: 0, done: false, key: None });
+            let (i, _) = seg(ms, &DONE_SIDE);
+            match i {
+                0 => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), claws: [Claw::Up; 2], side: Some(Side { open: true, code: CODE_TOTAL, done: true, key: None }), ..stand() },
+                1 => Pose { side: closed, ..stretch },
+                _ => Pose { mouth: Some(Mouth::Smile), side: closed, ..stand() },
+            }
         }
-        _ => PAGE_REST,
     }
 }
 
-/// Os "z" de quem dorme, em pixel art: um pequeno e um grande ("z Z").
-const Z_SMALL: [&str; 4] = ["###", "..#", ".#.", "###"];
-const Z_BIG: [&str; 5] = ["####", "...#", "..#.", ".#..", "####"];
-/// A lâmpada (o vidro e o pescoço; a base vai em cinza) e o ✓.
-const BULB_GLASS: [&str; 3] = ["###", "###", ".#."];
-const CHECK_MARK: [&str; 4] = ["....#", "...#.", "#.#..", ".#..."];
-/// Onde ficam: a lâmpada e o ✓ do lado da cabeça, no alto; os pontinhos subindo em escada.
-const BULB_AT: (i32, i32) = (16, -3);
-const CHECK_AT: (i32, i32) = (17, -2);
-const DOTS: [(i32, i32); 3] = [(16, 2), (18, 1), (20, 0)];
-/// A caneca no chão, à direita, e levantada até a altura da garra.
-const MUG_DOWN: (i32, i32) = (16, 7);
-const MUG_UP: (i32, i32) = (16, 3);
-/// Com o notebook de lado, a caneca vem na frente da boca, segura pela garra esquerda.
-const MUG_FRONT: (i32, i32) = (3, 3);
+/// No limite, ele fica de lado para a placa caber: no pequeno, 6 colunas para a esquerda; no
+/// médio e no grande (já mais à esquerda, por causa do notebook de lado), 4.
+fn limit_shift(view: View) -> i32 {
+    match view {
+        View::Front => -6,
+        View::Side => -4,
+    }
+}
 
-/// Os "z" do cochilo: (desenho, canto de cima no começo, quando nasce e quando some, em `t`).
-/// Um de cada vez, em escadinha: o pequeno do lado da cabeça, depois o grande, mais acima e à
-/// direita (sem passar por cima do título, no grande).
-const ZS: [(&[&str], (i32, i32), f32, f32); 2] = [(&Z_SMALL, (16, 0), 0.0, 0.48), (&Z_BIG, (18, -2), 0.5, 1.0)];
+/// O quadro `p` do limite: no lugar dele (`shift`: deslocado) e com a placa de altura `h`
+/// do lado (0: sem placa).
+fn at_limit(mut p: Pose, view: View, h: i32, shift: bool) -> Pose {
+    if shift {
+        p.dx += limit_shift(view);
+    }
+    if h > 0 {
+        p.sign = Some(Sign { h, x: if view == View::Front { 15 } else { 17 } });
+    }
+    p
+}
 
-/// Os "z" em `t` do cochilo: (desenho, coluna e linha do canto de cima, opacidade). Cada um
-/// aparece, sobe um quadradinho no meio da vida e some aos poucos, em degraus (pixel art; e o
-/// widget só redesenha quando algo muda).
-pub fn zs_at(t: f32) -> Vec<(&'static [&'static str], i32, i32, f32)> {
-    let mut out = Vec::new();
-    for &(glyph, (x, y), born, dies) in &ZS {
-        let age = (t - born) / (dies - born);
-        if !(0.0..1.0).contains(&age) {
-            continue;
+/// Lendo: o livro aberto seguro com as duas garras, os olhos espiando por cima.
+fn reading() -> Pose {
+    Pose { eyes: Eyes::Open(0, 1), book: Some((0, 0)), claws: [Claw::Book; 2], ..stand() }
+}
+
+/// A página virando, um pouco depois de `at` (0 a 1).
+fn page_flip(u: f32, at: f32) -> u8 {
+    if u > at && u < at + 0.12 { 1 + ((u - at) / 0.04) as u8 } else { 0 }
+}
+
+/// Andando de lado até o canto da placa (ou de volta, `back`).
+fn side_step(view: View, u: f32, back: bool) -> Pose {
+    let st = (u * 7.0) as i32;
+    let n = -limit_shift(view);
+    let off = n.min((st as f32 * n as f32 / 6.0).round() as i32);
+    Pose { legs: if st % 2 == 1 { Legs::StepA } else { Legs::StepB }, eyes: Eyes::Open(if back { 1 } else { -1 }, 0), dx: if back { -n + off } else { -off }, ..stand() }
+}
+
+/// O balanço da música: um tempo para cada lado.
+fn beat(ms: f32) -> bool {
+    (ms / 460.0) as i32 % 2 == 1
+}
+
+/// Como ele fica parado, em cada humor (sem animação).
+fn still(mood: Mood, scene: &Scene) -> Pose {
+    match mood {
+        Mood::Normal => stand(),
+        Mood::Sleepy => asleep(None),
+        Mood::Busy => work_base(scene.view, scene.code),
+        Mood::Worried => Pose { mouth: Some(Mouth::Wavy), blush: Some(true), sweat: Some(0.0), ..stand() },
+        Mood::Limit => at_limit(reading(), scene.view, 11, true),
+    }
+}
+
+/// O que está em volta dele agora: de onde é visto, se está de Sherlock e o código na tela.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Scene {
+    pub view: View,
+    /// com o chapéu de detetive (a tarefa de agora é de Sherlock)
+    pub hat: bool,
+    /// as letras de código na tela do notebook de lado
+    pub code: i32,
+}
+
+impl Scene {
+    #[cfg(test)]
+    pub fn new(view: View) -> Scene {
+        Scene { view, hat: false, code: 0 }
+    }
+}
+
+/// Uma animação tocando: qual, quanto já foi (0 a 1) e quanto dura (segundos).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Play {
+    pub anim: Anim,
+    pub t: f32,
+    pub secs: f32,
+}
+
+/// O quadro de agora: com o humor, a animação tocando (se houver), o que está em volta e, se o
+/// mouse está por perto, olhando para ele (`gaze`).
+pub fn pose(mood: Mood, play: Option<Play>, scene: &Scene, gaze: Option<(i32, i32)>) -> Pose {
+    let view = scene.view;
+    let base = still(mood, scene);
+    let mut p = match play {
+        None => base,
+        Some(Play { anim, t, secs }) => {
+            let t = t.clamp(0.0, 1.0);
+            frame(anim, t, secs, base, scene)
         }
-        let fade = (age / 0.15).min(1.0).min((1.0 - age) / 0.4);
-        let alpha = (fade * 4.0).ceil() / 4.0 * 0.95;
-        if alpha > 0.0 {
-            out.push((glyph, x, y - (age >= 0.5) as i32, alpha));
+    };
+    // a fantasia de Sherlock: o chapéu no trabalho todo e, de lado, o cachimbo (menos bocejando,
+    // falando ou tomando café)
+    // (pulando, acordando ou levando um susto, ele está sem o notebook: sem a fantasia)
+    let working = match play.map(|p| p.anim) {
+        None => mood == Mood::Busy,
+        Some(Anim::Done | Anim::HatOn) => true,
+        Some(Anim::Hop | Anim::Love | Anim::Wake | Anim::Startle) => false,
+        Some(_) => mood == Mood::Busy,
+    };
+    if scene.hat && working {
+        if p.hat.is_none() {
+            p.hat = Some(0);
+        }
+        if view == View::Side && p.mouth.is_none() && p.cup.is_none() {
+            let ms = play.map(|p| p.t * p.secs * 1000.0);
+            p.pipe = Some(ms.map(|ms| (ms / 2200.0).fract()));
+        }
+    }
+    // os olhos no mouse, se estão abertos
+    if let Some((gx, gy)) = gaze {
+        p.eyes = match p.eyes {
+            Eyes::Open(..) => Eyes::Open(gx, gy),
+            Eyes::Sherlock(..) => Eyes::Sherlock(gx, gy),
+            e => e,
+        };
+    }
+    p
+}
+
+/// O quadro de `anim` a `t` (0 a 1) dos `secs` que ela dura, partindo de `base` (o quadro
+/// parado).
+fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
+    let view = scene.view;
+    let ms = t * secs * 1000.0;
+    let open_eyes = |p: &mut Pose, e: Eyes| {
+        if matches!(p.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
+            p.eyes = e;
+        }
+    };
+    match anim {
+        Anim::Blink => {
+            let mut p = base;
+            open_eyes(&mut p, Eyes::Blink);
+            p
+        }
+        Anim::Look => {
+            let mut p = base;
+            let x = match t {
+                t if t < 0.4 => -1,
+                t if t < 0.5 => 0,
+                t if t < 0.9 => 1,
+                _ => 0,
+            };
+            let y = if let Eyes::Open(_, y) = p.eyes { y } else { 0 };
+            open_eyes(&mut p, Eyes::Open(x, y));
+            p
+        }
+        Anim::Scuttle => {
+            const PATH: [i32; 15] = [0, 1, 2, 3, 4, 4, 3, 2, 1, 0, -1, -2, -2, -1, 0];
+            let st = ((t * 15.0) as usize).min(14);
+            Pose { dx: PATH[st], legs: if st % 2 == 1 { Legs::StepA } else { Legs::StepB }, ..stand() }
+        }
+        Anim::Hop => {
+            if t < CROUCH {
+                // agacha antes de pular: já o primeiro quadro é outro (reage ao clique na hora)
+                Pose { dy: 1, legs: Legs::Tuck, ..stand() }
+            } else {
+                let h = ((t - CROUCH) / (1.0 - CROUCH) * 2.0).fract();
+                let dy = -((h * std::f32::consts::PI).sin() * 4.0).round() as i32;
+                let up = dy <= -3;
+                Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, claws: if up { [Claw::Up; 2] } else { [Claw::Rest; 2] }, ..stand() }
+            }
+        }
+        Anim::Wave => {
+            // acena com uma garra de cada vez, sorrindo (trabalhando, sem largar o notebook)
+            let mut p = base;
+            let k = (t * 6.0) as i32 % 2;
+            p.claws[k as usize] = Claw::Up;
+            open_eyes(&mut p, Eyes::Happy);
+            if p.mouth.is_none() {
+                p.mouth = Some(Mouth::Smile);
+            }
+            p
+        }
+        Anim::Love => Pose {
+            eyes: if t < 0.75 { Eyes::Happy } else { Eyes::Open(0, 0) },
+            blush: Some(false),
+            mouth: Some(Mouth::Smile),
+            heart: Some(t),
+            claws: if t < 0.5 { [Claw::Up; 2] } else { [Claw::Rest; 2] },
+            ..stand()
+        },
+        Anim::Music => {
+            let (i, _) = seg(ms, &MUSIC);
+            let notes = Some((ms / 2600.0).fract());
+            let b = beat(ms);
+            match i {
+                0 => Pose { eyes: Eyes::Open(0, -1), claws: [Claw::Up; 2], phones: Some(-3), ..stand() },
+                1 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(0), ..stand() },
+                2 | 4 => Pose { eyes: Eyes::Chill, phones: Some(0), notes, dx: b as i32, legs: if b { Legs::Tap } else { Legs::Stand }, ..stand() },
+                3 => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), phones: Some(0), notes, dx: b as i32, claws: if b { [Claw::Up, Claw::Rest] } else { [Claw::Rest, Claw::Up] }, ..stand() },
+                5 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-3), ..stand() },
+                _ => stand(),
+            }
+        }
+        Anim::Party => {
+            let h = ((t / 0.6) * 2.0).fract();
+            let dy = if t < 0.6 { -((h * std::f32::consts::PI).sin() * 4.0).round() as i32 } else { 0 };
+            Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, eyes: Eyes::Happy, mouth: Some(Mouth::Grin), claws: [Claw::Up; 2], confetti: Some(t), ..stand() }
+        }
+        Anim::Snooze => asleep(Some(ms)),
+        Anim::Wake => {
+            let (i, u) = seg(ms, &WAKE);
+            let sitting = |eyes| Pose { eyes, ..asleep(None) };
+            match i {
+                0 => sitting(Eyes::Peek),
+                1 | 3 => sitting(Eyes::Half),
+                2 => sitting(Eyes::Sleep),
+                4 => Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::Up; 2], cap: Some((0, 1.0)), ..stand() },
+                5 => Pose { dy: -1, legs: Legs::Stretch, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::High; 2], cap: Some((-(u.round() as i32), 1.0 - u * 0.6)), ..stand() },
+                6 => Pose { cap: Some((-1, 0.4 - u * 0.4)), ..stand() },
+                7 | 9 => Pose { eyes: Eyes::Blink, ..stand() },
+                10 => Pose { eyes: Eyes::Open(-1, 0), ..stand() },
+                11 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
+                12 => Pose { mouth: Some(Mouth::Smile), ..stand() },
+                _ => stand(),
+            }
+        }
+        Anim::Startle => {
+            let (i, u) = seg(ms, &STARTLE);
+            match i {
+                0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, cap: Some((-1, 1.0)), zzz: None, ..asleep(None) },
+                1 => {
+                    let dy = -((u * std::f32::consts::PI).sin() * 3.0).round() as i32;
+                    let cap = (u < 0.25).then_some((-1, 0.5 - u * 2.0));
+                    Pose { dy, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), claws: [Claw::Up; 2], bang: true, cap, ..stand() }
+                }
+                2 => Pose { dy: 2, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
+                3 => Pose { eyes: Eyes::Wide, bang: true, ..stand() },
+                4 => Pose { eyes: Eyes::Blink, ..stand() },
+                5 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
+                _ => Pose { eyes: Eyes::Open(1, 1), ..stand() },
+            }
+        }
+        Anim::Sweat => Pose { sweat: Some(t), ..still(Mood::Worried, scene) },
+        Anim::Shake => {
+            let dx = if (t * 16.0) as i32 % 2 == 0 { 1 } else { -1 };
+            Pose { dx, eyes: Eyes::Squeeze, sweat: Some(t), ..still(Mood::Worried, scene) }
+        }
+        Anim::Type => {
+            let n = (secs * KEYS_PER_SEC).round().max(4.0) as i32;
+            let chars = (n as f32 * 1.25) as i32;
+            let a = scene.code;
+            typing(view, t, n, a, (a + chars).min(CODE_TOTAL))
+        }
+        Anim::Think => {
+            let mut p = work_base(view, scene.code);
+            p.eyes = Eyes::Open(1, -1);
+            p.dots = ((t * 4.0) as u8).min(3);
+            p
+        }
+        Anim::Idea => idea(view, scene.code, t),
+        Anim::Coffee => coffee(view, scene.code, t, ms),
+        Anim::HatOn => {
+            let mut p = work_base(view, scene.code);
+            p.eyes = Eyes::Open(0, -1);
+            p.claws = if t < 0.6 { [Claw::High; 2] } else { [Claw::Up; 2] };
+            p.hat = Some(0);
+            p
+        }
+        Anim::Investigate => {
+            let mut p = investigate(view, t);
+            if view == View::Side {
+                if let Some(s) = &mut p.side {
+                    s.code = scene.code.max(20);
+                }
+            }
+            p
+        }
+        Anim::Done => done(view, ms),
+        Anim::SignUp => {
+            let (i, u) = seg(ms, &SIGN_UP);
+            match i {
+                0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
+                1 => side_step(view, u, false),
+                2..=4 => {
+                    let h = [3, 6, 9][i - 2];
+                    let claws = if i < 4 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
+                    at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, h, true)
+                }
+                5 => at_limit(Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() }, view, 11, true),
+                _ => at_limit(Pose { eyes: Eyes::Open(0, 0), book: Some((-2, 0)), claws: [Claw::Up; 2], ..stand() }, view, 11, true),
+            }
+        }
+        Anim::SignDown => {
+            let (i, u) = seg(ms, &SIGN_DOWN);
+            match i {
+                0 => at_limit(Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), ..stand() }, view, 11, true),
+                1..=3 => {
+                    let h = [9, 6, 3][i - 1];
+                    let claws = if i < 3 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
+                    at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, h, true)
+                }
+                4 => side_step(view, u, true),
+                _ => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() },
+            }
+        }
+        Anim::Read => {
+            let blink = (0.3..0.33).contains(&t);
+            let p = Pose { eyes: if blink { Eyes::Blink } else { Eyes::Open(0, 1) }, book: Some((0, page_flip(t, 0.62))), ..reading() };
+            at_limit(p, view, 11, true)
+        }
+        Anim::Laugh => {
+            let dy = if (ms / 170.0) as i32 % 2 == 1 { -1 } else { 0 };
+            at_limit(Pose { eyes: Eyes::Happy, blush: Some(false), dy, ..reading() }, view, 11, true)
+        }
+        Anim::Nod => {
+            let (i, u) = seg(ms, &NOD);
+            let p = match i {
+                0 => Pose { eyes: Eyes::Half, ..reading() },
+                // um cochilo curto: só o começo do ciclo dos "z" (o grande nem chega a subir)
+                1 => Pose { dy: 1, eyes: Eyes::Sleep, zzz: Some(0.1 + 0.5 * u), ..reading() },
+                _ => Pose { eyes: Eyes::Wide, ..reading() },
+            };
+            at_limit(p, view, 11, true)
+        }
+    }
+}
+
+// ---------- o desenho ----------
+
+/// Um retângulo do desenho, em quadradinhos: (x, y, largura, altura, cor).
+pub type Cell = (i32, i32, i32, i32, Rgba);
+
+/// Os quadradinhos de um desenho em texto com o canto de cima em (x, y): cada letra vira uma
+/// cor (`.` fica vazio). Espelhado, a coluna x vai para 26 − x (a garra da direita é o espelho
+/// da da esquerda). `att`: anda junto com ele (dx, dy).
+#[allow(clippy::too_many_arguments)]
+fn art(put: &mut impl FnMut(i32, i32, i32, i32, Rgba, bool), rows: &[&str], x: i32, y: i32, color: impl Fn(u8) -> Option<Rgba>, mirror: bool, att: bool) {
+    for (j, row) in rows.iter().enumerate() {
+        for (i, ch) in row.bytes().enumerate() {
+            if ch == b'.' {
+                continue;
+            }
+            let Some(c) = color(ch) else { continue };
+            let cx = x + i as i32;
+            put(if mirror { 26 - cx } else { cx }, y + j as i32, 1, 1, c, att);
+        }
+    }
+}
+
+/// Uma cor só para todas as letras.
+fn one(c: Rgba) -> impl Fn(u8) -> Option<Rgba> {
+    move |_| Some(c)
+}
+
+/// Os degraus de opacidade (pixel art; e o widget só redesenha quando algo muda).
+fn steps(a: f32) -> f32 {
+    (a.clamp(0.0, 1.0) * 4.0).round() / 4.0
+}
+
+/// Os retângulos do quadro, em quadradinhos (os adereços podem sair da grade: acima, em linhas
+/// negativas; à direita, o notebook de lado e a placa).
+pub fn cells(p: &Pose) -> Vec<Cell> {
+    let mut out: Vec<Cell> = Vec::new();
+    let (dx, dy) = (p.dx, p.dy);
+    let mut put = |x: i32, y: i32, w: i32, h: i32, c: Rgba, att: bool| {
+        let (x, y) = if att { (x + dx, y + dy) } else { (x, y) };
+        // emenda com o último retângulo, se continua a mesma linha na mesma cor
+        if let Some(last) = out.last_mut() {
+            if h == 1 && last.3 == 1 && last.1 == y && last.4 == c {
+                if last.0 + last.2 == x {
+                    last.2 += w;
+                    return;
+                }
+                if x + w == last.0 {
+                    last.0 = x;
+                    last.2 += w;
+                    return;
+                }
+            }
+        }
+        out.push((x, y, w, h, c));
+    };
+    let top = -(p.breath as i32);
+
+    // o corpo: luz em cima e à esquerda, sombra embaixo e à direita, cantos arredondados
+    put(5, top, 17, 1, LIGHT, true);
+    put(4, top + 1, 19, 10 - top, BODY, true);
+    put(22, top + 1, 1, 10 - top, SHADE, true);
+    put(5, 11, 17, 1, SHADE, true);
+    put(5, top + 1, 2, 1, LIGHT, true);
+    if p.glow {
+        put(5, 5, 17, 1, glow(), true);
+    }
+    if let Some(hot) = p.blush {
+        put(5, 6, 2, 1, blush(hot), true);
+        put(20, 6, 2, 1, blush(hot), true);
+    }
+
+    // os olhos (o esquerdo nas colunas 7 e 8, o direito em 18 e 19)
+    const EX: [i32; 2] = [7, 18];
+    match p.eyes {
+        Eyes::Open(lx, ly) => {
+            let (lx, ly) = (lx.clamp(-1, 1), ly.clamp(-1, 1));
+            for ex in EX {
+                put(ex + lx, 3 + ly, 2, 3, EYE, true);
+                put(ex + 1 + lx, 3 + ly, 1, 1, SHINE, true);
+            }
+        }
+        Eyes::Blink => {
+            for ex in EX {
+                put(ex, 4, 2, 1, EYE, true);
+            }
+        }
+        Eyes::Sleep => {
+            for ex in EX {
+                put(ex - 1, 4, 1, 1, EYE, true);
+                put(ex + 2, 4, 1, 1, EYE, true);
+                put(ex, 5, 2, 1, EYE, true);
+            }
+        }
+        Eyes::Happy => {
+            for ex in EX {
+                put(ex - 1, 4, 1, 1, EYE, true);
+                put(ex + 2, 4, 1, 1, EYE, true);
+                put(ex, 3, 2, 1, EYE, true);
+            }
+        }
+        Eyes::Half => {
+            for ex in EX {
+                put(ex, 4, 2, 2, EYE, true);
+                put(ex - 1, 3, 4, 1, SHADE, true);
+            }
+        }
+        Eyes::Peek => {
+            put(7, 4, 2, 2, EYE, true);
+            put(6, 3, 4, 1, SHADE, true);
+            put(17, 4, 1, 1, EYE, true);
+            put(20, 4, 1, 1, EYE, true);
+            put(18, 5, 2, 1, EYE, true);
+        }
+        Eyes::Squeeze => {
+            for (x, y) in [(6, 2), (7, 3), (8, 4), (7, 5), (6, 6), (20, 2), (19, 3), (18, 4), (19, 5), (20, 6)] {
+                put(x, y, 1, 1, EYE, true);
+            }
+        }
+        Eyes::Wide => {
+            for ex in EX {
+                put(ex, 2, 2, 4, EYE, true);
+                put(ex + 1, 2, 1, 1, SHINE, true);
+            }
+        }
+        Eyes::Sherlock(lx, ly) => {
+            let (lx, ly) = (lx.clamp(-1, 1), ly.clamp(-1, 1));
+            put(7 + lx, 3 + ly, 2, 3, EYE, true);
+            put(8 + lx, 3 + ly, 1, 1, SHINE, true);
+            put(17 + lx, 4 + ly, 3, 1, EYE, true);
+        }
+        Eyes::Chill => {
+            put(6, 4, 3, 1, EYE, true);
+            put(18, 4, 3, 1, EYE, true);
+            let cheek = Rgba::rgb(255, 128, 138).alpha(0.45);
+            put(7, 5, 2, 1, cheek, true);
+            put(18, 5, 2, 1, cheek, true);
+        }
+    }
+
+    // a boca (só em algumas expressões: parado, ele é como o logo, sem boca)
+    match p.mouth {
+        Some(Mouth::Yawn) => {
+            put(12, 7, 3, 1, MOUTH, true);
+            put(11, 8, 5, 2, MOUTH, true);
+            put(12, 9, 3, 2, TONGUE, true);
+        }
+        Some(Mouth::O) => put(12, 8, 3, 2, MOUTH, true),
+        Some(Mouth::Tiny) => put(13, 8, 1, 1, MOUTH, true),
+        Some(Mouth::Smile) => {
+            put(11, 7, 1, 1, EYE, true);
+            put(15, 7, 1, 1, EYE, true);
+            put(12, 8, 3, 1, EYE, true);
+        }
+        Some(Mouth::Grin) => {
+            put(11, 7, 5, 1, MOUTH, true);
+            put(12, 8, 3, 1, TONGUE, true);
+        }
+        Some(Mouth::Wavy) => {
+            for (x, y) in [(10, 8), (11, 7), (12, 8), (13, 7), (14, 8), (15, 7), (16, 8)] {
+                put(x, y, 1, 1, EYE, true);
+            }
+        }
+        None => {}
+    }
+
+    // as patas: duas colunas cada, a da direita na sombra
+    for (i, x) in [6, 9, 16, 19].into_iter().enumerate() {
+        let h = p.legs.heights()[i];
+        put(x, 12, 1, h, BODY, true);
+        put(x + 1, 12, 1, h, SHADE, true);
+    }
+
+    // o notebook de frente, no colo: a tampa por trás (com o símbolo), o teclado e a base
+    if let Some(Front { open, key }) = p.front {
+        if open {
+            put(6, 6, 15, 7, ALU, true);
+            put(6, 6, 15, 1, ALU_LIGHT, true);
+            put(20, 7, 1, 6, ALU_DARK, true);
+            art(&mut put, &LOGO_MARK, 11, 7, one(LOGO), false, true);
+            put(4, 13, 19, 1, KEYS, true);
+            if let Some(k) = key {
+                put(k, 13, 1, 1, KEY_LIT, true);
+            }
+        } else {
+            put(4, 13, 19, 1, ALU, true);
+        }
+        put(4, 14, 19, 1, ALU_DARK, true);
+    }
+    // o notebook de lado, no chão à direita (não anda com ele): a moldura, a tela com o código
+    // (ou o ✓), o teclado e a base
+    if let Some(s) = p.side {
+        if s.open {
+            put(27, 2, 10, 11, BEZEL, false);
+            put(28, 3, 8, 9, SCREEN, false);
+            if s.done {
+                art(&mut put, &CHECK_MARK, 28, 4, one(CHECK), false, false);
+            } else {
+                let mut shown = Vec::new();
+                let mut left = s.code;
+                for &(ind, len, col) in &LINES {
+                    if left <= 0 {
+                        break;
+                    }
+                    shown.push((ind, len.min(left), CODE[col]));
+                    left -= len;
+                }
+                let view = &shown[shown.len().saturating_sub(4)..];
+                for (i, &(ind, n, col)) in view.iter().enumerate() {
+                    put(29 + ind, 4 + 2 * i as i32, n, 1, col, false);
+                }
+                let cur = view.last().map_or((29, 4), |&(ind, n, _)| (29 + ind + n, 4 + 2 * (view.len() as i32 - 1)));
+                put(cur.0.min(35), cur.1, 1, 1, FG.alpha(0.9), false);
+            }
+            put(24, 13, 13, 1, KEYS, false);
+            if let Some(k) = s.key {
+                put(k, 13, 1, 1, KEY_LIT, false);
+            }
+        } else {
+            put(24, 13, 13, 1, ALU, false);
+        }
+        put(24, 14, 13, 1, ALU_DARK, false);
+    }
+
+    // a plaquinha "VOLTO LOGO" do lado dele (não anda com ele): subindo do chão, só a madeira
+    if let Some(Sign { h, x }) = p.sign {
+        let y0 = 17 - h;
+        put(x, y0, 21, h, WOOD, false);
+        put(x, y0, 21, 1, WOOD_DARK, false);
+        put(x, 16, 21, 1, WOOD_DARK, false);
+        put(x, y0, 1, h, WOOD_DARK, false);
+        put(x + 20, y0, 1, h, WOOD_DARK, false);
+        if h >= 11 {
+            for (word, wx, wy) in [("VOLTO", x + 1, y0 + 1), ("LOGO", x + 3, y0 + 6)] {
+                for (i, ch) in word.chars().enumerate() {
+                    art(&mut put, &sign_letter(ch), wx + 4 * i as i32, wy, one(SIGN_TEXT), false, false);
+                }
+            }
+            put(x + 3, 17, 2, 1, WOOD_DARK, false);
+            put(x + 16, 17, 2, 1, WOOD_DARK, false);
+        }
+    }
+    // o livro aberto, seguro na frente; a página virando passa por cima
+    if let Some((bdy, flip)) = p.book {
+        let by = 5 + bdy;
+        let color = |ch: u8| match ch {
+            b'P' => Some(PAGE),
+            b'C' => Some(COVER),
+            b'g' => Some(GOLD),
+            _ => Some(COVER_DARK),
+        };
+        art(&mut put, &READ_ART, 8, by, color, false, true);
+        match flip {
+            1 => put(14, by - 1, 3, 1, PAGE, true),
+            2 => put(13, by - 3, 1, 3, PAGE, true),
+            3 => put(10, by - 1, 3, 1, PAGE, true),
+            _ => {}
+        }
+    }
+    // o cachimbo e a fumacinha subindo para a esquerda
+    if let Some(smoke) = p.pipe {
+        let color = |ch: u8| match ch {
+            b'o' => Some(PIPE_RIM),
+            b'E' => Some(EMBER),
+            b'P' => Some(PIPE_WOOD),
+            _ => Some(PIPE_STEM),
+        };
+        art(&mut put, &PIPE_ART, 7, 7, color, false, true);
+        if let Some(s) = smoke {
+            for k in 0..3 {
+                let a = (s + k as f32 / 3.0).fract();
+                let al = steps((a / 0.2).min((1.0 - a) / 0.4)) * 0.8;
+                if al > 0.0 {
+                    let sz = if a > 0.5 { 2 } else { 1 };
+                    put(7 - (5.0 * a).round() as i32, 5 - (6.0 * a).round() as i32, sz, sz, SMOKE.alpha(al), true);
+                }
+            }
+        }
+    }
+    // a caneca (antes das garras: a garra fica por cima da asa, segurando) e o vapor
+    if let Some((sip, steam)) = p.cup {
+        let (cx, cy) = if sip { (9, 4) } else { (-2, 4) };
+        let color = |ch: u8| match ch {
+            b'R' => Some(CUP_RIM),
+            b'k' => Some(BREW),
+            b'M' => Some(CUP),
+            b'S' => Some(CUP_SHADE),
+            _ => Some(CUP_HANDLE),
+        };
+        art(&mut put, if sip { &CUP_SIP } else { &CUP_ART }, cx, cy, color, false, true);
+        if let Some(s) = steam {
+            let mid = cx + if sip { 4 } else { 2 };
+            for k in 0..3 {
+                let a = (s + k as f32 / 3.0).fract();
+                let al = steps((a / 0.2).min((1.0 - a) / 0.4)) * 0.9;
+                if al > 0.0 {
+                    put(mid + (a * 6.0 + k as f32 * 2.0).sin().round() as i32, cy - 1 - (4.0 * a).round() as i32, 1, 1, STEAM.alpha(al), true);
+                }
+            }
+        }
+    }
+
+    // as garras
+    let claw_color = |ch: u8| match ch {
+        b'L' => Some(LIGHT),
+        b'B' => Some(BODY),
+        _ => Some(SHADE),
+    };
+    for (side, claw) in p.claws.iter().enumerate() {
+        if let Some((rows, x, y)) = claw.art() {
+            art(&mut put, rows, x, y, claw_color, side == 1, true);
+        }
+    }
+
+    // ---- adereços ----
+    if let Some(hdy) = p.hat {
+        let color = |ch: u8| match ch {
+            b'o' => Some(HAT_LINE),
+            b'h' => Some(HAT),
+            b't' => Some(HAT_TWEED),
+            b'l' => Some(HAT_LIGHT),
+            b'm' => Some(HAT_SEAM),
+            b'd' => Some(HAT_BAND),
+            b'F' => Some(HAT_FLAP),
+            _ => Some(HAT_PEAK),
+        };
+        art(&mut put, &HAT_ART, 2, -6 + top + hdy, color, false, true);
+    }
+    if let Some((mx, my, zoom)) = p.mag {
+        // a lupa, segura pela garra direita na ponta do cabo; em cima da tela, o código aumentado
+        let color = |ch: u8| match ch {
+            b'K' => Some(LENS),
+            b'G' => Some(glass()),
+            b'W' => Some(GLINT),
+            _ => Some(HANDLE),
+        };
+        art(&mut put, &MAG_ART, mx, my, color, false, true);
+        if let Some(c) = zoom {
+            put(mx + 3, my + 2, 4, 2, CODE[c % 5], true);
+            put(mx + 3, my + 5, 2, 1, CODE[(c + 2) % 5], true);
+        }
+        art(&mut put, &["LBB", "BBK"], mx, my + 9, claw_color, false, true);
+    }
+    if let Some(pdy) = p.phones {
+        let color = |ch: u8| match ch {
+            b'n' => Some(PHONE_LINE),
+            b'b' => Some(PHONE),
+            b'B' => Some(PHONE_LIGHT),
+            _ => Some(PHONE_PAD),
+        };
+        art(&mut put, &PHONES_ART, 1, -3 + top + pdy, color, false, true);
+    }
+    if let Some(n) = p.notes {
+        // notas saindo do fone da direita, subindo em zigue-zague e sumindo
+        for k in 0..3 {
+            let a = (n + k as f32 / 3.0).fract();
+            let glyph: &[&str] = if k == 1 { &NOTE1 } else { &NOTE8 };
+            let al = steps((a / 0.15).min((1.0 - a) / 0.35));
+            if al <= 0.0 {
+                continue;
+            }
+            let x = 24 + (2.0 * a).round() as i32 + ((a * 6.0) as i32 % 2);
+            let yb = 2 - (5.0 * a).round() as i32;
+            art(&mut put, glyph, x, yb - glyph.len() as i32 + 1, one(NOTE.alpha(al)), false, true);
+        }
+    }
+    if let Some((cdy, a)) = p.cap {
+        if a > 0.0 {
+            let color = move |ch: u8| match ch {
+                b'b' => Some(CAP.alpha(a)),
+                b'l' => Some(CAP_LIGHT.alpha(a)),
+                _ => Some(CAP_WHITE.alpha(a)),
+            };
+            art(&mut put, &CAP_ART, 5, -4 + top + cdy, color, true, true);
+        }
+    }
+    if let Some(z) = p.zzz {
+        for (glyph, x, y, born, dies) in zs_at(z) {
+            art(&mut put, glyph, x + p.zzz_x, y, one(FG.alpha(steps_alpha(z, born, dies))), false, true);
+        }
+    }
+    if p.bang {
+        art(&mut put, &BANG_MARK, 24, -5, one(BANG), false, false);
+    }
+    if let Some(s) = p.sweat {
+        // duas gotas escorrendo, uma de cada lado
+        for (ph, mirror) in [(0.0, false), (0.5, true)] {
+            let t = (s + ph).fract();
+            let y = -1 + (5.0 * t).round() as i32;
+            let a = steps((1.0 - t) / 0.3);
+            if a <= 0.0 {
+                continue;
+            }
+            let color = move |ch: u8| if ch == b'w' { Some(SHINE.alpha(a)) } else { Some(SWEAT.alpha(a)) };
+            art(&mut put, &[".s", "ss", "sw"], 23, y, color, mirror, true);
+        }
+    }
+    if let Some(u) = p.heart {
+        let glyph: &[&str] = if u < 0.25 { &HEART_S } else { &HEART_L };
+        let yb = -1 - (2.0 * u).round() as i32;
+        let a = steps((1.0 - u) / 0.3);
+        if a > 0.0 {
+            art(&mut put, glyph, 22, yb - glyph.len() as i32 + 1, one(HEART.alpha(a)), false, true);
+        }
+    }
+    if let Some(u) = p.confetti {
+        for i in 0..16 {
+            let x0 = (i * 11 + 3) % 26;
+            let y0 = -6 + (i * 7) % 4;
+            let fall = 10 + (i * 5) % 9;
+            let y = y0 + (u * fall as f32 * 1.4).round() as i32;
+            if y > 14 {
+                continue;
+            }
+            let x = x0 + ((u * 7.0 + i as f32).sin() * 1.2).round() as i32;
+            let tall = ((u * 10.0) as i32 + i) % 2 == 0;
+            put(x, y, 1, if tall { 2 } else { 1 }, CODE[i as usize % 5], false);
+        }
+    }
+    if p.check {
+        art(&mut put, &CHECK_MARK, if p.hat.is_some() { 24 } else { 21 }, -5, one(CHECK), false, true);
+    }
+    if let Some((lit, rays)) = p.bulb {
+        art(&mut put, &BULB_GLASS, 23, -6, one(if lit { BULB } else { BULB_OFF }), false, true);
+        art(&mut put, &BULB_BASE, 23, -2, one(BULB_OFF), false, true);
+        if rays {
+            for (x, y) in [(21, -5), (29, -5), (22, -7), (28, -7)] {
+                put(x, y, 1, 1, BULB.alpha(0.85), true);
+            }
+        }
+    }
+    for &(x, y, s) in DOTS.iter().take(p.dots as usize) {
+        put(x, y, s, s, FG, true);
+    }
+    out
+}
+
+/// A opacidade de um "z" nascido em `born` e que some em `dies` (frações do ciclo `z`).
+fn steps_alpha(z: f32, born: f32, dies: f32) -> f32 {
+    let age = (z - born) / (dies - born);
+    steps((age / 0.15).min((1.0 - age) / 0.35)) * 0.95
+}
+
+/// Os "z" vivos em `z` (0 a 1 do ciclo), em escadinha (o pequeno do lado da cabeça, o médio
+/// acima, o grande mais alto), cada um subindo um quadradinho no meio da vida: (desenho, coluna,
+/// linha, quando nasce, quando some).
+pub fn zs_at(z: f32) -> Vec<(&'static [&'static str], i32, i32, f32, f32)> {
+    let mut out = Vec::new();
+    for &(glyph, x, y, born, dies) in &ZS {
+        let age = (z - born) / (dies - born);
+        if (0.0..1.0).contains(&age) && steps_alpha(z, born, dies) > 0.0 {
+            out.push((glyph, x, y - (age >= 0.5) as i32, born, dies));
         }
     }
     out
@@ -422,516 +1504,82 @@ pub fn gaze(cx: f32, cy: f32, x: f32, y: f32) -> (i32, i32) {
     (step(x - cx, 14.0), step(y - cy, 12.0))
 }
 
-/// O quadro de uma animação `t` (0 a 1) depois de começar, com o humor de agora e, se o mouse
-/// está por perto, olhando para ele (`gaze`).
-pub fn pose(mood: Mood, anim: Option<(Anim, f32)>, gaze: Option<(i32, i32)>) -> Pose {
-    let eyes = match (mood, gaze) {
-        (_, Some((x, y))) => Eyes::Look(x, y),
-        (Mood::Sleepy, None) => Eyes::Closed,
-        // olhando para o lápis, parado no começo da página
-        (Mood::Busy, None) => Eyes::Look(-1, 1),
-        _ => Eyes::Open,
-    };
-    let mut p = Pose { eyes, ..Pose::default() };
-    match mood {
-        Mood::Worried => p.sweat = Some(0.0), // a gota fica na testa
-        Mood::Busy => p.notebook = Some(PAGE_REST), // o caderno aberto numa página em branco
-        Mood::Sleepy => p.limp = gaze.is_none(),
-        Mood::Normal => {}
-    }
-    let Some((anim, t)) = anim else { return p };
-    let t = t.clamp(0.0, 1.0);
-    // os olhos seguem o que acontece, a não ser que estejam no mouse
-    let look = |p: &mut Pose, e: Eyes| {
-        if gaze.is_none() {
-            p.eyes = e;
-        }
-    };
-    match anim {
-        Anim::Blink => p.eyes = Eyes::Closed,
-        Anim::Look => {
-            p.eyes = match t {
-                t if t < 0.4 => Eyes::Look(-1, 0),
-                t if t < 0.5 => Eyes::Open,
-                t if t < 0.9 => Eyes::Look(1, 0),
-                _ => Eyes::Open,
-            }
-        }
-        Anim::Scuttle => {
-            // de lado, como caranguejo: vai para a direita, volta e passa um pouco para a esquerda
-            let step = (t * 10.0) as i32;
-            p.dx = [0, 1, 2, 3, 3, 2, 1, 0, -1, -1, 0][step.clamp(0, 10) as usize];
-            p.legs = if step % 2 == 0 { Legs::StepA } else { Legs::StepB };
-        }
-        Anim::Hop => {
-            if t < CROUCH {
-                // agacha antes de pular: já o primeiro quadro é outro (reage ao clique na hora)
-                p.dy = 1;
-                p.legs = Legs::Tucked;
-            } else {
-                // dois pulinhos
-                let h = ((t - CROUCH) / (1.0 - CROUCH) * 2.0).fract();
-                p.dy = -((h * std::f32::consts::PI).sin() * 3.0).round() as i32;
-                p.legs = if p.dy < 0 { Legs::Tucked } else { Legs::Stand };
-                p.left_up = p.dy <= -2;
-                p.right_up = p.dy <= -2;
-            }
-        }
-        Anim::Wave => {
-            let k = (t * 6.0) as i32;
-            p.left_up = k % 2 == 0;
-            p.right_up = k % 2 == 1;
-        }
-        Anim::Snooze => {
-            p.eyes = Eyes::Closed;
-            p.limp = true;
-            p.zzz = Some(t);
-        }
-        Anim::Write | Anim::Erase | Anim::Crumple => {
-            let page = page_at(anim, t);
-            p.notebook = Some(page);
-            // os olhos acompanham o lápis na folha, ou a bolinha voando
-            let side = |x: i32| if x < 8 { -1 } else if x > 9 { 1 } else { 0 };
-            match (page.pen, page.ball) {
-                (_, Some((x, y))) => look(&mut p, Eyes::Look(side(x), if y < 2 { -1 } else { 0 })),
-                (Some(pen), _) => look(&mut p, Eyes::Look(side(pen.x), 1)),
-                _ => look(&mut p, Eyes::Look(0, 1)),
-            }
-        }
-        Anim::Think => {
-            // olha para cima, para o lado dos pontinhos, que aparecem um a um
-            look(&mut p, Eyes::Look(1, -1));
-            p.dots = ((t - 0.15) / 0.18).floor().clamp(0.0, 3.0) as u8;
-        }
-        Anim::Idea => {
-            // a lâmpada aparece apagada, pisca e acende de vez; ele levanta as garras
-            let lit = (0.3..0.38).contains(&t) || t >= 0.44;
-            if t >= 0.12 {
-                p.bulb = Some((lit, lit && (t * 10.0) as i32 % 2 == 0));
-            }
-            if t >= 0.3 {
-                look(&mut p, Eyes::Open);
-            }
-            p.left_up = (0.44..0.75).contains(&t);
-            p.right_up = p.left_up;
-        }
-        Anim::Tap => {
-            // o lápis batendo no caderno, olhando para a frente (esperando)
-            look(&mut p, Eyes::Open);
-            if let Some(page) = &mut p.notebook {
-                page.pen = Some(Pen { x: 10, y: 7, down: (t * 8.0) as i32 % 2 == 0, eraser: false });
-            }
-        }
-        Anim::Coffee => {
-            // pega a caneca, toma um gole de olhos fechados e devolve
-            let up = (0.3..0.7).contains(&t);
-            if t < 0.95 {
-                p.mug = Some((up, (t * 6.0) as i32 % 2 == 0));
-            }
-            if up {
-                p.eyes = Eyes::Closed;
-            }
-        }
-        Anim::Done => {
-            if t < 0.2 {
-                // fecha o caderno
-                p.notebook = None;
-                p.closed = true;
-                look(&mut p, Eyes::Look(0, 1));
-            } else if t < 0.5 {
-                // se espreguiça: estica as patas e levanta as garras, de olhos fechados
-                p.notebook = None;
-                p.dy = -1;
-                p.legs = Legs::Stretch;
-                p.left_up = true;
-                p.right_up = true;
-                p.eyes = Eyes::Closed;
-            } else {
-                // e mostra o ✓ (piscando uma vez)
-                p.notebook = None;
-                p.check = !(0.7..0.76).contains(&t);
-                look(&mut p, Eyes::Open);
-            }
-        }
-        Anim::Sweat => p.sweat = Some(t),
-        Anim::Shake => {
-            p.dx = if (t * 12.0) as i32 % 2 == 0 { 1 } else { -1 };
-            p.eyes = Eyes::Closed;
-        }
-    }
-    p
-}
-
-/// O mesmo quadro com o notebook de frente, no colo, no lugar do caderno (no pequeno, em que o
-/// caderno ficaria pequeno demais): onde o lápis escreveria uma letra, uma garra bate numa
-/// tecla, uma de cada vez; com o lápis no ar, as duas ficam paradas no teclado. Os olhos ficam na
-/// tela (a não ser que estejam no mouse ou pensando); fechar o caderno vira fechar a tampa.
-pub fn on_laptop(mut p: Pose, gaze: Option<(i32, i32)>) -> Pose {
-    if p.closed {
-        p.closed = false;
-        p.laptop = Some(Laptop { open: false, key: None });
-        return p;
-    }
-    let Some(page) = p.notebook.take() else { return p };
-    let [mut left, mut right] = ON_KEYS;
-    let mut key = None;
-    if page.pen.is_some_and(|pen| pen.down) {
-        // cada letra nova troca de garra; a tecla acesa, ao lado dela, muda junto
-        let n = page.ink.count_ones() as i32;
-        if n % 2 == 0 {
-            left.1 = TAP_DOWN;
-            key = Some(6 + (n / 2) % 2);
-        } else {
-            right.1 = TAP_DOWN;
-            key = Some(10 + (n / 2) % 2);
-        }
-    }
-    // a folha e a bolinha não existem no notebook: os olhos ficam na tela
-    if gaze.is_none() && (matches!(p.eyes, Eyes::Look(_, 1)) || page.ball.is_some()) {
-        p.eyes = Eyes::Open;
-    }
-    // garras levantadas (acenando, com uma ideia) e a caneca na boca saem do teclado
-    if p.left_up {
-        left = (1, 2);
-    }
-    if p.right_up {
-        right = (15, 2);
-    }
-    if p.mug.is_some_and(|(up, _)| up) {
-        right = (15, 4);
-    }
-    p.claws = Some([left, right]);
-    p.laptop = Some(Laptop { open: true, key });
-    p
-}
-
-/// O mesmo quadro com o notebook de lado, no chão à direita, com a tela à mostra (no médio, no
-/// grande e na barra de tarefas): onde o lápis escreveria, o código aparece na tela, letra a
-/// letra, e a garra direita bate no teclado; a folha virando é a tela cheia de código. O café
-/// não fica à mostra: a garra vai atrás das costas, volta com a caneca na frente da boca e a
-/// guarda de novo. Quando o Claude Code termina, o ✓ aparece na tela e depois a tampa fecha.
-pub fn on_side_laptop(mut p: Pose, gaze: Option<(i32, i32)>) -> Pose {
-    let look_at_screen = |p: &mut Pose| {
-        if gaze.is_none() {
-            p.eyes = Eyes::Look(1, 0);
-        }
-    };
-    if p.closed {
-        // terminou: o ✓ na tela, com as garras para cima
-        p.closed = false;
-        p.side = Some(Side { open: true, screen: Screen::Done });
-        p.left_up = true;
-        p.right_up = true;
-        look_at_screen(&mut p);
-        return p;
-    }
-    if p.legs == Legs::Stretch || p.check {
-        // e, já se espreguiçando, a tampa fechada no chão
-        p.side = Some(Side { open: false, screen: Screen::Code(0) });
-        return p;
-    }
-    let Some(page) = p.notebook.take() else { return p };
-    let full = LINES.iter().map(|l| l.1).sum::<i32>();
-    let n = page.ink.count_ones() as i32;
-    let screen = match page.pen {
-        Some(_) => Screen::Code((n * CODE_PER_LETTER).min(full)),
-        // a página virando ou amassada: a tela cheia
-        None => Screen::Code(full),
-    };
-    // a garra direita no teclado: batendo a cada letra, parada entre as palavras
-    let typing = page.pen.is_some_and(|pen| pen.down);
-    let right = if p.right_up {
-        (15, 2)
-    } else if typing {
-        (15, 5 + (n % 2 == 0) as i32)
-    } else {
-        (15, 5)
-    };
-    let left = if p.left_up { (1, 2) } else { (1, 4) };
-    // o café: a caneca vem de trás das costas
-    match p.mug {
-        Some((true, _)) => p.mug_front = true,
-        Some((false, _)) => {
-            p.mug = None;
-            p.reach_back = true;
-        }
-        None => {}
-    }
-    p.claws = Some([left, right]);
-    if gaze.is_none() && (matches!(p.eyes, Eyes::Look(_, 1)) || page.ball.is_some()) {
-        p.eyes = Eyes::Look(1, 0);
-    }
-    p.side = Some(Side { open: true, screen });
-    p
-}
-
-/// As letras de código na tela, linha a linha: (coluna, linha, letras, cor), as últimas 5
-/// linhas (as de cima sobem quando a tela enche), e onde fica o cursor.
-fn code_cells(chars: i32) -> (Vec<(i32, i32, i32, Rgba)>, (i32, i32)) {
-    let mut shown = Vec::new();
-    let mut left = chars;
-    for &(indent, len, color) in &LINES {
-        if left <= 0 {
-            break;
-        }
-        shown.push((indent, len.min(left), CODE[color]));
-        left -= len;
-    }
-    let skip = shown.len().saturating_sub(5);
-    let view: Vec<_> = shown[skip..].iter().enumerate().map(|(i, &(ind, n, c))| (19 + ind, 2 + i as i32, n, c)).collect();
-    let cursor = match view.last() {
-        Some(&(x, y, n, _)) => ((x + n).min(24), y),
-        None => (19, 2),
-    };
-    (view, cursor)
-}
-
-/// O Clawd pulando de um lugar para outro (quando o widget muda de tamanho): agachado antes de
-/// subir e ao pousar, de olhos fechados; no ar, com as patas encolhidas e as garras para cima.
+/// O Clawd pulando de um lugar para outro (o widget mudando de tamanho, a ida para a barra de
+/// tarefas): agachado antes de subir e ao pousar, de olhos apertados; no ar, com as patas
+/// encolhidas e as garras para cima.
 pub fn jump_pose(crouch: bool) -> Pose {
     if crouch {
-        Pose { dy: 1, legs: Legs::Tucked, eyes: Eyes::Closed, limp: true, ..Pose::default() }
+        Pose { dy: 1, legs: Legs::Tuck, eyes: Eyes::Squeeze, ..stand() }
     } else {
-        Pose { legs: Legs::Tucked, eyes: Eyes::Look(0, -1), left_up: true, right_up: true, ..Pose::default() }
+        Pose { legs: Legs::Tuck, eyes: Eyes::Open(0, -1), claws: [Claw::Up; 2], ..stand() }
     }
 }
 
-/// Um retângulo do desenho, em quadradinhos: (x, y, largura, altura, cor).
-pub type Cell = (i32, i32, i32, i32, Rgba);
-
-/// Os retângulos de um desenho em texto ("#": pintado) com o canto de cima em (gx, gy).
-fn glyph(put: &mut impl FnMut(i32, i32, i32, i32, Rgba), rows: &[&str], gx: i32, gy: i32, color: Rgba) {
-    for (j, row) in rows.iter().enumerate() {
-        // cada trecho seguido de "#" vira um retângulo
-        let bytes = row.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != b'#' {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'#' {
-                i += 1;
-            }
-            put(gx + start as i32, gy + j as i32, (i - start) as i32, 1, color);
-        }
-    }
+/// O tamanho de um quadradinho, em pixels, num lugar de `unit` pontos na escala `s`: 2/3 do
+/// quadradinho antigo (que era `unit` em pixels inteiros), também em pixels inteiros.
+pub fn cell_px(s: f32, unit: f32) -> f32 {
+    let old = (unit * s).round().max(1.0);
+    (old * CELL).round().max(1.0)
 }
 
-/// Os retângulos do quadro, em quadradinhos.
-pub fn cells(p: &Pose) -> Vec<Cell> {
-    let mut v = Vec::new();
-    let mut put = |x: i32, y: i32, w: i32, h: i32, c: Rgba| v.push((x + p.dx, y + p.dy, w, h, c));
-    // a garra atrás das costas: antes do corpo, só a ponta aparece em cima
-    if p.reach_back {
-        put(3, -1, 2, 2, BODY);
-    }
-    // corpo
-    put(3, 0, 12, 8, BODY);
-    // a luz da tela do notebook aberto no rosto
-    if p.laptop.is_some_and(|l| l.open) {
-        put(4, 3, 10, 1, SCREEN_LIGHT.alpha(0.6));
-    }
-    // garras: dos lados do meio do corpo; levantadas, sobem até a altura dos olhos
-    // (dormindo, caídas um quadradinho); no teclado, vão por cima do notebook, mais abaixo
-    if p.claws.is_none() {
-        let rest = if p.limp { 5 } else { 4 };
-        put(1, if p.left_up { 2 } else { rest }, 2, 2, BODY);
-        put(15, if p.right_up { 2 } else { rest }, 2, 2, BODY);
-    }
-    // olhos: abertos, um quadradinho de largura e dois de altura; fechados, um tracinho deitado
-    match p.eyes {
-        Eyes::Closed => {
-            put(4, 3, 2, 1, EYE);
-            put(12, 3, 2, 1, EYE);
-        }
-        eyes => {
-            let (sx, sy) = match eyes {
-                Eyes::Look(x, y) => (x.clamp(-1, 1), y.clamp(-1, 1)),
-                _ => (0, 0),
-            };
-            put(5 + sx, 2 + sy, 1, 2, EYE);
-            put(12 + sx, 2 + sy, 1, 2, EYE);
-        }
-    }
-    // patas
-    for (i, x) in [4, 6, 11, 13].into_iter().enumerate() {
-        let h = match p.legs {
-            Legs::Stand => 2,
-            Legs::Tucked => 1,
-            Legs::StepA => 1 + (i % 2 == 0) as i32,
-            Legs::StepB => 1 + (i % 2 == 1) as i32,
-            Legs::Stretch => 3,
-        };
-        put(x, 8, 1, h, BODY);
-    }
-    // gota de suor, do lado da cabeça
-    if let Some(t) = p.sweat {
-        put(16, (t * 2.0).round() as i32 - 1, 1, 2, SWEAT);
-    }
-    let ((x0, x1), (y0, y1)) = (PAGE_X, PAGE_Y);
-    // o caderno no colo, a escrita e o lápis
-    if let Some(Page { ink, pen, lifted, ball }) = p.notebook {
-        put(x0, y0, x1 - x0, 1, COVER);
-        put(x0, y0 + 1, x1 - x0, y1 - y0 - 1, PAGE);
-        if lifted {
-            // a folha escrita subindo, por cima do corpo
-            put(x0 + 1, y0 - 1, x1 - x0 - 2, 1, PAGE);
-        }
-        for y in [WORDS[0].0, WORDS[0].0 + 1] {
-            for x in x0..x1 {
-                if ink & bit(x, y) != 0 {
-                    put(x, y, 1, 1, INK);
-                }
-            }
-        }
-        if let Some(pen) = pen {
-            // a ponta na letra (ou um pouco acima, levantada) e o lápis inclinado para a direita;
-            // virado, com a borracha embaixo e a ponta em cima
-            let y = pen.y - (!pen.down) as i32;
-            let (tip, end) = if pen.eraser { (ERASER, GRAPHITE) } else { (GRAPHITE, ERASER) };
-            put(pen.x, y, 1, 1, tip);
-            put(pen.x + 1, y - 1, 1, 1, PENCIL);
-            put(pen.x + 2, y - 2, 1, 1, PENCIL);
-            if pen.eraser {
-                put(pen.x + 3, y - 3, 1, 1, end);
-            }
-        }
-        if let Some((bx, by)) = ball {
-            // a bolinha de papel amassado, com uma dobra mais escura
-            put(bx, by, 2, 2, PAGE);
-            put(bx + 1, by + 1, 1, 1, INK.alpha(0.35));
-        }
-    }
-    if p.closed {
-        // o caderno fechado: a capa, com a borda das folhas embaixo
-        put(x0 + 1, y0 + 1, x1 - x0 - 2, y1 - y0 - 2, COVER);
-        put(x0 + 1, y1 - 1, x1 - x0 - 2, 1, PAGE);
-    }
-    // o notebook no colo: aberto, a tampa em pé (vista por trás, com o símbolo), o teclado e a
-    // base; fechado, deitado
-    if let Some(Laptop { open, key }) = p.laptop {
-        if open {
-            put(4, 4, 10, 3, ALU);
-            put(8, 5, 2, 1, LOGO.alpha(0.85));
-            put(3, 7, 12, 1, KEYS);
-            if let Some(k) = key {
-                put(k, 7, 1, 1, KEY_LIT);
-            }
-        } else {
-            put(3, 7, 12, 1, ALU);
-        }
-        put(3, 8, 12, 1, ALU_DARK);
-    }
-    // o notebook de lado, no chão à direita: aberto, a moldura e a tela (com o código e o
-    // cursor, ou o ✓), o teclado e a base; fechado, deitado
-    if let Some(Side { open, screen }) = p.side {
-        if open {
-            put(18, 1, 8, 7, BEZEL);
-            put(19, 2, 6, 5, SCREEN);
-            match screen {
-                Screen::Code(chars) => {
-                    let (lines, (cx, cy)) = code_cells(chars);
-                    for (x, y, n, c) in lines {
-                        put(x, y, n, 1, c);
-                    }
-                    put(cx, cy, 1, 1, FG.alpha(0.85));
-                }
-                Screen::Done => glyph(&mut put, &CHECK_MARK, 19, 2, CHECK),
-            }
-            put(17, 8, 9, 1, KEYS);
-        } else {
-            put(17, 8, 9, 1, ALU);
-        }
-        put(17, 9, 9, 1, ALU_DARK);
-    }
-    if let Some([(lx, ly), (rx, ry)]) = p.claws {
-        // (a esquerda atrás das costas já foi desenhada, antes do corpo)
-        if !p.reach_back {
-            put(lx, ly, 2, 2, BODY);
-        }
-        put(rx, ry, 2, 2, BODY);
-    }
-    // os pontinhos de quem está pensando
-    for &(x, y) in DOTS.iter().take(p.dots as usize) {
-        put(x, y, 1, 1, FG);
-    }
-    // a lâmpada da ideia, com a base e os raios
-    if let Some((lit, rays)) = p.bulb {
-        let (bx, by) = BULB_AT;
-        glyph(&mut put, &BULB_GLASS, bx, by, if lit { BULB } else { BULB_OFF });
-        put(bx + 1, by + 3, 1, 1, BULB_OFF);
-        if rays {
-            put(bx - 2, by + 1, 1, 1, BULB.alpha(0.8));
-            put(bx + 4, by + 1, 1, 1, BULB.alpha(0.8));
-        }
-    }
-    // a caneca: café em cima, a caneca e a asa; e o vapor subindo
-    if let Some((up, steam)) = p.mug {
-        let (mx, my) = if p.mug_front { MUG_FRONT } else if up { MUG_UP } else { MUG_DOWN };
-        put(mx, my, 2, 1, COFFEE);
-        put(mx, my + 1, 2, 2, MUG);
-        put(mx + 2, my + 1, 1, 1, MUG);
-        let s = steam as i32;
-        put(mx + s, my - 1, 1, 1, FG.alpha(0.55));
-        put(mx + 1 - s, my - 2, 1, 1, FG.alpha(0.55));
-    }
-    if p.check {
-        glyph(&mut put, &CHECK_MARK, CHECK_AT.0, CHECK_AT.1, CHECK);
-    }
-    // os "z" de quem dorme
-    if let Some(t) = p.zzz {
-        for (rows, gx, gy, alpha) in zs_at(t) {
-            glyph(&mut put, rows, gx, gy, FG.alpha(alpha));
-        }
-    }
-    v
-}
-
-/// Tamanho de um quadradinho, em pontos, para algo de `unit` pontos: um número inteiro de
-/// pixels da tela (o desenho fica nítido).
-pub fn unit_for(c: &Canvas, unit: f32) -> f32 {
-    (unit * c.s).round().max(1.0) / c.s
-}
-
-/// Desenha o Clawd centrado em (cx, cy), com quadradinhos de mais ou menos `unit` pontos.
-/// Devolve a largura usada.
-pub fn draw(c: &mut Canvas, cx: f32, cy: f32, unit: f32, p: &Pose) -> f32 {
-    let s = c.s;
-    let u = unit_for(c, unit);
-    let (w, h) = (COLS * u, ROWS * u);
+/// O canto de cima da grade, em pontos (em pixels inteiros), e o tamanho de um quadradinho, com
+/// o centro da grade em (cx, cy).
+pub fn origin(s: f32, cx: f32, cy: f32, unit: f32) -> (f32, f32, f32) {
+    let c = cell_px(s, unit) / s;
     let snap = |v: f32| (v * s).round() / s;
-    let (x0, y0) = (snap(cx - w / 2.0), snap(cy - h / 2.0));
+    (snap(cx - COLS / 2.0 * c), snap(cy - ROWS / 2.0 * c), c)
+}
+
+/// Desenha o Clawd com o centro da grade em (cx, cy), num lugar de `unit` pontos. Devolve a
+/// largura da grade.
+pub fn draw(c: &mut Canvas, cx: f32, cy: f32, unit: f32, p: &Pose) -> f32 {
+    let (x0, y0, u) = origin(c.s, cx, cy, unit);
     for (x, y, cw, ch, col) in cells(p) {
         let (ax, ay) = (x0 + x as f32 * u, y0 + y as f32 * u);
         c.fill_round_rect(ax, ay, ax + cw as f32 * u, ay + ch as f32 * u, 0.0, col);
     }
-    w
+    COLS * u
 }
 
-/// Segundos por página para o Claude Code dando `per_min` passos por minuto (respostas e
-/// resultados de ferramentas): quanto mais rápido ele trabalha, mais rápido o Clawd escreve.
+/// Segundos de digitação por vez, para o Claude Code dando `per_min` passos por minuto
+/// (respostas e resultados de ferramentas): quanto mais rápido ele trabalha, mais rápido o Clawd
+/// digita.
 pub fn pace_for(per_min: f32) -> f32 {
     (PACE_SLOW - per_min * 0.12).clamp(PACE_FAST, PACE_SLOW)
 }
+
+/// As letras de código que uma digitação de `secs` segundos põe na tela.
+fn chars_typed(secs: f32) -> i32 {
+    ((secs * KEYS_PER_SEC).round().max(4.0) * 1.25) as i32
+}
+
+// ---------- quando e o que anima ----------
 
 /// Quando e o que o Clawd anima.
 pub struct Crab {
     /// a animação, quando começou e quanto dura (segundos)
     anim: Option<(Anim, Instant, f32)>,
+    /// a que vem logo depois desta (o confete depois de recolher a placa)
+    queue: Option<Anim>,
     next: Instant,
     seed: u64,
     /// o humor e o desenho do último tick (só redesenha quando o desenho muda)
     mood: Mood,
     last: Option<Vec<Cell>>,
-    /// segundos por página (o ritmo do Claude Code)
+    /// segundos de digitação por vez (o ritmo do Claude Code)
     pub pace: f32,
-    /// teve uma ideia: a próxima página sai mais rápido
+    /// teve uma ideia: a próxima digitação sai mais rápido
     inspired: bool,
     /// trabalhando há um bom tempo (pode parar para um café), e quando foi o último
     pub tired: bool,
     last_coffee: Option<Instant>,
+    /// a tarefa de agora é de Sherlock, e se ele já pôs o chapéu
+    sherlock: bool,
+    hat: bool,
+    /// as letras de código na tela do notebook de lado
+    code: i32,
+    /// pode pôr o fone (sem números, ele fica embaixo do anel, e as notas chegariam nele)
+    pub music: bool,
 }
 
 impl Default for Crab {
@@ -945,6 +1593,7 @@ impl Crab {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7) | 1;
         Crab {
             anim: None,
+            queue: None,
             next: Instant::now() + Duration::from_secs(3),
             seed,
             mood: Mood::Normal,
@@ -953,6 +1602,10 @@ impl Crab {
             inspired: false,
             tired: false,
             last_coffee: None,
+            sherlock: false,
+            hat: false,
+            code: 0,
+            music: true,
         }
     }
 
@@ -965,6 +1618,15 @@ impl Crab {
         c
     }
 
+    /// O mesmo, numa tarefa de Sherlock, já de chapéu (para as imagens e os testes).
+    #[cfg(test)]
+    pub fn dressed(mut self) -> Crab {
+        self.sherlock = true;
+        self.hat = true;
+        self.code = 20;
+        self
+    }
+
     fn random(&mut self) -> u64 {
         // xorshift: basta para sortear a próxima animação
         self.seed ^= self.seed << 13;
@@ -973,11 +1635,11 @@ impl Crab {
         self.seed
     }
 
-    /// A animação tocando agora e quanto dela já foi (0 a 1).
-    fn current(&self) -> Option<(Anim, f32)> {
+    /// A animação tocando agora.
+    fn current(&self) -> Option<Play> {
         let (anim, start, secs) = self.anim?;
         let t = start.elapsed().as_secs_f32() / secs;
-        (t < 1.0).then_some((anim, t))
+        (t < 1.0).then_some(Play { anim, t, secs })
     }
 
     pub fn animating(&self) -> bool {
@@ -986,21 +1648,17 @@ impl Crab {
 
     /// Está tocando `anim` agora?
     pub fn is_playing(&self, anim: Anim) -> bool {
-        self.current().is_some_and(|(a, _)| a == anim)
+        self.current().is_some_and(|p| p.anim == anim)
     }
 
-    pub fn pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
-        pose(mood, self.current(), gaze)
+    /// O que está em volta dele, visto de `view`.
+    pub fn scene(&self, view: View) -> Scene {
+        Scene { view, hat: self.hat, code: self.code.min(CODE_TOTAL) }
     }
 
-    /// O quadro com o notebook no colo, no lugar do caderno (o pequeno).
-    pub fn laptop_pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
-        on_laptop(self.pose(mood, gaze), gaze)
-    }
-
-    /// O quadro com o notebook de lado, com a tela à mostra (o médio, o grande e a barra).
-    pub fn side_pose(&self, mood: Mood, gaze: Option<(i32, i32)>) -> Pose {
-        on_side_laptop(self.pose(mood, gaze), gaze)
+    /// O quadro de agora, visto de `view`.
+    pub fn pose(&self, mood: Mood, gaze: Option<(i32, i32)>, view: View) -> Pose {
+        pose(mood, self.current(), &self.scene(view), gaze)
     }
 
     /// Quando acordar: o próximo quadro, se está animando; senão, a próxima animação.
@@ -1016,39 +1674,73 @@ impl Crab {
     pub fn tick(&mut self, mood: Mood) -> bool {
         let now = Instant::now();
         if mood != self.mood {
-            // começou a trabalhar: pega o caderno logo, sem esperar o intervalo de antes
-            if mood == Mood::Busy {
-                self.next = self.next.min(now + Duration::from_millis(600));
-            }
+            let before = self.mood;
             self.mood = mood;
             self.last = None;
+            if mood == Mood::Limit {
+                // chegou ao limite: a placa e o livro
+                self.queue = None;
+                self.play(Anim::SignUp);
+            } else if before == Mood::Limit {
+                // o limite reiniciou: recolhe a placa e comemora
+                self.play(Anim::SignDown);
+                self.queue = Some(Anim::Party);
+            } else if before == Mood::Sleepy && !self.animating() {
+                // o Claude Code voltou: acorda devagar
+                self.play(Anim::Wake);
+            }
+            if before == Mood::Busy && !self.is_playing(Anim::Done) {
+                self.sherlock = false;
+                self.hat = false;
+            }
+            if mood == Mood::Busy && before != Mood::Busy {
+                // começou a trabalhar: pega o notebook logo; de vez em quando, de Sherlock
+                self.sherlock = self.random() % SHERLOCK_ONE_IN == 0;
+                self.hat = false;
+                self.next = self.next.min(now + Duration::from_millis(600));
+            }
         }
-        if self.anim.is_some() {
+        if let Some((anim, _, secs)) = self.anim {
             if !self.animating() {
                 // acabou: volta à pose parada e espera um pouco até a próxima
                 self.anim = None;
+                match anim {
+                    Anim::Type => self.code = (self.code + chars_typed(secs)).min(CODE_TOTAL),
+                    Anim::Done => {
+                        self.sherlock = false;
+                        self.hat = false;
+                        self.code = 0;
+                    }
+                    _ => {}
+                }
+                self.last = None;
+                if let Some(next) = self.queue.take() {
+                    self.play(next);
+                    return true;
+                }
                 let (lo, hi) = match mood {
                     Mood::Sleepy => (5, 9),
                     Mood::Busy => (1, 4),
+                    Mood::Limit => (3, 8),
                     _ => (7, 16),
                 };
                 self.next = now + Duration::from_secs(lo + self.random() % (hi - lo));
-                // com uma ideia na cabeça, volta a escrever logo
-                if self.inspired && mood == Mood::Busy {
+                // com uma ideia na cabeça (ou o chapéu para pôr), volta ao trabalho logo
+                if mood == Mood::Busy && (self.inspired || (self.sherlock && !self.hat)) {
                     self.next = now + Duration::from_millis(300);
                 }
-                self.last = None;
                 return true;
             }
         } else if now >= self.next {
             let anim = self.pick(mood);
             self.play(anim);
         }
-        // parado não redesenha; animando, só se o quadro mudou (escrevendo, o lápis anda devagar)
+        // parado não redesenha; animando, só se o quadro mudou
         if self.anim.is_none() {
             return false;
         }
-        let drawn = cells(&self.pose(mood, None));
+        let mut drawn = cells(&self.pose(mood, None, View::Front));
+        drawn.extend(cells(&self.pose(mood, None, View::Side)));
         let changed = self.last.as_ref() != Some(&drawn);
         self.last = Some(drawn);
         changed
@@ -1059,13 +1751,20 @@ impl Crab {
     pub fn play(&mut self, anim: Anim) {
         let mut secs = anim.secs(self.pace);
         match anim {
-            // a página depois de uma ideia sai na metade do tempo
-            Anim::Write | Anim::Erase | Anim::Crumple if self.inspired => {
-                secs *= 0.5;
-                self.inspired = false;
+            Anim::Type => {
+                // a tela cheia: começa outra
+                if self.code >= CODE_TOTAL {
+                    self.code = 0;
+                }
+                // a digitação depois de uma ideia sai na metade do tempo
+                if self.inspired {
+                    secs *= 0.5;
+                    self.inspired = false;
+                }
             }
             Anim::Idea => self.inspired = true,
             Anim::Coffee => self.last_coffee = Some(Instant::now()),
+            Anim::HatOn => self.hat = true,
             _ => {}
         }
         self.anim = Some((anim, Instant::now(), secs));
@@ -1078,10 +1777,21 @@ impl Crab {
             return;
         }
         let anim = match mood {
-            Mood::Sleepy => Anim::Hop, // acorda num pulo
+            Mood::Sleepy => Anim::Startle, // acorda num susto
             Mood::Worried => Anim::Shake,
-            Mood::Busy => Anim::Wave, // acena sem largar o caderno
+            Mood::Busy => Anim::Wave, // acena sem largar o notebook
+            Mood::Limit => Anim::Laugh,
             Mood::Normal => [Anim::Wave, Anim::Hop][(self.random() % 2) as usize],
+        };
+        self.play(anim);
+    }
+
+    /// O mouse chegou em cima dele: acena (parado, às vezes fica corado, com um coração).
+    pub fn greet(&mut self, mood: Mood) {
+        let anim = match mood {
+            Mood::Normal => [Anim::Wave, Anim::Love][(self.random() % 2) as usize],
+            Mood::Limit => Anim::Laugh,
+            _ => Anim::Wave,
         };
         self.play(anim);
     }
@@ -1090,49 +1800,92 @@ impl Crab {
         match mood {
             Mood::Sleepy => Anim::Snooze,
             Mood::Busy => {
+                if self.sherlock && !self.hat {
+                    return Anim::HatOn;
+                }
                 if self.inspired {
-                    return Anim::Write;
+                    return Anim::Type;
                 }
                 // um café de vez em quando, depois de muito tempo trabalhando
                 let coffee_due = self.tired && self.last_coffee.is_none_or(|t| t.elapsed() >= COFFEE_EVERY);
                 if coffee_due && self.random() % 3 == 0 {
                     return Anim::Coffee;
                 }
-                // quase sempre escrevendo; às vezes apaga, amassa, pensa, tem uma ideia, batuca
-                const BUSY: [Anim; 15] = [
-                    Anim::Write,
-                    Anim::Write,
-                    Anim::Write,
-                    Anim::Write,
-                    Anim::Write,
-                    Anim::Write,
-                    Anim::Erase,
-                    Anim::Erase,
-                    Anim::Crumple,
-                    Anim::Think,
-                    Anim::Think,
-                    Anim::Idea,
-                    Anim::Tap,
-                    Anim::Blink,
-                    Anim::Look,
-                ];
-                BUSY[(self.random() % BUSY.len() as u64) as usize]
+                // quase sempre digitando; às vezes pensa (de Sherlock, investiga), tem uma ideia
+                const BUSY: [Anim; 11] = [Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Think, Anim::Think, Anim::Idea, Anim::Blink, Anim::Look];
+                match BUSY[(self.random() % BUSY.len() as u64) as usize] {
+                    Anim::Think if self.hat => Anim::Investigate,
+                    a => a,
+                }
             }
             Mood::Worried => [Anim::Sweat, Anim::Shake, Anim::Sweat, Anim::Blink][(self.random() % 4) as usize],
-            // piscar é o mais comum; pular e acenar, os mais raros
-            Mood::Normal => [Anim::Blink, Anim::Blink, Anim::Blink, Anim::Look, Anim::Look, Anim::Scuttle, Anim::Scuttle, Anim::Hop, Anim::Wave][(self.random() % 9) as usize],
+            // lendo: quase sempre virando a página; às vezes ri ou cochila
+            Mood::Limit => [Anim::Read, Anim::Read, Anim::Read, Anim::Laugh, Anim::Nod, Anim::Blink][(self.random() % 6) as usize],
+            // piscar é o mais comum; pular, acenar e a música, os mais raros
+            Mood::Normal => match [Anim::Blink, Anim::Blink, Anim::Blink, Anim::Look, Anim::Look, Anim::Scuttle, Anim::Scuttle, Anim::Hop, Anim::Wave, Anim::Music][(self.random() % 10) as usize] {
+                Anim::Music if !self.music => Anim::Blink,
+                a => a,
+            },
         }
     }
+}
+
+/// As animações que podem tocar em cada humor (`data`: com números; sem eles, não trabalha nem
+/// chega ao limite), para conferir o espaço de cada quadro.
+#[cfg(test)]
+pub fn anims_for(mood: Mood, data: bool) -> Vec<Anim> {
+    use Anim::*;
+    match mood {
+        Mood::Normal if data => vec![Blink, Look, Scuttle, Hop, Wave, Love, Music, Party, Wake, Startle, Done, SignDown],
+        Mood::Normal => vec![Blink, Look, Scuttle, Hop, Wave, Love, Wake, Startle],
+        Mood::Sleepy => vec![Snooze, Startle, Wake],
+        Mood::Busy => vec![Blink, Look, Wave, Hop, Type, Think, Idea, Coffee, HatOn, Investigate, Wake],
+        Mood::Worried => vec![Sweat, Shake, Blink, Wave, Hop],
+        Mood::Limit => vec![SignUp, Read, Laugh, Nod, Blink, Hop],
+    }
+}
+
+/// Todos os desenhos diferentes que o Clawd pode fazer num humor, visto de `view`: parado e em
+/// cada animação que toca nele (de 25 em 25 ms), de chapéu ou não e com a tela vazia, pela
+/// metade ou cheia; cada um com a animação de onde veio (None: parado).
+#[cfg(test)]
+pub fn frames_for(mood: Mood, view: View, data: bool) -> Vec<(Option<Anim>, Vec<Cell>)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut add = |anim: Option<Anim>, cs: Vec<Cell>| {
+        let key: Vec<_> = cs.iter().map(|&(x, y, w, h, c)| (x, y, w, h, c.0, c.1, c.2, c.3)).collect();
+        if seen.insert((anim.map(|a| a as u8), key)) {
+            out.push((anim, cs));
+        }
+    };
+    for hat in [false, true] {
+        for code in [0, 20, CODE_TOTAL] {
+            let scene = Scene { view, hat, code };
+            add(None, cells(&pose(mood, None, &scene, None)));
+            for anim in anims_for(mood, data) {
+                let secs = anim.secs(PACE);
+                let n = (secs * 1000.0 / 25.0).ceil() as usize;
+                for i in 0..n {
+                    add(Some(anim), cells(&pose(mood, Some(Play { anim, t: i as f32 / n as f32, secs }), &scene, None)));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Os quadradinhos ocupados (sem cor), para comparar desenhos.
-    fn grid(p: &Pose) -> std::collections::BTreeSet<(i32, i32)> {
+    /// Os quadradinhos ocupados (sem cor; os quase transparentes não contam), para comparar
+    /// desenhos.
+    fn grid(cs: &[Cell]) -> std::collections::BTreeSet<(i32, i32)> {
         let mut set = std::collections::BTreeSet::new();
-        for (x, y, w, h, _) in cells(p) {
+        for &(x, y, w, h, c) in cs {
+            if c.3 < 10 {
+                continue;
+            }
             for i in x..x + w {
                 for j in y..y + h {
                     set.insert((i, j));
@@ -1142,353 +1895,298 @@ mod tests {
         set
     }
 
+    fn only(cs: &[Cell], colors: &[Rgba]) -> std::collections::BTreeSet<(i32, i32)> {
+        grid(&cs.iter().filter(|c| colors.contains(&c.4)).cloned().collect::<Vec<_>>())
+    }
+
+    fn scene(view: View) -> Scene {
+        Scene::new(view)
+    }
+
+    fn at(mood: Mood, anim: Anim, t: f32, sc: &Scene) -> Pose {
+        pose(mood, Some(Play { anim, t, secs: anim.secs(PACE) }), sc, None)
+    }
+
     #[test]
-    fn standing_clawd_is_the_terminal_logo() {
-        // ▐▛███▜▌ / ▝▜█████▛▘ / ▘▘ ▝▝ em quadradinhos (cada bloco do terminal tem 1 × 2)
-        let p = pose(Mood::Normal, None, None);
-        let cells = cells(&p);
-        let body: Vec<_> = cells.iter().filter(|c| c.4 == BODY).collect();
-        let g: std::collections::BTreeSet<_> = body.iter().flat_map(|&&(x, y, w, h, _)| (x..x + w).flat_map(move |i| (y..y + h).map(move |j| (i, j)))).collect();
-        assert!(g.contains(&(3, 0)) && g.contains(&(14, 0)) && !g.contains(&(2, 0)) && !g.contains(&(15, 0)), "cabeça de 3 a 14");
-        assert!(g.contains(&(1, 4)) && g.contains(&(16, 5)) && !g.contains(&(0, 4)) && !g.contains(&(17, 4)), "garras de 1 a 16");
-        for x in [4, 6, 11, 13] {
-            assert!(g.contains(&(x, 8)) && g.contains(&(x, 9)), "pata em {x}");
+    fn standing_clawd_is_the_logo_with_volume() {
+        let cs = cells(&pose(Mood::Normal, None, &scene(View::Front), None));
+        let g = grid(&cs);
+        // a cabeça (com a luz em cima) e os cantos arredondados; o corpo de 4 a 22
+        let light = only(&cs, &[LIGHT]);
+        assert!(light.contains(&(5, 0)) && light.contains(&(21, 0)) && !g.contains(&(4, 0)) && !g.contains(&(22, 0)));
+        assert!(g.contains(&(4, 5)) && g.contains(&(22, 5)) && !g.contains(&(3, 5)));
+        // a sombra à direita e embaixo
+        let shade = only(&cs, &[SHADE]);
+        assert!(shade.contains(&(22, 4)) && shade.contains(&(10, 11)));
+        // os olhos com o brilho
+        assert_eq!(only(&cs, &[EYE]).len(), 2 * 6);
+        assert!(only(&cs, &[SHINE]) == [(8, 3), (19, 3)].into_iter().collect());
+        // as garras dos lados, com a pinça aberta para fora, e as patas de dois quadradinhos
+        assert!(g.contains(&(1, 6)) && g.contains(&(25, 6)) && !g.contains(&(1, 7)) && !g.contains(&(25, 7)) && g.contains(&(2, 7)));
+        for x in [6, 7, 9, 10, 16, 17, 19, 20] {
+            assert!((12..15).all(|y| g.contains(&(x, y))), "pata em {x}");
         }
-        assert!(!g.contains(&(5, 9)) && !g.contains(&(12, 9)));
-        // os olhos, escuros, no lugar dos buracos do logo
-        let eyes: Vec<_> = cells.iter().filter(|c| c.4 == EYE).map(|c| (c.0, c.1, c.3)).collect();
-        assert_eq!(eyes, vec![(5, 2, 2), (12, 2, 2)]);
-        // e tudo dentro da grade
+        // parado, sem boca (como o logo), e tudo dentro da grade
+        assert!(only(&cs, &[MOUTH]).is_empty());
         assert!(g.iter().all(|&(x, y)| (0..COLS as i32).contains(&x) && (0..ROWS as i32).contains(&y)));
     }
 
     #[test]
-    fn every_animation_changes_the_drawing_and_ends() {
-        // as de cada humor: as que ele sorteia e a do mouse entrando
-        let uses = [
-            (Mood::Normal, vec![Anim::Blink, Anim::Look, Anim::Scuttle, Anim::Hop, Anim::Wave]),
-            (Mood::Sleepy, vec![Anim::Snooze, Anim::Look]),
-            (Mood::Busy, vec![Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Blink, Anim::Look, Anim::Wave]),
-            (Mood::Worried, vec![Anim::Sweat, Anim::Shake, Anim::Blink]),
-            // o fim do trabalho toca já com o humor de depois
-            (Mood::Normal, vec![Anim::Done]),
-        ];
-        for (mood, anims) in uses {
-            let still = pose(mood, None, None);
-            for anim in anims {
-                // em algum momento da animação o desenho é outro
-                let moves = (1..20).any(|k| {
-                    let p = pose(mood, Some((anim, k as f32 / 20.0)), None);
-                    p != still || grid(&p) != grid(&still)
-                });
-                assert!(moves, "{anim:?} com humor {mood:?} não mexe em nada");
-                // e nada sai muito da grade (cabe no espaço reservado em volta do desenho: os
-                // "z" sobem até 3 quadradinhos acima e vão até 5 à direita)
-                for k in 0..=40 {
-                    let p = pose(mood, Some((anim, k as f32 / 40.0)), None);
-                    assert!(grid(&p).iter().all(|&(x, y)| (-2..COLS as i32 + 5).contains(&x) && (-3..ROWS as i32 + 1).contains(&y)), "{anim:?} sai da grade");
+    fn the_drawings_in_text_are_rectangles() {
+        let sets: [&[&str]; 13] = [&HAT_ART, &MAG_ART, &PIPE_ART, &CUP_ART, &CUP_SIP, &PHONES_ART, &READ_ART, &CHECK_MARK, &BULB_GLASS, &LOGO_MARK, &Z3, &NOTE8, &HEART_L];
+        for rows in sets {
+            assert!(rows.iter().all(|r| r.len() == rows[0].len()), "{rows:?}");
+        }
+        // o chapéu e o fone, de frente, são simétricos
+        for rows in [&HAT_ART[..], &PHONES_ART[..]] {
+            for r in rows {
+                let shape: Vec<bool> = r.chars().map(|c| c != '.').collect();
+                let back: Vec<bool> = shape.iter().rev().cloned().collect();
+                assert_eq!(shape, back, "{r}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_animation_moves_and_stays_in_its_room() {
+        for data in [true, false] {
+            for mood in [Mood::Normal, Mood::Sleepy, Mood::Busy, Mood::Worried, Mood::Limit] {
+                if !data && matches!(mood, Mood::Busy | Mood::Worried | Mood::Limit) {
+                    continue;
+                }
+                for view in [View::Front, View::Side] {
+                    let sc = scene(view);
+                    let still = cells(&pose(mood, None, &sc, None));
+                    for anim in anims_for(mood, data) {
+                        let moves = (0..40).any(|k| cells(&at(mood, anim, k as f32 / 40.0, &sc)) != still);
+                        assert!(moves, "{anim:?} com humor {mood:?} não mexe em nada");
+                        // e nada sai do espaço em volta da grade
+                        for k in 0..=80 {
+                            let g = grid(&cells(&at(mood, anim, k as f32 / 80.0, &sc)));
+                            assert!(g.iter().all(|&(x, y)| (-8..SIDE_COLS as i32 + 3).contains(&x) && (-9..ROWS as i32 + 3).contains(&y)), "{anim:?} {view:?} sai do lugar");
+                        }
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn writes_the_page_letter_by_letter_and_turns_it() {
-        let letters = |ink: u16| ink.count_ones() as i32;
-        let all: i32 = WORDS.iter().map(|w| w.2).sum();
-        for anim in [Anim::Write, Anim::Erase, Anim::Crumple] {
-            // uma letra por vez (escrevendo ou apagando), com o lápis na letra que mudou
-            let (mut before, mut lifted, mut rubbed) = (0u16, 0, 0);
-            for k in 0..=400 {
-                let t = k as f32 / 400.0 * write_end(anim) * 0.999;
-                let page = page_at(anim, t);
-                assert!(!page.lifted && page.ball.is_none());
-                assert!((letters(page.ink) - letters(before)).abs() <= 1, "{anim:?}: pulou letras em {t}");
-                let pen = page.pen.expect("o lápis some escrevendo");
-                if page.ink != before {
-                    assert!(pen.down && page.ink ^ before == bit(pen.x, pen.y), "{anim:?}: a letra mudou longe do lápis");
-                    // escreve com a ponta e apaga com a borracha
-                    assert_eq!(pen.eraser, page.ink < before, "{anim:?}: lápis do lado errado");
-                    rubbed += (page.ink < before) as i32;
-                }
-                lifted += (!pen.down) as i32;
-                before = page.ink;
-            }
-            assert_eq!(letters(before), all, "{anim:?}: não terminou a página");
-            assert!(lifted > 0, "{anim:?}: não levanta o lápis entre as palavras");
-            assert_eq!(rubbed, if anim == Anim::Erase { WORDS[3].2 } else { 0 }, "{anim:?}: apagou o que não devia");
-            // depois vira a página (ou amassa) e volta ao começo: o fim emenda com o caderno
-            // parado, sem pulo
-            assert!(page_at(anim, write_end(anim) + 0.02).lifted);
-            assert_eq!(pose(Mood::Busy, Some((anim, 0.995)), None).notebook, pose(Mood::Busy, None, None).notebook);
-            assert_eq!(page_at(anim, 0.0).ink, 0);
-        }
-        // tudo dentro da folha, e a folha dentro do corpo e em cima do chão
-        for &(y, x, n) in &WORDS {
-            assert!(x > PAGE_X.0 && x + n < PAGE_X.1 && y > PAGE_Y.0 + 1 && y < PAGE_Y.1 - 1);
-        }
-        assert!(PAGE_X.0 > 3 && PAGE_X.1 < 15 && PAGE_Y.1 <= ROWS as i32);
-        // e os olhos (olhando para baixo) não ficam cobertos pela folha
-        let cells = cells(&pose(Mood::Busy, Some((Anim::Write, 0.3)), None));
-        let eyes = cells.iter().position(|c| c.4 == EYE).unwrap();
-        let page = cells.iter().position(|c| c.4 == COVER).unwrap();
-        assert!(eyes < page && cells.iter().filter(|c| c.4 == EYE).all(|c| c.1 + c.3 <= PAGE_Y.0));
-    }
-
-    #[test]
-    fn types_on_the_laptop_on_his_lap() {
-        let at = |anim, t| on_laptop(pose(Mood::Busy, Some((anim, t)), None), None);
-        // parado: o notebook aberto no colo, as garras no teclado, olhando a tela; sem o caderno
-        let still = on_laptop(pose(Mood::Busy, None, None), None);
-        assert_eq!(still.laptop, Some(Laptop { open: true, key: None }));
-        assert!(still.notebook.is_none() && still.claws == Some(ON_KEYS) && still.eyes == Eyes::Open);
-        // escrevendo uma página: uma garra de cada vez bate numa tecla, e elas se revezam
+    fn types_on_the_laptop_with_one_claw_at_a_time() {
+        // de frente: as garras se revezam e a tecla apertada acende
+        let sc = scene(View::Front);
         let mut sides = Vec::new();
-        for k in 0..=400 {
-            let p = at(Anim::Write, k as f32 / 400.0 * write_end(Anim::Write) * 0.999);
-            let [l, r] = p.claws.unwrap();
-            assert!(!(l.1 == TAP_DOWN && r.1 == TAP_DOWN), "as duas garras batem juntas");
-            if l.1 == TAP_DOWN || r.1 == TAP_DOWN {
-                let key = p.laptop.unwrap().key.expect("bate sem tecla acesa");
-                assert!((3..15).contains(&key));
-                let side = l.1 == TAP_DOWN;
-                if sides.last() != Some(&side) {
-                    sides.push(side);
+        for k in 0..=200 {
+            let p = at(Mood::Busy, Anim::Type, k as f32 / 200.0, &sc);
+            assert!(p.front.is_some_and(|f| f.open) && p.glow);
+            let down = p.claws.map(|c| c == Claw::KeyDown);
+            assert!(!(down[0] && down[1]), "as duas garras batem juntas");
+            if down[0] || down[1] {
+                assert!(p.front.unwrap().key.is_some(), "bate sem tecla acesa");
+                if sides.last() != Some(&down[0]) {
+                    sides.push(down[0]);
                 }
             }
         }
-        assert!(sides.len() >= 8, "não reveza as garras: {sides:?}");
-        // a tampa fica embaixo dos olhos (ele enxerga a tela), e tudo dentro da grade, com as
-        // garras por cima do notebook
-        for anim in [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Wave, Anim::Blink, Anim::Look] {
-            for k in 0..=40 {
-                let p = at(anim, k as f32 / 40.0);
-                assert!(p.notebook.is_none() && p.laptop.is_some(), "{anim:?}: sem o notebook");
-                let cells = cells(&p);
-                assert!(cells.iter().filter(|c| c.4 == EYE).all(|c| c.1 + c.3 <= 4), "{anim:?}: a tampa cobre os olhos");
-                let lid = cells.iter().position(|c| c.4 == ALU).unwrap();
-                let claw = cells.iter().rposition(|c| c.4 == BODY).unwrap();
-                assert!(claw > lid, "{anim:?}: a garra fica atrás do notebook");
-                assert!(grid(&p).iter().all(|&(x, y)| (-2..COLS as i32 + 5).contains(&x) && (-3..ROWS as i32 + 1).contains(&y)), "{anim:?} sai da grade");
-            }
+        assert!(sides.len() >= 8, "não reveza: {sides:?}");
+        // olhando para a tela, os olhos espiam por cima da tampa (ela cobre só a última linha)
+        let cs = cells(&pose(Mood::Busy, None, &sc, None));
+        let lid = cs.iter().position(|c| c.4 == ALU).unwrap();
+        assert!(cs.iter().position(|c| c.4 == EYE).unwrap() < lid);
+        assert!(only(&cs, &[EYE]).iter().filter(|&&(_, y)| y < 6).count() >= 8);
+        // de lado: o código cresce na tela, sem pular
+        let sc = Scene { code: 5, ..scene(View::Side) };
+        let mut before = 5;
+        for k in 0..=200 {
+            let code = at(Mood::Busy, Anim::Type, k as f32 / 200.0, &sc).side.unwrap().code;
+            assert!(code >= before && code - before <= 2, "o código pula");
+            before = code;
         }
-        // com uma ideia, levanta as garras do teclado; com a caneca na boca, a da direita a segura
-        assert_eq!(at(Anim::Idea, 0.5).claws, Some([(1, 2), (15, 2)]));
-        assert_eq!(at(Anim::Coffee, 0.5).claws.unwrap()[1], (15, 4));
-        // pensando, continua olhando para cima, para os pontinhos
-        assert_eq!(at(Anim::Think, 0.5).eyes, Eyes::Look(1, -1));
-        // o mouse por perto: olha para ele, não para a tela
-        assert_eq!(on_laptop(pose(Mood::Busy, Some((Anim::Write, 0.3)), Some((1, 1))), Some((1, 1))).eyes, Eyes::Look(1, 1));
-        // terminou: fecha a tampa, depois se espreguiça sem o notebook
-        let done = |t| on_laptop(pose(Mood::Normal, Some((Anim::Done, t)), None), None);
-        assert_eq!(done(0.1).laptop, Some(Laptop { open: false, key: None }));
-        assert!(!done(0.1).closed, "fechou o caderno em vez da tampa");
-        assert!(done(0.35).laptop.is_none() && done(0.9).laptop.is_none());
-        // sem trabalho, nada muda
-        assert_eq!(on_laptop(pose(Mood::Normal, None, None), None), pose(Mood::Normal, None, None));
-    }
-
-    #[test]
-    fn programs_on_the_side_laptop_with_the_screen_showing() {
-        let at = |anim, t| on_side_laptop(pose(Mood::Busy, Some((anim, t)), None), None);
-        let code = |p: &Pose| match p.side.unwrap().screen {
-            Screen::Code(n) => n,
-            Screen::Done => -1,
-        };
-        // parado: a tela aberta, ainda vazia, olhando para ela
-        let still = on_side_laptop(pose(Mood::Busy, None, None), None);
-        assert!(still.side == Some(Side { open: true, screen: Screen::Code(0) }) && still.notebook.is_none());
-        assert_eq!(still.eyes, Eyes::Look(1, 0));
-        // escrevendo uma página: o código cresce letra a letra, a garra direita bate no teclado
-        let (mut before, mut taps, mut last_y) = (0, 0, 0);
-        for k in 0..=400 {
-            let p = at(Anim::Write, k as f32 / 400.0 * write_end(Anim::Write) * 0.999);
-            let n = code(&p);
-            assert!(n >= before && n - before <= CODE_PER_LETTER, "o código pula em {k}");
-            before = n;
-            let y = p.claws.unwrap()[1].1;
-            taps += (y != last_y) as i32;
-            last_y = y;
+        assert!(before > 15);
+        // a tela mostra no máximo 4 linhas, dentro dela, com o cursor também dentro
+        for code in 0..=CODE_TOTAL {
+            let cs = cells(&Pose { side: Some(Side { open: true, code, done: false, key: None }), ..stand() });
+            let lines = only(&cs, &CODE);
+            assert!(lines.iter().all(|&(x, y)| (29..36).contains(&x) && (3..12).contains(&y)), "{code}");
+            assert!(lines.iter().map(|p| p.1).collect::<std::collections::BTreeSet<_>>().len() <= 4);
         }
-        let full: i32 = LINES.iter().map(|l| l.1).sum();
-        assert!(before >= full - CODE_PER_LETTER && taps >= 8, "{before} {taps}");
-        // a tela mostra no máximo 5 linhas, dentro dela, com o cursor também dentro
-        for n in 0..=full {
-            let (lines, (cx, cy)) = code_cells(n);
-            assert!(lines.len() <= 5);
-            assert!(lines.iter().all(|&(x, y, w, _)| x >= 19 && x + w <= 25 && (2..7).contains(&y)), "{n}");
-            assert!((19..25).contains(&cx) && (2..7).contains(&cy), "cursor fora da tela em {n}");
+    }
+
+    #[test]
+    fn coffee_is_held_to_the_side_and_sipped() {
+        for view in [View::Front, View::Side] {
+            let sc = scene(view);
+            let hold = at(Mood::Busy, Anim::Coffee, 0.3, &sc);
+            assert!(hold.cup.is_some_and(|(sip, steam)| !sip && steam.is_some()) && hold.eyes == Eyes::Happy);
+            assert_eq!(hold.claws[0], Claw::CupSide);
+            let sip = at(Mood::Busy, Anim::Coffee, 0.55, &sc);
+            assert!(sip.cup.is_some_and(|c| c.0) && sip.blush.is_some() && sip.claws[0] == Claw::CupFront, "{view:?}: sem o gole");
+            assert_eq!(at(Mood::Busy, Anim::Coffee, 0.9, &sc).mouth, Some(Mouth::Smile));
+            // a garra fica por cima da asa da caneca
+            let cs = cells(&hold);
+            let cup = cs.iter().position(|c| c.4 == CUP).unwrap();
+            let claw = cs.iter().rposition(|c| c.4 == LIGHT).unwrap();
+            assert!(claw > cup);
         }
-        // tudo dentro do espaço reservado (até a coluna 26), em todas as animações
-        for anim in [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Wave, Anim::Blink, Anim::Look] {
-            for k in 0..=40 {
-                let p = at(anim, k as f32 / 40.0);
-                assert!(grid(&p).iter().all(|&(x, y)| (-2..SIDE_COLS as i32).contains(&x) && (-3..ROWS as i32 + 1).contains(&y)), "{anim:?} sai da grade");
-            }
+    }
+
+    #[test]
+    fn sherlock_wears_the_hat_for_the_whole_task_now_and_then() {
+        // de vez em quando: mais ou menos uma tarefa em quatro
+        let mut crab = Crab::new();
+        let mut dressed = 0;
+        for _ in 0..400 {
+            crab.tick(Mood::Normal);
+            crab.anim = None;
+            crab.tick(Mood::Busy);
+            crab.anim = None;
+            dressed += crab.sherlock as i32;
         }
-        // o café não fica à mostra: a garra vai atrás das costas, a caneca vem à boca
-        assert!(at(Anim::Coffee, 0.1).reach_back && at(Anim::Coffee, 0.1).mug.is_none());
-        let sip = at(Anim::Coffee, 0.5);
-        assert!(sip.mug_front && !sip.reach_back && sip.eyes == Eyes::Closed);
-        assert!(at(Anim::Coffee, 0.99).mug.is_none() && !at(Anim::Coffee, 0.99).reach_back);
-        // terminou: o ✓ na tela, com as garras para cima; depois a tampa fecha no chão
-        let done = |t| on_side_laptop(pose(Mood::Normal, Some((Anim::Done, t)), None), None);
-        assert_eq!(done(0.1).side.unwrap().screen, Screen::Done);
-        assert!(done(0.1).left_up && done(0.1).right_up && !done(0.1).closed);
-        assert!(done(0.35).side.is_some_and(|s| !s.open) && done(0.9).side.is_some_and(|s| !s.open));
-        // sem trabalho, nada muda
-        assert_eq!(on_side_laptop(pose(Mood::Normal, None, None), None), pose(Mood::Normal, None, None));
-    }
-
-    #[test]
-    fn jumps_crouched_and_with_claws_up() {
-        let (crouch, air) = (jump_pose(true), jump_pose(false));
-        assert!(crouch.dy > 0 && crouch.eyes == Eyes::Closed);
-        assert!(air.left_up && air.right_up && air.legs == Legs::Tucked);
-        assert!(crouch.notebook.is_none() && crouch.laptop.is_none() && air.laptop.is_none(), "pula com o notebook");
-    }
-
-    #[test]
-    fn crumples_the_page_and_throws_it_over_the_shoulder() {
-        // a bolinha nasce na frente dele e cai do lado esquerdo, passando por cima
-        let balls: Vec<(i32, i32)> = (0..=200).filter_map(|k| page_at(Anim::Crumple, k as f32 / 200.0).ball).collect();
-        assert!(balls.len() > 10);
-        let (first, last) = (balls[0], balls[balls.len() - 1]);
-        assert!(first.0 > 6 && last.0 < 1, "não voa para a esquerda: {balls:?}");
-        assert!(balls.iter().any(|b| b.1 < first.1), "não sobe");
-        assert!(balls.windows(2).all(|w| w[1].0 <= w[0].0), "volta para trás");
-        // e os olhos acompanham
-        assert_eq!(pose(Mood::Busy, Some((Anim::Crumple, 0.85)), None).eyes, Eyes::Look(-1, -1));
-    }
-
-    #[test]
-    fn thinks_has_ideas_taps_and_drinks_coffee() {
-        let at = |anim, t| pose(Mood::Busy, Some((anim, t)), None);
-        // pensando: olha para cima e os pontinhos aparecem um a um
-        let dots: Vec<u8> = (0..=20).map(|k| at(Anim::Think, k as f32 / 20.0).dots).collect();
-        assert!(dots.windows(2).all(|w| w[1] >= w[0]) && dots[0] == 0 && dots[20] == 3, "{dots:?}");
-        assert_eq!(at(Anim::Think, 0.5).eyes, Eyes::Look(1, -1));
-        // a ideia: a lâmpada aparece apagada, pisca e acende; ele levanta as garras
-        assert_eq!(at(Anim::Idea, 0.2).bulb, Some((false, false)));
-        assert!(at(Anim::Idea, 0.32).bulb.unwrap().0 && !at(Anim::Idea, 0.4).bulb.unwrap().0, "não pisca");
-        assert!(at(Anim::Idea, 0.9).bulb.unwrap().0 && at(Anim::Idea, 0.5).left_up);
-        // batucando: o lápis sobe e desce no mesmo lugar
-        let taps: Vec<bool> = (0..16).map(|k| at(Anim::Tap, k as f32 / 16.0).notebook.unwrap().pen.unwrap().down).collect();
-        assert!(taps.windows(2).filter(|w| w[0] != w[1]).count() >= 6);
-        // o café: no chão, levantado de olhos fechados, de volta e some no fim
-        assert_eq!(at(Anim::Coffee, 0.1).mug.map(|m| m.0), Some(false));
-        assert_eq!(at(Anim::Coffee, 0.5).mug.map(|m| m.0), Some(true));
-        assert_eq!(at(Anim::Coffee, 0.5).eyes, Eyes::Closed);
-        assert_eq!(at(Anim::Coffee, 0.99).mug, None);
-        // a garra continua à vista segurando a caneca levantada
-        let up = cells(&at(Anim::Coffee, 0.5));
-        let claw = up.iter().position(|c| c.0 == 15 && c.1 == 4 && c.4 == BODY).unwrap();
-        let mug = up.iter().position(|c| c.4 == MUG).unwrap();
-        assert!(claw < mug && MUG_UP.0 > 15);
-    }
-
-    #[test]
-    fn closes_the_notebook_stretches_and_checks_when_done() {
-        let at = |t| pose(Mood::Normal, Some((Anim::Done, t)), None);
-        assert!(at(0.1).closed && at(0.1).notebook.is_none());
-        let stretch = at(0.35);
-        assert!(stretch.legs == Legs::Stretch && stretch.left_up && stretch.right_up && stretch.dy == -1 && stretch.eyes == Eyes::Closed);
-        // de pé no chão, esticado: as patas chegam até embaixo
-        assert!(grid(&stretch).contains(&(4, ROWS as i32 - 1)));
-        assert!(at(0.6).check && at(0.95).check && !at(0.72).check, "o ✓ não pisca");
-        // e acaba como ele fica parado (sem o caderno)
-        assert_eq!(cells(&at(1.0)).len(), cells(&pose(Mood::Normal, None, None)).len() + CHECK_MARK.iter().map(|r| r.split('.').filter(|s| !s.is_empty()).count()).sum::<usize>());
-    }
-
-    #[test]
-    fn an_idea_speeds_up_the_next_page_and_coffee_waits_for_a_long_session() {
+        assert!((50..160).contains(&dressed), "{dressed} de 400");
+        // de Sherlock: primeiro põe o chapéu; daí em diante, investiga em vez de pensar
         let mut crab = Crab::new();
         crab.mood = Mood::Busy;
-        crab.play(Anim::Idea);
-        assert_eq!(crab.pick(Mood::Busy), Anim::Write, "depois da ideia, escreve");
-        crab.play(Anim::Write);
-        let fast = crab.anim.unwrap().2;
-        crab.play(Anim::Write);
-        assert!((fast - crab.pace * 0.5).abs() < 1e-4 && (crab.anim.unwrap().2 - crab.pace).abs() < 1e-4, "só a página seguinte é mais rápida");
-        // o ritmo do Claude Code muda a velocidade, dentro de limites
-        assert!(pace_for(0.0) == PACE_SLOW && pace_for(1000.0) == PACE_FAST && pace_for(20.0) < pace_for(5.0));
-        // café só trabalhando há muito tempo, e não de novo logo em seguida
-        let mut crab = Crab::new();
-        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Coffee));
-        crab.tired = true;
-        assert!((0..300).any(|_| crab.pick(Mood::Busy) == Anim::Coffee));
-        crab.play(Anim::Coffee);
-        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Coffee));
+        crab.sherlock = true;
+        assert_eq!(crab.pick(Mood::Busy), Anim::HatOn);
+        crab.play(Anim::HatOn);
+        assert!(crab.hat);
+        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Think));
+        assert!((0..300).any(|_| crab.pick(Mood::Busy) == Anim::Investigate));
+        // o chapéu em todos os quadros do trabalho; o cachimbo só de lado (de frente, a tampa
+        // cobre a boca); a lupa investigando, com um olho apertado
+        for view in [View::Front, View::Side] {
+            let sc = Scene { hat: true, ..scene(view) };
+            for anim in [Anim::Type, Anim::Idea, Anim::Investigate, Anim::Blink] {
+                let p = at(Mood::Busy, anim, 0.5, &sc);
+                assert!(p.hat.is_some(), "{view:?} {anim:?}: sem chapéu");
+                assert_eq!(p.pipe.is_some(), view == View::Side, "{view:?} {anim:?}: cachimbo");
+            }
+            let inv = at(Mood::Busy, Anim::Investigate, 0.4, &sc);
+            assert!(inv.mag.is_some() && inv.eyes == Eyes::Sherlock(1, 0));
+            assert!(pose(Mood::Busy, None, &sc, None).hat.is_some());
+            // sem a fantasia, nada disso; e o chapéu não sobra fora do trabalho
+            let plain = at(Mood::Busy, Anim::Type, 0.5, &scene(view));
+            assert!(plain.hat.is_none() && plain.pipe.is_none());
+            assert!(pose(Mood::Normal, None, &sc, None).hat.is_none());
+        }
+        // a tarefa acabou: o chapéu sai junto com o ✓
+        crab.play(Anim::Done);
+        crab.anim = Some((Anim::Done, Instant::now() - Duration::from_secs(10), 3.1));
+        crab.tick(Mood::Normal);
+        assert!(!crab.hat && !crab.sherlock);
     }
 
     #[test]
-    fn zs_rise_grow_and_fade() {
-        // um de cada vez: primeiro o pequeno, depois o grande, mais acima e à direita
-        let small = zs_at(0.1);
-        let big = zs_at(0.6);
-        assert!(small.len() == 1 && big.len() == 1);
-        assert!(small[0].0.len() < big[0].0.len(), "não cresce");
-        assert!(big[0].1 > small[0].1 && big[0].2 < small[0].2, "não é uma escadinha");
-        let mut alphas = Vec::new();
-        for k in 0..=400 {
-            let t = k as f32 / 400.0;
-            let zs = zs_at(t);
-            assert!(zs.len() <= 1, "dois \"z\" ao mesmo tempo em {t}");
-            for &(glyph, x, y, alpha) in &zs {
-                // nada encosta na cabeça nem nas garras (caídas, dormindo) e nada vai além do
-                // espaço reservado (no grande, o título começa 5 quadradinhos depois da grade)
-                let w = glyph[0].len() as i32;
-                assert!(x > 15 && x + w <= COLS as i32 + 4 && y >= -3, "fora do lugar em {t}");
-                assert!(y + glyph.len() as i32 <= 4, "encosta na garra em {t}");
-                alphas.push((t, alpha));
-            }
+    fn at_the_limit_puts_up_the_sign_and_reads_until_it_resets() {
+        let mut crab = Crab::new();
+        crab.tick(Mood::Limit);
+        assert!(crab.is_playing(Anim::SignUp), "não pegou a placa");
+        for view in [View::Front, View::Side] {
+            let sc = scene(view);
+            // começa no lugar, com o susto; termina de lado, com a placa em pé e o livro aberto
+            let first = at(Mood::Limit, Anim::SignUp, 0.0, &sc);
+            assert!(first.bang && first.sign.is_none() && first.dx == 0);
+            let reading = pose(Mood::Limit, None, &sc, None);
+            assert_eq!(reading.dx, limit_shift(view));
+            assert!(reading.sign.is_some_and(|s| s.h == 11) && reading.book.is_some());
+            let end = at(Mood::Limit, Anim::SignUp, 0.99, &sc);
+            assert!(end.sign == reading.sign && end.dx == reading.dx, "{view:?}: pula ao terminar");
+            // a placa fica do lado dele: os olhos e o livro não ficam atrás dela
+            let cs = cells(&reading);
+            let sign = only(&cs, &[WOOD, WOOD_DARK, SIGN_TEXT]);
+            assert!(only(&cs, &[EYE]).iter().chain(only(&cs, &[COVER]).iter()).all(|e| !sign.contains(e)));
+            // lendo, a página vira; rindo, pula; cochilando, os "z"
+            assert!((0..100).any(|k| at(Mood::Limit, Anim::Read, k as f32 / 100.0, &sc).book.unwrap().1 > 0));
+            assert!((0..20).any(|k| at(Mood::Limit, Anim::Laugh, k as f32 / 20.0, &sc).dy < 0));
+            assert!(at(Mood::Limit, Anim::Nod, 0.5, &sc).zzz.is_some());
+            // e volta para o meio, sem a placa
+            let back = at(Mood::Normal, Anim::SignDown, 0.99, &sc);
+            assert!(back.dx == 0 && back.sign.is_none());
         }
-        // sobe: o mesmo "z" fica mais alto no fim do que no começo
-        for (born, dies) in [(0.0, 0.48), (0.5, 1.0)] {
-            let (a, b) = (zs_at(born + 0.01)[0], zs_at(dies - 0.01)[0]);
-            assert!(b.2 < a.2, "não sobe");
-            assert!(a.3 < 0.95 && b.3 < 0.5, "não aparece nem some aos poucos");
-        }
-        // a opacidade muda em degraus (poucos quadros diferentes) e some no fim do cochilo
-        let steps: std::collections::BTreeSet<_> = alphas.iter().map(|a| (a.1 * 100.0) as i32).collect();
-        assert!(steps.len() <= 4, "{steps:?}");
-        assert!(zs_at(1.0).is_empty());
-        // e os de pixel art formam mesmo um "z": barras em cima e embaixo e uma diagonal da
-        // direita para a esquerda no meio
-        for g in [&Z_SMALL[..], &Z_BIG[..]] {
-            let n = g[0].len();
-            assert!(g.iter().all(|r| r.len() == n));
-            assert!(g[0].bytes().all(|b| b == b'#') && g[g.len() - 1].bytes().all(|b| b == b'#'));
-            let diag: Vec<_> = g[1..g.len() - 1].iter().map(|r| r.find('#').unwrap()).collect();
-            assert!(diag.windows(2).all(|w| w[1] + 1 == w[0]) && diag[0] == n - 1, "{g:?}");
-        }
+        // o limite reiniciou: recolhe a placa e, logo depois, o confete
+        crab.anim = None;
+        crab.tick(Mood::Normal);
+        assert!(crab.is_playing(Anim::SignDown));
+        crab.anim = Some((Anim::SignDown, Instant::now() - Duration::from_secs(10), 2.3));
+        assert!(crab.tick(Mood::Normal));
+        assert!(crab.is_playing(Anim::Party), "não comemorou");
+    }
+
+    #[test]
+    fn wakes_slowly_when_claude_code_comes_back_and_with_a_start_at_the_mouse() {
+        let mut crab = Crab::new();
+        crab.tick(Mood::Sleepy);
+        crab.tick(Mood::Normal);
+        assert!(crab.is_playing(Anim::Wake));
+        // a primeira parte ainda é sentado, de gorro; no fim, de pé e sorrindo
+        let sc = scene(View::Front);
+        let first = at(Mood::Normal, Anim::Wake, 0.01, &sc);
+        assert!(first.cap.is_some() && first.legs == Legs::Sit && first.eyes == Eyes::Peek);
+        assert!(at(Mood::Normal, Anim::Wake, 0.99, &sc).cap.is_none());
+        // dormindo, o mouse chegando: o susto, já no primeiro quadro
+        let mut crab = Crab::new();
+        crab.poke(Mood::Sleepy);
+        assert!(crab.is_playing(Anim::Startle));
+        assert!(at(Mood::Sleepy, Anim::Startle, 0.0, &sc).bang);
+        // dormindo: sentado, de gorro, e os "z" e a respiração só no cochilo
+        let still = pose(Mood::Sleepy, None, &sc, None);
+        assert!(still.cap.is_some() && still.zzz.is_none() && still.legs == Legs::Sit);
+        assert!((0..20).any(|k| at(Mood::Sleepy, Anim::Snooze, k as f32 / 20.0, &sc).breath));
+    }
+
+    #[test]
+    fn listens_to_music_with_the_headphones_on() {
+        let sc = scene(View::Front);
+        let mid = at(Mood::Normal, Anim::Music, 0.3, &sc);
+        assert!(mid.phones == Some(0) && mid.notes.is_some() && mid.eyes == Eyes::Chill);
+        // balança no ritmo
+        let dxs: std::collections::BTreeSet<_> = (0..60).map(|k| at(Mood::Normal, Anim::Music, 0.1 + k as f32 / 200.0, &sc).dx).collect();
+        assert_eq!(dxs.len(), 2, "{dxs:?}");
+        // põe e tira o fone
+        assert_eq!(at(Mood::Normal, Anim::Music, 0.01, &sc).phones, Some(-3));
+        assert!(at(Mood::Normal, Anim::Music, 0.99, &sc).phones.is_none());
     }
 
     #[test]
     fn reacts_to_the_mouse_on_the_first_frame() {
-        // as animações do mouse (clique: pulo; chegar perto: aceno) já mudam o desenho no
-        // primeiro quadro, em qualquer humor: a resposta aparece na hora, sem esperar o próximo
-        for mood in [Mood::Normal, Mood::Sleepy, Mood::Busy, Mood::Worried] {
-            let still = cells(&pose(mood, None, None));
-            for anim in [Anim::Hop, Anim::Wave, Anim::Shake] {
-                assert_ne!(cells(&pose(mood, Some((anim, 0.0)), None)), still, "{anim:?} com humor {mood:?} demora a aparecer");
+        for mood in [Mood::Normal, Mood::Sleepy, Mood::Busy, Mood::Worried, Mood::Limit] {
+            let sc = scene(View::Side);
+            let still = cells(&pose(mood, None, &sc, None));
+            for _ in 0..6 {
+                let mut crab = Crab::new();
+                crab.poke(mood);
+                let anim = crab.current().unwrap().anim;
+                assert_ne!(cells(&at(mood, anim, 0.0, &sc)), still, "{anim:?} com humor {mood:?} demora a aparecer");
+                let mut crab = Crab::new();
+                crab.greet(mood);
+                let anim = crab.current().unwrap().anim;
+                assert_ne!(cells(&at(mood, anim, 0.0, &sc)), still, "{anim:?} com humor {mood:?} demora a aparecer");
             }
+            assert_ne!(cells(&at(mood, Anim::Hop, 0.0, &sc)), still, "o pulo do clique demora em {mood:?}");
         }
-        // e o próximo quadro vem logo
         let mut crab = Crab::new();
         crab.play(Anim::Hop);
-        assert!(crab.is_playing(Anim::Hop));
         assert!(crab.next_tick() <= Instant::now() + Duration::from_millis(40));
     }
 
     #[test]
-    fn writing_redraws_only_when_the_pencil_moves() {
-        let mut crab = Crab::playing(Anim::Write, 0.33);
+    fn rests_between_animations_and_redraws_only_when_something_changes() {
+        let mut crab = Crab::new();
+        assert!(!crab.animating(), "começa parado");
+        assert!(!crab.tick(Mood::Normal), "parado não redesenha");
+        assert!(crab.next_tick() > Instant::now() + Duration::from_secs(1));
+        crab.poke(Mood::Normal);
+        assert!(crab.animating() && crab.tick(Mood::Normal));
+        crab.anim = Some((Anim::Blink, Instant::now() - Duration::from_secs(5), 0.2));
+        assert!(crab.tick(Mood::Normal));
+        assert!(!crab.animating());
+        assert!(crab.next_tick().saturating_duration_since(Instant::now()) >= Duration::from_secs(6));
+        // digitando, logo depois do primeiro quadro o desenho ainda é o mesmo: não redesenha
+        let mut crab = Crab::playing(Anim::Type, 0.31);
         crab.mood = Mood::Busy;
-        assert!(crab.tick(Mood::Busy), "o primeiro quadro desenha");
-        // logo em seguida o lápis ainda está na mesma letra: não redesenha
+        assert!(crab.tick(Mood::Busy));
         assert!(!crab.tick(Mood::Busy), "redesenhou sem nada mudar");
-        // começou a trabalhar: a escrita começa logo, sem esperar o intervalo de antes
+        // começou a trabalhar: pega o notebook logo
         let mut crab = Crab::new();
         crab.next = Instant::now() + Duration::from_secs(14);
         crab.tick(Mood::Busy);
@@ -1496,71 +2194,81 @@ mod tests {
     }
 
     #[test]
-    fn rests_between_animations() {
+    fn an_idea_speeds_up_typing_and_coffee_waits_for_a_long_session() {
         let mut crab = Crab::new();
-        assert!(!crab.animating(), "começa parado");
-        assert!(!crab.tick(Mood::Normal), "parado não redesenha");
-        assert!(crab.next_tick() > Instant::now() + Duration::from_secs(1), "a primeira animação espera um pouco");
-        // o mouse entrou: anima na hora, num ritmo de quadros
-        crab.poke(Mood::Normal);
-        assert!(crab.animating());
-        assert!(crab.next_tick() <= Instant::now() + Duration::from_millis(1000 / FPS));
-        assert!(crab.tick(Mood::Normal));
-        // acabou: um último desenho, parado, e a próxima fica para daqui a alguns segundos
-        crab.anim = Some((Anim::Blink, Instant::now() - Duration::from_secs(5), 0.2));
-        assert!(crab.tick(Mood::Normal));
-        assert!(!crab.animating());
-        let wait = crab.next_tick().saturating_duration_since(Instant::now());
-        assert!(wait >= Duration::from_secs(6), "descansa entre animações: {wait:?}");
+        crab.mood = Mood::Busy;
+        crab.play(Anim::Idea);
+        assert_eq!(crab.pick(Mood::Busy), Anim::Type, "depois da ideia, digita");
+        crab.play(Anim::Type);
+        let fast = crab.anim.unwrap().2;
+        crab.play(Anim::Type);
+        assert!((fast - crab.pace * 0.5).abs() < 1e-4 && (crab.anim.unwrap().2 - crab.pace).abs() < 1e-4);
+        assert!(pace_for(0.0) == PACE_SLOW && pace_for(1000.0) == PACE_FAST && pace_for(20.0) < pace_for(5.0));
+        let mut crab = Crab::new();
+        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Coffee));
+        crab.tired = true;
+        assert!((0..300).any(|_| crab.pick(Mood::Busy) == Anim::Coffee));
+        crab.play(Anim::Coffee);
+        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Coffee));
+        // a tela enche com as digitações e começa outra quando está cheia
+        let mut crab = Crab::new();
+        crab.mood = Mood::Busy;
+        for _ in 0..6 {
+            crab.play(Anim::Type);
+            let secs = crab.anim.unwrap().2;
+            crab.anim = Some((Anim::Type, Instant::now() - Duration::from_secs(20), secs));
+            crab.tick(Mood::Busy);
+        }
+        assert_eq!(crab.code, CODE_TOTAL);
+        crab.play(Anim::Type);
+        assert_eq!(crab.code, 0);
     }
 
     #[test]
     fn moods_pick_their_own_animations() {
         let mut crab = Crab::new();
-        for _ in 0..50 {
+        for _ in 0..100 {
             assert_eq!(crab.pick(Mood::Sleepy), Anim::Snooze);
             assert!([Anim::Sweat, Anim::Shake, Anim::Blink].contains(&crab.pick(Mood::Worried)));
-            let busy = [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee, Anim::Done];
-            assert!(![Anim::Snooze, Anim::Sweat, Anim::Shake].contains(&crab.pick(Mood::Normal)) && !busy.contains(&crab.pick(Mood::Normal)));
+            assert!([Anim::Read, Anim::Laugh, Anim::Nod, Anim::Blink].contains(&crab.pick(Mood::Limit)));
+            let n = crab.pick(Mood::Normal);
+            assert!([Anim::Blink, Anim::Look, Anim::Scuttle, Anim::Hop, Anim::Wave, Anim::Music].contains(&n), "{n:?}");
             let b = crab.pick(Mood::Busy);
-            assert!(busy[..6].contains(&b) || [Anim::Blink, Anim::Look].contains(&b), "{b:?}");
+            assert!([Anim::Type, Anim::Think, Anim::Idea, Anim::Blink, Anim::Look].contains(&b), "{b:?}");
             crab.inspired = false;
         }
+        // sem números, sem música
+        assert!((0..300).any(|_| crab.pick(Mood::Normal) == Anim::Music));
+        crab.music = false;
+        assert!((0..300).all(|_| crab.pick(Mood::Normal) != Anim::Music));
     }
 
-    /// Folha com os quadros de cada animação, ampliada (%TEMP%\clawd.png):
-    ///   cargo test clawd_sheet -- --ignored --nocapture
     #[test]
-    #[ignore]
-    fn clawd_sheet() {
-        unsafe {
-            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-        }
-        // (o último bloco: o mesmo trabalho com o notebook no colo, como no pequeno)
-        let busy = [Anim::Write, Anim::Erase, Anim::Crumple, Anim::Think, Anim::Idea, Anim::Tap, Anim::Coffee];
-        let rows: Vec<(Mood, Option<Anim>, bool)> = std::iter::once((Mood::Normal, None, false))
-            .chain([Anim::Blink, Anim::Look, Anim::Scuttle, Anim::Hop, Anim::Wave].map(|a| (Mood::Normal, Some(a), false)))
-            .chain([(Mood::Sleepy, None, false), (Mood::Sleepy, Some(Anim::Snooze), false), (Mood::Busy, None, false)])
-            .chain(busy.map(|a| (Mood::Busy, Some(a), false)))
-            .chain([(Mood::Normal, Some(Anim::Done), false), (Mood::Worried, Some(Anim::Sweat), false), (Mood::Worried, Some(Anim::Shake), false)])
-            .chain(std::iter::once((Mood::Busy, None, true)))
-            .chain(busy.map(|a| (Mood::Busy, Some(a), true)))
-            .chain(std::iter::once((Mood::Normal, Some(Anim::Done), true)))
-            .collect();
-        let (cell_w, cell_h, frames) = (110.0, 80.0, 16);
-        let mut c = Canvas::new((cell_w * frames as f32) as u32, (cell_h * rows.len() as f32) as u32, 1.0);
-        c.fill_round_rect(0.0, 0.0, c.w as f32, c.h as f32, 0.0, Rgba::rgb(60, 50, 90));
-        for (r, (mood, anim, laptop)) in rows.iter().enumerate() {
-            for f in 0..frames {
-                let t = f as f32 / (frames - 1) as f32;
-                let p = pose(*mood, anim.map(|a| (a, t)), None);
-                let p = if *laptop { on_laptop(p, None) } else { p };
-                draw(&mut c, cell_w * (f as f32 + 0.5), cell_h * (r as f32 + 0.6), 4.0, &p);
+    fn zs_rise_and_fade_in_steps() {
+        let mut alphas = std::collections::BTreeSet::new();
+        for k in 0..=400 {
+            let z = k as f32 / 400.0;
+            for &(_, _, _, born, dies) in &zs_at(z) {
+                alphas.insert((steps_alpha(z, born, dies) * 100.0) as i32);
             }
         }
-        let path = std::env::temp_dir().join("clawd.png");
-        crate::gfx::save_png(&c.finish(), &path).unwrap();
-        println!("{}", path.display());
+        assert!(alphas.len() <= 4, "{alphas:?}");
+        // crescem e sobem: o pequeno embaixo, o grande em cima
+        assert!(ZS[0].0.len() < ZS[2].0.len() && ZS[2].2 < ZS[0].2);
+        assert!(zs_at(0.999).is_empty());
+    }
+
+    #[test]
+    fn cells_fall_on_whole_pixels() {
+        // 2/3 do quadradinho antigo, em pixels inteiros: a 125%, no pequeno (2 pontos), 2 pixels
+        // no lugar de 3; a 100%, 1 no lugar de 2; a 150% no médio (2,4 pontos), 3 no lugar de 4
+        assert_eq!(cell_px(1.25, 2.0), 2.0);
+        assert_eq!(cell_px(1.0, 2.0), 1.0);
+        assert_eq!(cell_px(1.25, 2.4), 2.0);
+        assert_eq!(cell_px(1.5, 2.4), 3.0);
+        let (x0, y0, c) = origin(1.25, 77.0, 129.0, 2.0);
+        assert!(((x0 * 1.25).round() - x0 * 1.25).abs() < 1e-3 && ((y0 * 1.25).round() - y0 * 1.25).abs() < 1e-3);
+        assert!((c * 1.25 - 2.0).abs() < 1e-4);
     }
 
     #[test]
@@ -1568,19 +2276,52 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        // a 125%, um quadradinho de "1,2 pontos" vira 2 pixels inteiros: as bordas não borram,
-        // então cada pixel do desenho é ou laranja puro ou fundo puro
-        let mut c = Canvas::new(60, 40, 1.25);
-        draw(&mut c, 24.0, 16.0, 1.2, &pose(Mood::Normal, None, None));
+        let mut c = Canvas::new(80, 60, 1.25);
+        draw(&mut c, 32.0, 24.0, 2.0, &pose(Mood::Normal, None, &scene(View::Front), None));
         let img = c.finish();
-        let mut orange = 0;
+        let mut solid = 0;
         for p in img.px.chunks(4) {
             if p[3] == 0 {
                 continue;
             }
             assert_eq!(p[3], 255, "pixel meio transparente na borda: {p:?}");
-            orange += 1;
+            solid += 1;
         }
-        assert!(orange > 200);
+        assert!(solid > 300);
+    }
+
+    /// Folha com os quadros de cada animação, ampliada (%TEMP%\clawd.png):
+    ///   cargo test --release clawd_sheet -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn clawd_sheet() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut rows: Vec<(Mood, Option<Anim>, Scene)> = Vec::new();
+        for mood in [Mood::Normal, Mood::Sleepy, Mood::Busy, Mood::Worried, Mood::Limit] {
+            for view in [View::Front, View::Side] {
+                rows.push((mood, None, scene(view)));
+                for anim in anims_for(mood, true) {
+                    rows.push((mood, Some(anim), scene(view)));
+                    if mood == Mood::Busy {
+                        rows.push((mood, Some(anim), Scene { hat: true, code: 20, ..scene(view) }));
+                    }
+                }
+            }
+        }
+        let (cell_w, cell_h, frames) = (130.0, 72.0, 14);
+        let mut c = Canvas::new((cell_w * frames as f32) as u32, (cell_h * rows.len() as f32) as u32, 1.0);
+        c.fill_round_rect(0.0, 0.0, c.w as f32, c.h as f32, 0.0, Rgba::rgb(60, 50, 90));
+        for (r, (mood, anim, sc)) in rows.iter().enumerate() {
+            for f in 0..frames {
+                let t = f as f32 / (frames - 1) as f32;
+                let p = pose(*mood, anim.map(|a| Play { anim: a, t, secs: a.secs(PACE) }), sc, None);
+                draw(&mut c, cell_w * f as f32 + 40.0, cell_h * (r as f32 + 0.62), 2.6, &p);
+            }
+        }
+        let path = std::env::temp_dir().join("clawd.png");
+        crate::gfx::save_png(&c.finish(), &path).unwrap();
+        println!("{}", path.display());
     }
 }

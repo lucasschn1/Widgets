@@ -85,17 +85,21 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("claude no limite".into(), Box::new(Claude::sample_limit()), cfg.clone()));
     out.push(("claude sem conectar".into(), Box::new(Claude::sample_unlinked()), cfg.clone()));
     out.push(("claude lendo".into(), Box::new(Claude::sample_reading()), cfg.clone()));
-    // o Clawd em cada animação, no meio dela, em cada humor
+    out.push(("claude no limite atingido".into(), Box::new(Claude::sample_ko()), cfg.clone()));
+    out.push(("claude esperando os números".into(), Box::new(Claude::sample_waiting()), cfg.clone()));
+    // o Clawd em cada animação, em várias partes dela, em cada humor
     for anim in crate::widgets::clawd::ANIMS {
         out.push((format!("clawd {anim:?}"), Box::new(Claude::sample().with_crab(anim, 0.5)), cfg.clone()));
         out.push((format!("clawd dormindo {anim:?}"), Box::new(Claude::sample_unlinked().with_crab(anim, 0.5)), cfg.clone()));
         out.push((format!("clawd suando {anim:?}"), Box::new(Claude::sample_limit().with_crab(anim, 0.3)), cfg.clone()));
-        // (no meio de cada parte: escrevendo, a página virando ou a bolinha voando)
-        for t in [0.3, 0.6, 0.9] {
-            out.push((format!("clawd escrevendo {anim:?} {t}"), Box::new(Claude::sample_busy().with_crab(anim, t)), cfg.clone()));
+        for t in [0.15, 0.5, 0.85] {
+            out.push((format!("clawd trabalhando {anim:?} {t}"), Box::new(Claude::sample_busy().with_crab(anim, t)), cfg.clone()));
+            out.push((format!("clawd de Sherlock {anim:?} {t}"), Box::new(Claude::sample_sherlock().with_crab(anim, t)), cfg.clone()));
+            out.push((format!("clawd no limite {anim:?} {t}"), Box::new(Claude::sample_ko().with_crab(anim, t)), cfg.clone()));
         }
     }
     out.push(("claude trabalhando".into(), Box::new(Claude::sample_busy()), cfg.clone()));
+    out.push(("claude de Sherlock".into(), Box::new(Claude::sample_sherlock()), cfg.clone()));
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));
     out
 }

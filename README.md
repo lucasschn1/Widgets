@@ -111,7 +111,7 @@ na tela (Tempo, Sistema, Tocando agora, GitHub e Uso do Claude):
 |---|---|---|
 | Parado, sem música tocando | ~4% | 0,25% |
 | Com música tocando | ~6,5% | 0,4% |
-| Com o Claude Code trabalhando (o Clawd escreve no caderno) | ~10% | 0,6% |
+| Com o Claude Code trabalhando (o Clawd programa no notebook) | ~10% | 0,6% |
 
 A memória fica em torno de **40 MB** (de 33 a 41 MB nas medições, na coluna Memória do
 Gerenciador de Tarefas). Em processadores com menos núcleos, a porcentagem do processador
@@ -216,9 +216,13 @@ Quanto da sessão de 5 horas e da semana do seu plano você já usou no
 quando ele reinicia; o grande mostra os dias da semana em que você mais usa, e o widget avisa se,
 no ritmo de agora, a sessão acaba antes de reiniciar. O Clawd, o caranguejo do Claude Code,
 acompanha: enquanto o Claude Code trabalha, programa num notebook (no pequeno, de frente, no colo;
-no médio e no grande, de lado, com o código aparecendo na tela), cochila quando ele fica parado e
-diz o que está fazendo. Ao mudar de tamanho, os medidores andam até o lugar novo e o Clawd pula
-junto.
+no médio e no grande, de lado, com o código aparecendo na tela), pensa, tem ideias e, depois de um
+bom tempo, toma um café; de vez em quando, trabalha a tarefa inteira de Sherlock Holmes, de chapéu
+de detetive e lupa. Parado, às vezes põe o fone e fica ouvindo música; quando o Claude Code fica
+quieto por muito tempo, cochila de gorro. Perto do limite, sua; quando a sessão chega ao limite,
+finca a plaquinha "VOLTO LOGO" do lado e fica lendo até ela reiniciar, e aí comemora com confete.
+Embaixo dele, no médio, aparece o que está fazendo. Ao mudar de tamanho, os medidores andam até o
+lugar novo e o Clawd pula junto.
 
 Um clique no Clawd e ele pula para cima da barra de tarefas, ao lado do relógio, onde continua
 trabalhando por cima das janelas, com um balão dizendo o que o Claude Code faz agora ("Editando

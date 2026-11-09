@@ -766,7 +766,19 @@ fn claude_widget_images() {
     std::fs::create_dir_all(&out).unwrap();
     let cfg = empty_cfg();
     let gap = (WIDGET_GAP * S).round() as i32;
-    let cases = [("claude", Claude::sample as fn() -> Claude), ("claude_limite", Claude::sample_limit), ("claude_conectar", Claude::sample_unlinked), ("claude_lendo", Claude::sample_reading), ("claude_trabalhando", Claude::sample_busy)];
+    use crate::widgets::clawd::Anim;
+    let cases = [
+        ("claude", Claude::sample as fn() -> Claude),
+        ("claude_limite", Claude::sample_limit),
+        ("claude_conectar", Claude::sample_unlinked),
+        ("claude_lendo", Claude::sample_reading),
+        ("claude_trabalhando", Claude::sample_busy),
+        // o Clawd 2.0: o café, de Sherlock, ouvindo música e no limite atingido
+        ("claude_cafe", || Claude::sample_busy().with_crab(Anim::Coffee, 0.55)),
+        ("claude_sherlock", || Claude::sample_sherlock().with_crab(Anim::Investigate, 0.4)),
+        ("claude_musica", || Claude::sample().with_crab(Anim::Music, 0.3)),
+        ("claude_volto_logo", || Claude::sample_ko().with_crab(Anim::Read, 0.1)),
+    ];
     for (name, make) in cases {
         let (g, gr) = content(&make(), Mode::G, &cfg);
         let (m, mr) = content(&make(), Mode::M, &cfg);
