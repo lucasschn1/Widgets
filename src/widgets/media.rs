@@ -1360,11 +1360,15 @@ impl Media {
         }
     }
 
+    /// O quanto o aviso de volume aparece agora (0 a 1): inteiro e, no fim, sumindo.
+    fn hud_alpha(&self) -> f32 {
+        self.hud_until.filter(|t| Instant::now() < *t).map_or(0.0, |until| (until.saturating_duration_since(Instant::now()).as_secs_f32() / 0.25).min(1.0))
+    }
+
     fn overlay_rest(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
         let lw = self.layout_of(mode).w;
-        if let Some(until) = self.hud_until.filter(|t| Instant::now() < *t) {
-            let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
-            let alpha = (left / 0.25).min(1.0);
+        if self.hud_until.is_some_and(|t| Instant::now() < t) {
+            let alpha = self.hud_alpha();
             let level = self.volume().unwrap_or(0.0);
             let (w, h) = (130.0f32.min(lw - 16.0), 28.0);
             let (x, y) = (ox + (lw - w) / 2.0, oy + 8.0);
@@ -1557,13 +1561,16 @@ impl Kind for Media {
     }
 
     /// Roda do mouse: o volume do app que está tocando (ou o do Windows, se não achar o app).
-    fn wheel(&mut self, _x: f32, _y: f32, steps: f32, _mode: Mode, _ctx: &mut Ctx) {
+    /// O aviso de volume aparece em cima, menos no grande, que já tem o volume no pé.
+    fn wheel(&mut self, _x: f32, _y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
         match self.volume() {
             Some(v) => {
                 let level = (v + steps * 0.04).clamp(0.0, 1.0);
                 let _ = self.tx.send(Cmd::Volume(level));
                 self.volume_wanted = Some((level, Instant::now()));
-                self.hud_until = Some(Instant::now() + HUD);
+                if mode != Mode::G {
+                    self.hud_until = Some(Instant::now() + HUD);
+                }
             }
             None => win::change_volume(steps),
         }
@@ -1602,6 +1609,8 @@ impl Kind for Media {
             can_toggle: m.can_toggle,
             can_next: m.can_next,
             can_seek: m.can_seek,
+            volume: self.volume(),
+            volume_hud: self.hud_alpha(),
         })
     }
 

@@ -535,6 +535,70 @@ impl Canvas {
         }
     }
 
+    /// Contorno arredondado (todo por dentro do retângulo) e, por dentro dele, um véu bem leve,
+    /// os dois com uma luz redonda em (cx, cy): `c` no centro, sumindo até `radius`. É o reflexo
+    /// do mouse na borda do vidro; um traço só, liso (sem as emendas de traços curtos).
+    #[allow(clippy::too_many_arguments)]
+    pub fn glow_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, cx: f32, cy: f32, radius: f32, c: Rgba, width: f32, veil: f32) {
+        let s = self.s;
+        let hw = width / 2.0;
+        unsafe {
+            let brush = |c: Rgba| {
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: color(c) }, D2D1_GRADIENT_STOP { position: 1.0, color: color(c.with_a(0)) }];
+                let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
+                let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(cx * s, cy * s), gradientOriginOffset: v2(0.0, 0.0), radiusX: radius * s, radiusY: radius * s };
+                self.rt.CreateRadialGradientBrush(&props, None, &coll).expect("radial")
+            };
+            if veil > 0.0 {
+                let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
+                self.rt.FillRoundedRectangle(&rr, &brush(c.with_a((c.3 as f32 * veil) as u8)));
+            }
+            let rr = D2D1_ROUNDED_RECT {
+                rect: self.rect_px(x0 + hw, y0 + hw, x1 - hw, y1 - hw),
+                radiusX: (r - hw).max(0.0) * s,
+                radiusY: (r - hw).max(0.0) * s,
+            };
+            self.rt.DrawRoundedRectangle(&rr, &brush(c), width * s, None);
+        }
+    }
+
+    /// Elipse (cx, cy, rx, ry) com degradê radial do centro para fora: `stops` de 0 (centro) a 1
+    /// (borda). Luzes suaves: o sol no céu, faixas de neblina, flocos macios.
+    pub fn fill_radial(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, stops: &[(f32, Rgba)]) {
+        if rx <= 0.0 || ry <= 0.0 {
+            return;
+        }
+        let s = self.s;
+        unsafe {
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(p, c)| D2D1_GRADIENT_STOP { position: p, color: color(c) }).collect();
+            let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
+            let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(cx * s, cy * s), gradientOriginOffset: v2(0.0, 0.0), radiusX: rx * s, radiusY: ry * s };
+            let brush = self.rt.CreateRadialGradientBrush(&props, None, &coll).expect("radial");
+            let e = D2D1_ELLIPSE { point: v2(cx * s, cy * s), radiusX: rx * s, radiusY: ry * s };
+            self.rt.FillEllipse(&e, &brush);
+        }
+    }
+
+    /// Muitos traços retos (x0, y0, x1, y1) da mesma cor e espessura, de uma vez só (a chuva:
+    /// centenas de gotas por quadro custariam um desenho cada).
+    pub fn segments(&mut self, segs: &[(f32, f32, f32, f32)], c: Rgba, width: f32) {
+        if segs.is_empty() {
+            return;
+        }
+        let s = self.s;
+        with(|g| unsafe {
+            let path = g.d2d.CreatePathGeometry().expect("path");
+            let sink = path.Open().expect("sink");
+            for &(x0, y0, x1, y1) in segs {
+                sink.BeginFigure(v2(x0 * s, y0 * s), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddLine(v2(x1 * s, y1 * s));
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            }
+            let _ = sink.Close();
+            self.rt.DrawGeometry(&path, &self.brush(c), width * s, &g.round);
+        })
+    }
+
     /// Contorno arredondado com degradê vertical (a borda clara do vidro).
     pub fn gradient_stroke_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, top: Rgba, bottom: Rgba, width: f32) {
         let s = self.s;
@@ -1080,5 +1144,50 @@ mod embedded_font_tests {
         let w = |face| c.text_width("Uso diário 46%", face, 20.0);
         assert_ne!(w(Face::Custom("Outfit", 400)), w(Face::Regular));
         assert_ne!(w(Face::Custom("Outfit", 300)), w(Face::Custom("Outfit", 600)));
+    }
+}
+
+#[cfg(test)]
+mod glow_tests {
+    use super::*;
+
+    #[test]
+    fn the_glow_is_brighter_near_the_mouse_and_fades_away() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut c = Canvas::new(400, 200, 1.0);
+        c.glow_round_rect(0.0, 0.0, 400.0, 200.0, 26.0, 60.0, 0.0, 150.0, Rgba(255, 255, 255, 150), 1.2, 0.0);
+        let img = c.finish();
+        let alpha = |x: u32, y: u32| img.px[((y * img.w + x) * 4 + 3) as usize];
+        // forte em cima, perto do mouse; nada do outro lado, longe dele
+        assert!(alpha(60, 0) > 60, "{}", alpha(60, 0));
+        assert!(alpha(250, 0) < alpha(120, 0));
+        assert_eq!(alpha(399, 199), 0);
+        // e o meio do cartão fica limpo (o traço é só na borda)
+        assert_eq!(alpha(200, 100), 0);
+    }
+
+    /// Prévia da luz do mouse na borda, em três posições (%TEMP%\brilho_borda.png):
+    ///   cargo test --release glow_sheet -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn glow_sheet() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let s = 2.0;
+        let mut c = Canvas::new((1060.0 * s) as u32, (200.0 * s) as u32, s);
+        c.fill_round_rect(0.0, 0.0, 1060.0, 200.0, 0.0, Rgba::rgb(30, 28, 50));
+        for (i, (mx, my)) in [(40.0, 10.0), (300.0, 80.0), (170.0, 150.0)].into_iter().enumerate() {
+            let x0 = 20.0 + i as f32 * 345.0;
+            c.fill_round_rect(x0, 20.0, x0 + 320.0, 174.0, 26.0, Rgba(58, 62, 92, 220));
+            c.stroke_round_rect(x0, 20.0, x0 + 320.0, 174.0, 26.0, Rgba(255, 255, 255, 40), 1.0);
+            c.glow_round_rect(x0, 20.0, x0 + 320.0, 174.0, 26.0, x0 + mx, 20.0 + my, 150.0, Rgba(255, 255, 255, 150), 1.2, 0.07);
+            c.fill_circle(x0 + mx, 20.0 + my, 2.0, Rgba::rgb(255, 200, 0));
+        }
+        let path = std::env::temp_dir().join("brilho_borda.png");
+        save_png(&c.finish(), &path).unwrap();
+        println!("{}", path.display());
     }
 }

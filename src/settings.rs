@@ -17,13 +17,14 @@ pub const SIDEBAR: f32 = 240.0;
 pub const TOP: f32 = 78.0;
 pub use crate::updates::VERSION;
 
-pub const NOTIFY: [(&str, &str, &str); 6] = [
+pub const NOTIFY: [(&str, &str, &str); 7] = [
     ("cpu", "CPU alta", "Quando a CPU passa de 90% por 3 minutos"),
     ("ram", "Memória quase cheia", "Quando a memória passa de 90% por 3 minutos"),
     ("disco", "Disco quase cheio", "Quando o disco C: passa de 95% de uso"),
     ("chuva", "Chuva chegando", "Quando a previsão indica chuva na próxima hora"),
     ("github", "Revisão pedida no GitHub", "Quando alguém pede sua revisão num pull request"),
     ("pomodoro", "Pomodoro", "No fim de cada foco e de cada pausa"),
+    ("bateria", "Pouca bateria num dispositivo", "Quando um fone, mouse ou teclado conectado passa de 15%"),
 ];
 
 pub const TIPS: [(&str, &str); 5] = [
@@ -556,6 +557,8 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Atualizar agora".into(), Some("O clima atualiza sozinho a cada 15 minutos".into()),
                     if visible { Control::Button("atualizar_clima", "Atualizar".into(), A::Widget("tempo", widgets::tempo::UPDATE_WEATHER), "secondary", Some("refresh")) } else { Control::None }),
                 Row("Avisar quando for chover".into(), Some(NOTIFY[3].2.into()), notify("chuva")),
+                Row("Tremer com o trovão".into(), Some("Nas trovoadas, o widget treme de leve logo depois de cada raio".into()),
+                    sw("tempo_tremer", widgets::tempo::shakes(&v.sh.cfg), A::Toggle("tempo_tremer"))),
             ]);
             // sugestões por cima do resto da página (a primeira linha tem 66 de altura)
             st.city.draw(ui, x + w - 18.0 - 300.0, entry_top + 66.0 / 2.0 + 21.0, 300.0);
@@ -580,6 +583,14 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Atualizar agora".into(), Some("As atividades atualizam sozinhas a cada 10 minutos".into()),
                     if visible { Control::Button("atualizar_github", "Atualizar".into(), A::Widget("github", widgets::github::UPDATE), "secondary", Some("refresh")) } else { Control::None }),
                 Row("Avisar pedidos de revisão".into(), Some(NOTIFY[4].2.into()), notify("github")),
+            ])
+        }
+        "bateria" => {
+            let y = section(ui, x, y, "Dispositivos");
+            rows(ui, x, y, w, vec![
+                Row("Avisar com pouca bateria".into(), Some(NOTIFY[6].2.into()), notify("bateria")),
+                Row("Quais aparecem".into(), Some("Os que informam a bateria ao Windows: a maioria dos fones e dos mouses e teclados Bluetooth. Os que usam um receptor USB próprio só mostram a carga no app do fabricante".into()), Control::None),
+                Row("Clique".into(), Some("No anel, abre as configurações de energia; na lista, as de Bluetooth".into()), Control::None),
             ])
         }
         "claude" => {
@@ -642,6 +653,7 @@ pub fn size_id(key: &str) -> &'static str {
         "midia" => "tamanho:midia",
         "github" => "tamanho:github",
         "claude" => "tamanho:claude",
+        "bateria" => "tamanho:bateria",
         _ => "tamanho:pomodoro",
     }
 }
@@ -653,6 +665,7 @@ fn notify_id(kind: &str) -> &'static str {
         "disco" => "aviso:disco",
         "chuva" => "aviso:chuva",
         "github" => "aviso:github",
+        "bateria" => "aviso:bateria",
         _ => "aviso:pomodoro",
     }
 }

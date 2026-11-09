@@ -92,6 +92,11 @@ pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
     c.finish()
 }
 
+/// A luz do mouse na borda: até onde ela chega (pontos) e de quanto em quanto tempo acompanha o
+/// cursor (no máximo 30 quadros por segundo, e só quando ele anda).
+const GLOW_RADIUS: f32 = 150.0;
+const GLOW_FRAME_MS: u64 = 33;
+
 pub struct Card {
     pub kind: Box<dyn Kind>,
     pub hwnd: HWND,
@@ -135,6 +140,10 @@ pub struct Card {
     pub grew: Option<(i32, i32)>,
     loading_since: Instant,
     last_frame: Instant,
+    /// o mouse sobre o cartão (pontos, no canto do conteúdo): a borda de vidro reflete a luz dele;
+    /// e se ele andou desde o último quadro
+    glow: Option<(f32, f32)>,
+    glow_moved: bool,
 }
 
 impl Card {
@@ -172,7 +181,30 @@ impl Card {
             grew: None,
             loading_since: Instant::now(),
             last_frame: Instant::now(),
+            glow: None,
+            glow_moved: false,
         }
+    }
+
+    /// O mouse está em (x, y) pontos sobre o cartão: a luz da borda vai junto (no próximo quadro).
+    pub fn move_glow(&mut self, x: f32, y: f32) {
+        if self.glow.is_none_or(|(gx, gy)| (gx - x).abs() + (gy - y).abs() >= 0.5) {
+            self.glow = Some((x, y));
+            self.glow_moved = true;
+        }
+    }
+
+    /// A luz do mouse na borda de vidro: um traço liso, mais forte perto do cursor, que acende e
+    /// apaga junto com o resto do que aparece com o mouse em cima (`hover`).
+    fn draw_glow(&self, c: &mut Canvas, sh: &Shared) {
+        let Some((gx, gy)) = self.glow else { return };
+        if self.hover <= 0.0 || sh.editing || !sh.animations || self.drag.is_some() {
+            return;
+        }
+        let lay = self.layout(self.mode);
+        let m = MARGIN;
+        let a = self.hover.clamp(0.0, 1.0);
+        c.glow_round_rect(m, m, m + lay.w, m + lay.h, lay.radius, m + gx, m + gy, GLOW_RADIUS, WHITE.with_a((150.0 * a) as u8), 1.2, 0.07);
     }
 
     pub fn key(&self) -> &'static str {
@@ -393,9 +425,11 @@ impl Card {
         let (w, h) = (glass.w + 2 * m as u32, glass.h + 2 * m as u32);
         let mut c = Canvas::new(w, h, self.s);
         c.image(&self.shadow.as_ref().unwrap().1, 0.0, 0.0);
-        c.image(glass, MARGIN, MARGIN);
+        // o tremor do trovão leva o vidro e a camada animada juntos (a sombra fica)
+        let (dx, dy) = if sh.animations && self.anim.is_none() { self.kind.shake() } else { (0.0, 0.0) };
+        c.image(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
-            self.kind.overlay(&mut c, self.mode, MARGIN, MARGIN);
+            self.kind.overlay(&mut c, self.mode, MARGIN + dx, MARGIN + dy);
         }
         self.decorate(&mut c, sh);
         let img = c.finish();
@@ -444,6 +478,7 @@ impl Card {
     /// Detalhes por cima do vidro: destaque do mouse, aviso de erro, "carregando" e botões.
     fn decorate(&self, c: &mut Canvas, sh: &Shared) {
         let m = MARGIN;
+        self.draw_glow(c, sh);
         if self.drag.is_none() {
             if let Some((area, style, since)) = self.hot_prev {
                 Self::paint_hover(c, area, style, false, m, m, 1.0 - Self::hover_progress(since));
@@ -723,8 +758,8 @@ impl Card {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
         }
         let mut wait = None;
-        if self.status.loading {
-            wait = Some(33);
+        if self.status.loading || (self.glow_moved && self.hover > 0.0) {
+            wait = Some(GLOW_FRAME_MS);
         }
         if self.fps > 0 {
             let ms = 1000 / self.fps as u64;
@@ -758,6 +793,7 @@ impl Card {
             self.present(sh, true);
             return (false, slid);
         }
+        self.glow_moved = false;
         if self.hover != self.hover_target {
             let step = if sh.animations { FRAME_MS as f32 / BADGE_FADE_MS as f32 } else { 1.0 };
             self.hover = if self.hover < self.hover_target {

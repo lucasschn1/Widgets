@@ -144,9 +144,14 @@ widgets (clique direito → Configurações).
 
 ### Tempo
 
-O céu de agora como fundo: azul de dia, escuro de noite, cinza quando fecha, com a chuva (ou a
-neve) caindo de verdade. Mostra as próximas horas e, no grande, os próximos dias com a faixa de
-mínima e máxima. Avisa quando vai começar a chover.
+O céu de agora como fundo, como no app Tempo do iPhone e do Mac. As cores andam com a hora da
+cidade: madrugada, aurora, nascer do sol, meio-dia, tarde dourada, pôr do sol, crepúsculo e noite
+com estrelas, com a luz do sol (ou da lua) atravessando o céu. Cada clima tem o seu fundo e a sua
+animação: nuvens paradas no nublado, névoa na neblina, garoa, chuva com respingos, chuva forte,
+neve, granizo quicando, rajadas na ventania e, na trovoada, raios com clarão e o widget tremendo
+de leve com o trovão (dá para desligar nas configurações). Mostra as próximas horas, com o nascer
+e o pôr do sol no meio delas, e, no grande, os próximos dias com a faixa de mínima e máxima.
+Avisa quando vai começar a chover.
 
 Dá para navegar nele: a faixa de horas rola (roda do mouse ou setinhas) pelas próximas 24 horas,
 com a chance de chuva de cada hora. Clicar no tempo de agora abre os detalhes (sensação,
@@ -242,6 +247,22 @@ de cada conversa. Quem já usava o app encontra este widget na Galeria de widget
   <img src="docs/images/claude-clawd.png" width="620" alt="O Clawd no médio: tomando café, de Sherlock com a lupa, ouvindo música de fone e, no limite, lendo do lado da plaquinha VOLTO LOGO">
 </p>
 
+### Bateria
+
+A bateria do notebook e a dos dispositivos conectados: fones, mouses, teclados e controles. O
+anel do notebook diz quanto falta para acabar (ou a hora em que fica cheia, na tomada); o grande
+mostra também a saúde da bateria (a capacidade de agora contra a de fábrica), os ciclos de carga
+e as últimas 24 horas, com os períodos na tomada em verde. Cada aparelho tem a barra de carga,
+e um aviso chega quando um deles passa de 15%. Num PC de mesa, sem bateria, o widget vira só a
+lista de dispositivos.
+
+As animações tocam só nos momentos que importam: ao ligar na tomada, uma onda sai do anel e o
+raio aparece; os números rolam quando a carga muda; na carga completa, um reflexo atravessa o
+cartão. Carregando, um brilho percorre o arco de tempos em tempos.
+
+Aparecem os aparelhos que informam a bateria ao Windows (a maioria dos fones e dos mouses e
+teclados Bluetooth). Os que usam um receptor USB próprio só mostram a carga no app do fabricante.
+
 ## Do tamanho que você quiser
 
 Clique no botão que aparece no canto, ou dê dois cliques no widget. O pequeno é um quadrado, o
@@ -307,7 +328,7 @@ widget mostra, e só quando o widget está ligado:
 | GitHub | api.github.com | O seu usuário do GitHub |
 | Tocando agora | youtube.com | Título e canal do vídeo, só para buscar a capa em alta resolução quando ele toca no navegador. Dá para desligar em **Configurações → Tocando agora → Capa em alta do YouTube** (a partir da versão 3.11) |
 | Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
-| Sistema, Pomodoro | Ninguém | |
+| Sistema, Pomodoro, Bateria | Ninguém | |
 | Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** (a partir da versão 3.11; o botão "Procurar agora" continua lá) |
 
 Fora disso, o app não envia nenhuma informação para outros sistemas em rede, a não ser quando

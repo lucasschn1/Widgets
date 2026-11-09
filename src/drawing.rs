@@ -219,6 +219,37 @@ pub fn weather_art(name: &str, px: u32) -> Image {
             cloud(&mut c, 10.0, 4.0, 80.0, CLOUD_DARK);
             bolt(&mut c);
         }
+        "heavy_rain" => {
+            cloud(&mut c, 10.0, 2.0, 80.0, CLOUD_DARK);
+            drops(&mut c, &[28.0, 43.0, 58.0, 73.0], 64.0, 28.0, 6.0);
+        }
+        "hail" => {
+            cloud(&mut c, 10.0, 4.0, 80.0, CLOUD_GRAY);
+            for (x, y) in [(30.0, 80.0), (52.0, 91.0), (72.0, 78.0)] {
+                c.fill_circle_with(x, y, 7.0, Fill::VGrad(y - 7.0, y + 7.0, Rgba::rgb(255, 255, 255), Rgba::rgb(190, 225, 255)));
+            }
+        }
+        "wind" => {
+            // três rajadas, a de cima e a de baixo enroladas na ponta
+            let col = Rgba::rgb(238, 243, 250);
+            c.line(&[(10.0, 38.0), (62.0, 38.0)], col, 7.0);
+            c.arc(62.0, 27.0, 11.0, 90.0, -162.0, col, 7.0);
+            c.line(&[(10.0, 55.0), (80.0, 55.0)], col, 7.0);
+            c.line(&[(10.0, 72.0), (56.0, 72.0)], col, 7.0);
+            c.arc(56.0, 83.0, 11.0, -90.0, 162.0, col, 7.0);
+        }
+        "sunset" | "sunrise" => {
+            // meio sol sobre o horizonte, com a seta para baixo (pôr) ou para cima (nascer)
+            c.push_rect_clip(0.0, 0.0, 100.0, 64.0);
+            sun(&mut c, 50.0, 64.0, 20.0);
+            c.pop_rect_clip();
+            let white = Rgba::rgb(255, 255, 255);
+            c.line(&[(12.0, 68.0), (88.0, 68.0)], white, 7.0);
+            let (from, to) = if name == "sunset" { (78.0, 96.0) } else { (96.0, 78.0) };
+            let head = if name == "sunset" { -8.0 } else { 8.0 };
+            c.line(&[(50.0, from), (50.0, to)], white, 6.0);
+            c.line(&[(41.0, to + head), (50.0, to), (59.0, to + head)], white, 6.0);
+        }
         _ => {
             // "clouds"
             cloud(&mut c, 34.0, 18.0, 60.0, CLOUD_GRAY);

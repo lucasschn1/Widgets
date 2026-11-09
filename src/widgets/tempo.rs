@@ -1,5 +1,7 @@
-//! Widget de Tempo ("céu vivo"): o fundo é o próprio céu (de dia, de noite, nublado, chovendo),
-//! com chuva ou neve caindo de verdade, as próximas horas e os próximos dias.
+//! Widget de Tempo ("céu vivo"): o fundo é o próprio céu, como no app Tempo do iPhone e do Mac
+//! (as cores andam com a hora da cidade, do nascer ao pôr do sol, e cada clima tem as suas, com
+//! chuva, neve, granizo, vento e raios de verdade; veja `sky`), as próximas horas e os próximos
+//! dias.
 //!
 //! Navegável como o Tempo do Mac:
 //! - a faixa de horas rola (roda do mouse ou setinhas nas pontas) pelas próximas 24 horas;
@@ -14,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::sky::{self, Weather};
 use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing::weather_art;
@@ -60,6 +63,11 @@ const TEMP_STOPS: [(f32, Rgba); 4] = [(0.0, Rgba::rgb(90, 200, 250)), (0.45, Rgb
 const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
 const WEATHER_RETRY: Duration = Duration::from_secs(2 * 60);
 const RAIN_FPS: u32 = 30;
+/// de quanto em quanto tempo o céu é redesenhado (as cores andam com a hora)
+const SKY_EVERY: Duration = Duration::from_secs(60);
+/// ventania: vento médio ou rajadas a partir destes km/h (a previsão não tem código para isso)
+const WINDY_KMH: f64 = 40.0;
+const WINDY_GUSTS: f64 = 65.0;
 
 // ações
 const OPEN_FORECAST: u32 = 3;
@@ -118,8 +126,10 @@ pub fn weather_icon(code: i64, is_day: bool) -> &'static str {
         3 => "clouds",
         45 | 48 => "fog",
         51..=57 => "drizzle",
+        65 | 67 | 82 => "heavy_rain",
         61..=67 | 80..=82 => "rain",
         71..=77 | 85 | 86 => "snow",
+        96 | 99 => "hail",
         c if c >= 95 => "thunder",
         _ => "clouds",
     }
@@ -133,22 +143,17 @@ fn is_snow(code: i64) -> bool {
     (71..78).contains(&code) || matches!(code, 85 | 86)
 }
 
-/// Degradê do céu (topo, base) para o tempo e a hora.
-fn sky(code: i64, day: bool) -> (Rgba, Rgba) {
-    let rgb = |r, g, b| Rgba::rgb(r, g, b);
-    match (code, day) {
-        (0 | 1, true) => (rgb(38, 117, 214), rgb(102, 168, 235)),
-        (2, true) => (rgb(64, 118, 182), rgb(128, 160, 198)),
-        (0..=2, false) => (rgb(10, 20, 46), rgb(34, 50, 92)),
-        (3 | 45 | 48, true) => (rgb(88, 104, 126), rgb(138, 152, 170)),
-        (3 | 45 | 48, false) => (rgb(26, 32, 46), rgb(52, 60, 78)),
-        (c, true) if is_snow(c) => (rgb(110, 130, 160), rgb(176, 190, 210)),
-        (c, false) if is_snow(c) => (rgb(36, 46, 70), rgb(70, 82, 108)),
-        (c, true) if c >= 95 => (rgb(40, 42, 62), rgb(78, 80, 104)),
-        (c, false) if c >= 95 => (rgb(18, 18, 30), rgb(44, 44, 64)),
-        (_, true) => (rgb(46, 62, 92), rgb(98, 114, 140)),
-        (_, false) => (rgb(16, 24, 42), rgb(40, 52, 76)),
-    }
+fn is_fog(code: i64) -> bool {
+    matches!(code, 45 | 48)
+}
+
+fn is_storm(code: i64) -> bool {
+    code >= 95
+}
+
+/// Tremer com o trovão (opção do usuário; ligada no começo).
+pub fn shakes(cfg: &Value) -> bool {
+    cfg["tempo"].bool_of("tremer").unwrap_or(true)
 }
 
 /// Cidades que combinam com o texto: [{"name", "detail", "label", "lat", "lon"}].
@@ -195,7 +200,7 @@ fn fetch_weather(city: String, lat: Option<f64>, lon: Option<f64>, place: Option
     };
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}\
-         &current=temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,weather_code,wind_speed_10m,wind_direction_10m,uv_index,is_day,precipitation\
+         &current=temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,uv_index,is_day,precipitation\
          &hourly=temperature_2m,weather_code,is_day,precipitation_probability&minutely_15=precipitation&forecast_minutely_15=6\
          &daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,uv_index_max\
          &timezone=auto&forecast_days=7"
@@ -269,19 +274,57 @@ fn days(data: &Value) -> Value {
     Value::Array(out)
 }
 
-/// "Chuva até 0h", "Chuva a partir das 15h" ou nada, olhando as próximas horas.
-fn rain_line(hours: &Value) -> Option<String> {
+/// O aviso das próximas horas e o ícone dele, ou nada: "Trovoadas até 17h, depois chuva",
+/// "Chuva até 0h, depois nublado", "Neve a partir das 15h", "Neblina até 10h, depois nublado",
+/// "Ventos de até 64 km/h" (`gusts`: só quando está ventando forte).
+fn sky_line(hours: &Value, gusts: Option<i64>) -> Option<(String, &'static str)> {
     let list = hours.as_array()?;
     let code = |h: &Value| h[3].as_i64().unwrap_or(0);
     let label = |h: &Value| h[0].as_str().unwrap_or("").to_string();
-    let raining = list.first().map(|h| is_rain(code(h))).unwrap_or(false);
-    if raining {
-        return Some(match list.iter().position(|h| !is_rain(code(h))) {
-            Some(i) => format!("Chuva até {}, depois {}", label(&list[i]), wmo(code(&list[i])).to_lowercase()),
-            None => "Chuva nas próximas horas".into(),
-        });
+    let kinds: [(fn(i64) -> bool, &str, &'static str); 4] = [(is_storm, "Trovoadas", "thunder"), (is_rain, "Chuva", "rain"), (is_snow, "Neve", "snow"), (is_fog, "Neblina", "fog")];
+    let first = code(list.first()?);
+    // o que está acontecendo agora, e até quando
+    for (is, name, icon) in kinds {
+        if is(first) {
+            let text = match list.iter().position(|h| !is(code(h))) {
+                Some(i) => format!("{name} até {}, depois {}", label(&list[i]), wmo(code(&list[i])).to_lowercase()),
+                None => format!("{name} nas próximas horas"),
+            };
+            return Some((text, icon));
+        }
     }
-    list.iter().skip(1).find(|h| is_rain(code(h))).map(|h| format!("Chuva a partir das {}", label(h)))
+    if let Some(kmh) = gusts {
+        return Some((format!("Ventos de até {kmh} km/h"), "wind"));
+    }
+    // chuva ou neve chegando
+    list.iter().skip(1).find_map(|h| kinds[1..3].iter().find(|k| (k.0)(code(h))).map(|k| (format!("{} a partir das {}", k.1, label(h)), k.2)))
+}
+
+/// As horas com o nascer e o pôr do sol no meio, como no Tempo da Apple: uma coluna "18:52" com
+/// o ícone e "Pôr do sol" no lugar da temperatura. `first`: o horário da primeira hora ("Agora");
+/// `now`: o horário de agora (o que já passou não entra).
+fn with_sun(hours: Vec<Value>, first: &str, now: &str, daily: &Value) -> Vec<Value> {
+    let Some(start) = local_minutes(first) else { return hours };
+    let now = local_minutes(now).unwrap_or(start);
+    let end = start + hours.len() as f64 * 60.0;
+    let mut events: Vec<(f64, Value)> = Vec::new();
+    for (key, name, icon) in [("sunrise", "Nascer", "sunrise"), ("sunset", "Pôr do sol", "sunset")] {
+        for d in 0..3 {
+            let Some(stamp) = daily[key][d].as_str() else { continue };
+            let Some(t) = local_minutes(stamp) else { continue };
+            if t > now && t < end {
+                events.push((t, json!([hhmm(stamp), icon, name, 0, 0, d, minute_of_day(stamp).unwrap_or(0) / 60])));
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(hours.len() + events.len());
+    for (i, h) in hours.into_iter().enumerate() {
+        out.push(h);
+        let (h0, h1) = (start + i as f64 * 60.0, start + (i + 1) as f64 * 60.0);
+        out.extend(events.iter().filter(|(t, _)| *t >= h0 && *t < h1).map(|(_, e)| e.clone()));
+    }
+    out.truncate(NEXT_HOURS);
+    out
 }
 
 /// Tudo que o widget mostra, a partir da resposta da Open-Meteo. As horas são
@@ -294,6 +337,10 @@ fn process(data: &Value, place: &str) -> Value {
     let dates: Vec<String> = daily["time"].as_array().map(|a| a.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
     let code = cur.i64_of("weather_code").unwrap_or(0);
     let is_day = cur.i64_of("is_day").unwrap_or(1) != 0;
+    // ventania: o céu sem chuva com vento forte (a previsão não tem um código para isso)
+    let wind = cur.f64_of("wind_speed_10m").unwrap_or(0.0);
+    let gusts = cur.f64_of("wind_gusts_10m").unwrap_or(wind);
+    let windy = code <= 3 && (wind >= WINDY_KMH || gusts >= WINDY_GUSTS);
     let hour_of = |i: usize| times[i].get(11..13).and_then(|h| h.parse::<i64>().ok()).unwrap_or(0);
     let entry = |i: usize, label: String| -> Value {
         let c = hourly["weather_code"][i].as_i64().unwrap_or(0);
@@ -339,6 +386,8 @@ fn process(data: &Value, place: &str) -> Value {
         })
         .collect();
     let next12 = Value::Array(hours.iter().take(12).cloned().collect());
+    let line = sky_line(&next12, windy.then(|| gusts.max(wind).round() as i64));
+    let hours = with_sun(hours, times.get(start).map(String::as_str).unwrap_or(""), cur.str_of("time").unwrap_or(""), daily);
     let now = json!({
         "time": cur.str_of("time").unwrap_or(""),
         "temp": round(&cur["temperature_2m"]),
@@ -360,13 +409,16 @@ fn process(data: &Value, place: &str) -> Value {
         "temp": round(&cur["temperature_2m"]),
         "code": code,
         "is_day": is_day,
-        "icon": weather_icon(code, is_day),
-        "desc": wmo(code),
+        "icon": if windy { "wind" } else { weather_icon(code, is_day) },
+        "desc": if windy { "Ventania" } else { wmo(code) },
+        "windy": windy,
+        "utc_offset": data["utc_offset_seconds"].as_f64(),
         "max": round(&daily["temperature_2m_max"][0]),
         "min": round(&daily["temperature_2m_min"][0]),
         "details": format!("Sensação {}°  ·  Umidade {}%  ·  Vento {} km/h",
             round(&cur["apparent_temperature"]), round(&cur["relative_humidity_2m"]), round(&cur["wind_speed_10m"])),
-        "rain_line": rain_line(&next12),
+        "rain_line": line.as_ref().map(|l| l.0.clone()),
+        "line_icon": line.map(|l| l.1),
         "hours": hours,
         "days": days(data),
         "day_info": day_info,
@@ -468,6 +520,14 @@ pub struct Tempo {
     day_scroll: Scroll,
     /// o último tamanho desenhado (ao mudar de tamanho, volta para a tela principal)
     mode_seen: Cell<Mode>,
+    /// os raios da trovoada
+    storm: sky::Storm,
+    /// próximo redesenho do céu (as cores andam com a hora)
+    sky_at: Cell<Instant>,
+    /// tremer com o trovão (a opção, lida a cada desenho)
+    shake_on: Cell<bool>,
+    /// hora fixa do céu (exemplos e imagens do README); None: a hora da cidade
+    fixed_hour: Option<f32>,
 }
 
 impl Tempo {
@@ -495,6 +555,10 @@ impl Tempo {
             main_scroll: Scroll::at(0.0),
             day_scroll: Scroll::at(0.0),
             mode_seen: Cell::new(Mode::M),
+            storm: sky::Storm::default(),
+            sky_at: Cell::new(Instant::now() + SKY_EVERY),
+            shake_on: Cell::new(true),
+            fixed_hour: None,
         }
     }
 
@@ -623,11 +687,25 @@ impl Tempo {
         self.weather.as_ref().and_then(|w| w.i64_of("code")).unwrap_or(3)
     }
 
-    fn is_day(&self) -> bool {
-        match self.weather.as_ref().and_then(|w| w.bool_of("is_day")) {
-            Some(d) => d,
-            None => (6..19).contains(&win::local_time().hour),
-        }
+    /// O clima no céu (com a ventania, que não tem código próprio).
+    fn sky_weather(&self) -> Weather {
+        let windy = self.weather.as_ref().and_then(|w| w.bool_of("windy")).unwrap_or(false);
+        Weather::of(self.code(), windy)
+    }
+
+    /// A hora na cidade (pelo fuso dela; sem ele, a do computador) e o nascer e o pôr do sol.
+    fn clock(&self) -> sky::Clock {
+        let w = self.weather.as_ref();
+        let now = match (self.fixed_hour, w.and_then(|w| w.f64_of("utc_offset"))) {
+            (Some(h), _) => h,
+            (None, Some(offset)) => ((win::now() + offset) / 3600.0).rem_euclid(24.0) as f32,
+            _ => {
+                let t = win::local_time();
+                t.hour as f32 + t.minute as f32 / 60.0
+            }
+        };
+        let hour_of = |key: &str| w.and_then(|w| w["now"].str_of(key)).and_then(minute_of_day).map(|m| m as f32 / 60.0);
+        sky::Clock::new(now, hour_of("sunrise").unwrap_or(6.0), hour_of("sunset").unwrap_or(18.0))
     }
 
     fn width(mode: Mode) -> f32 {
@@ -885,32 +963,7 @@ impl Tempo {
 
     /// Fundo: o céu, com estrelas nas noites limpas.
     fn draw_sky(&self, c: &mut Canvas, mode: Mode) {
-        let (w, h) = (Self::width(mode), self.height(mode));
-        let (top, bottom) = sky(self.code(), self.is_day());
-        c.gradient_round_rect(0.0, 0.0, w, h, Self::radius(mode), &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h);
-        // a luz do sol (ou da lua) vindo do canto de cima, com o céu limpo
-        if self.code() <= 2 {
-            let (warm, amount) = if self.is_day() { (Rgba::rgb(255, 214, 130), 0.4) } else { (Rgba::rgb(200, 210, 255), 0.25) };
-            c.push_round_clip(0.0, 0.0, w, h, Self::radius(mode));
-            // muitos círculos bem fracos, para a luz sumir sem degraus
-            let steps = 40;
-            for i in 0..steps {
-                let r = 160.0 - i as f32 * (150.0 / steps as f32);
-                c.fill_circle(w - 26.0, -6.0, r, warm.alpha(amount / steps as f32));
-            }
-            c.pop_clip();
-        }
-        if !self.is_day() && self.code() <= 2 {
-            let mut seed: u32 = 7;
-            let mut rnd = || {
-                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                (seed >> 8) as f32 / (1u32 << 24) as f32
-            };
-            for _ in 0..(w * h.min(160.0) / 900.0) as usize {
-                let (x, y, r, a) = (rnd() * w, rnd() * h.min(160.0) * 0.9, 0.4 + rnd() * 0.8, 0.25 + rnd() * 0.5);
-                c.fill_circle(x, y, r, WHITE.alpha(a));
-            }
-        }
+        sky::draw_back(c, Self::width(mode), self.height(mode), Self::radius(mode), self.sky_weather(), &self.clock());
     }
 
     /// Faixa de horas que rola (`off` em colunas), com as setinhas nas pontas quando há mais.
@@ -996,7 +1049,10 @@ impl Tempo {
             if big && pop >= 20 {
                 c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
             }
-            c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None);
+            match h[2].as_str() {
+                Some(name) => c.text(cx, y + temp_y + 1.5, name, Face::Semibold, 10.0, FG, Anchor::MA, Some(col)),
+                None => c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None),
+            };
         }
         c.pop_clip();
     }
@@ -1079,7 +1135,13 @@ impl Tempo {
                 // o aviso de chuva, quando há, numa linha discreta (sem caixa)
                 if let Some(text) = self.rain_line() {
                     let cy = (G_RAIN.0 + G_RAIN.1) / 2.0;
-                    c.text(G_PAD, cy, "\u{e753}", Face::Icons, 11.0, RAIN_BLUE, Anchor::LM, None);
+                    // o guarda-chuva na chuva; nos outros, o ícone do clima (neve, neblina, vento...)
+                    match self.weather.as_ref().and_then(|w| w.str_of("line_icon")).filter(|i| *i != "rain") {
+                        Some(icon) => c.image(&weather_art(icon, (15.0 * c.s).round() as u32), G_PAD - 2.0, cy - 7.5),
+                        None => {
+                            c.text(G_PAD, cy, "\u{e753}", Face::Icons, 11.0, RAIN_BLUE, Anchor::LM, None);
+                        }
+                    }
                     c.text(G_PAD + 18.0, cy, &text, Face::Regular, 11.5, FG.alpha(0.85), Anchor::LM, Some(W - 2.0 * G_PAD - 18.0));
                     c.hline_px(G_PAD, W - G_PAD, G_RAIN.1, WHITE.alpha(0.09));
                 }
@@ -1394,11 +1456,7 @@ impl Tempo {
 
     /// Chuva, garoa ou neve caindo (0: céu sem nada caindo).
     fn falling(&self) -> u32 {
-        if self.weather.is_none() {
-            return 0;
-        }
-        let code = self.code();
-        if is_rain(code) || is_snow(code) { RAIN_FPS } else { 0 }
+        if self.weather.is_some() && self.sky_weather().moves() { RAIN_FPS } else { 0 }
     }
 
     /// Clique na faixa de horas em `y`: setinhas (rolar) ou uma hora (`hours`: abre o dia dela).
@@ -1478,6 +1536,7 @@ impl Kind for Tempo {
             self.view.set(View::Main);
             self.page.set(0);
         }
+        self.shake_on.set(shakes(env.cfg));
         self.draw_sky(c, mode);
         match self.view_for(mode) {
             View::Details if self.navigable() => return self.draw_details(c, mode, env),
@@ -1487,43 +1546,26 @@ impl Kind for Tempo {
         self.draw_main(c, mode, env);
     }
 
-    /// Chuva ou neve caindo por cima do céu (as gotas são calculadas pela hora: sem estado).
+    /// O que cai ou sopra por cima do céu (garoa, chuva, neve, granizo, vento) e os raios.
     fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
         if self.falling() == 0 {
             return;
         }
-        let (w, h) = (Self::width(mode), self.height(mode));
-        let code = self.code();
-        let snow = is_snow(code);
-        let light = (51..=55).contains(&code) || code == 61 || code == 80;
-        let t = self.started.elapsed().as_secs_f32();
-        let count = ((w * h / if light { 1600.0 } else { 900.0 }) as usize).max(12);
-        c.push_round_clip(ox, oy, ox + w, oy + h, Self::radius(mode));
-        let mut seed: u32 = 99;
-        let mut rnd = || {
-            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            (seed >> 8) as f32 / (1u32 << 24) as f32
-        };
-        for _ in 0..count {
-            let (x0, y0, speed, len) = (rnd(), rnd(), rnd(), rnd());
-            if snow {
-                let v = 14.0 + speed * 16.0;
-                let y = (y0 * (h + 10.0) + t * v) % (h + 10.0) - 5.0;
-                let x = (x0 * w + (t * 0.8 + x0 * 9.0).sin() * 6.0).rem_euclid(w);
-                c.fill_circle(ox + x, oy + y, 1.2 + len * 1.3, WHITE.alpha(0.55));
-            } else {
-                let v = 180.0 + speed * 120.0;
-                let l = 7.0 + len * 9.0;
-                let y = (y0 * (h + l) + t * v) % (h + l) - l;
-                let x = (x0 * (w + 40.0) - t * v * 0.18).rem_euclid(w + 40.0) - 20.0;
-                c.line(&[(ox + x, oy + y), (ox + x - l * 0.18, oy + y + l)], Rgba(205, 222, 255, if light { 60 } else { 85 }), 1.2);
-            }
-        }
-        c.pop_clip();
+        // as gotas são calculadas pelo tempo (sem estado); a volta a cada hora mantém a precisão
+        let t = self.started.elapsed().as_secs_f32() % 3600.0;
+        sky::draw_front(c, ox, oy, Self::width(mode), self.height(mode), Self::radius(mode), self.sky_weather(), t, &self.storm);
     }
 
     fn overlay_fps(&self) -> u32 {
         self.falling()
+    }
+
+    fn shake(&self) -> (f32, f32) {
+        if self.shake_on.get() && self.falling() > 0 && self.sky_weather().lightning() {
+            self.storm.shake(Instant::now())
+        } else {
+            (0.0, 0.0)
+        }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
@@ -1719,7 +1761,8 @@ impl Kind for Tempo {
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        let mut next = self.next_weather;
+        let sky_at = self.sky_at.get();
+        let mut next = Some(self.next_weather.map_or(sky_at, |n| n.min(sky_at)));
         if self.pending.is_some() {
             next = Some(next.map_or(self.poll_at, |n| n.min(self.poll_at)));
         }
@@ -1757,6 +1800,11 @@ impl Kind for Tempo {
         }
         if self.next_weather.is_some_and(|t| now >= t) {
             self.update_weather(ctx);
+            changed = true;
+        }
+        // as cores do céu andam com a hora
+        if now >= self.sky_at.get() {
+            self.sky_at.set(now + SKY_EVERY);
             changed = true;
         }
         changed
@@ -1843,6 +1891,8 @@ impl Tempo {
         }
         t.page.set(page);
         t.main_scroll = Scroll::at(scroll);
+        // o céu na hora da previsão de exemplo (14:15), sempre igual
+        t.fixed_hour = Some(14.25);
         // a entrada dos painéis já terminou
         t.view_at.set(Instant::now() - Duration::from_secs(5));
         t
@@ -1857,6 +1907,25 @@ impl Tempo {
         let mut t = Tempo::sample("inicio", 0, 0.0, mode);
         t.weather = Some(process(&data, "Florianópolis, Santa Catarina"));
         t.started = Instant::now() - Duration::from_secs_f32(secs);
+        t
+    }
+
+    /// Num clima (código da Open-Meteo) e numa hora quaisquer; `windy`: ventando forte. Na
+    /// trovoada, com um raio caindo agora.
+    pub fn sample_sky(code: i64, hour: f32, windy: bool, mode: Mode) -> Tempo {
+        let mut data = sample_data();
+        data["current"]["weather_code"] = json!(code);
+        if windy {
+            data["current"]["wind_speed_10m"] = json!(52.0);
+            data["current"]["wind_gusts_10m"] = json!(71.0);
+        }
+        let mut t = Tempo::sample("inicio", 0, 0.0, mode);
+        t.weather = Some(process(&data, "Florianópolis, Santa Catarina"));
+        t.fixed_hour = Some(hour);
+        t.started = Instant::now() - Duration::from_secs(3);
+        if t.sky_weather().lightning() {
+            t.storm.strike(Self::width(mode), t.height(mode), Instant::now());
+        }
         t
     }
 }
@@ -1985,6 +2054,126 @@ mod tests {
         for i in 0..G_DAYS {
             assert_eq!(t.hit(160.0, top + row * (i as f32 + 0.5), Mode::G, &env), Some(DAY + i as u32), "dia {i}");
         }
+    }
+
+    /// Desenha cada clima (médio e grande, com a camada animada) em PNGs na pasta temporária:
+    /// cargo test --release sky_sheet -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn sky_sheet() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let cfg = json!({"tempo": {}, "app": {}});
+        let skies = [
+            ("limpo", 0, 13.5, false),
+            ("por_do_sol", 0, 18.6, false),
+            ("aurora", 1, 4.9, false),
+            ("noite", 0, 22.0, false),
+            ("poucas", 2, 10.0, false),
+            ("nublado", 3, 11.0, false),
+            ("neblina", 45, 8.0, false),
+            ("garoa", 53, 21.0, false),
+            ("chuva", 63, 14.0, false),
+            ("forte", 65, 16.0, false),
+            ("trovoada", 95, 16.0, false),
+            ("granizo", 99, 15.0, false),
+            ("neve", 73, 10.0, false),
+            ("ventania", 1, 12.0, true),
+        ];
+        for (name, code, hour, windy) in skies {
+            for mode in [Mode::M, Mode::G] {
+                let t = Tempo::sample_sky(code, hour, windy, mode);
+                let l = Layout::of(mode);
+                let mut c = Canvas::new((l.w * 1.5) as u32, (l.h * 1.5) as u32, 1.5);
+                t.draw(&mut c, mode, &Env { cfg: &cfg, key: "tempo" });
+                t.overlay(&mut c, mode, 0.0, 0.0);
+                let path = std::env::temp_dir().join(format!("ceu_{name}_{}.png", mode.code()));
+                crate::gfx::save_png(&c.finish(), &path).unwrap();
+                println!("{}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn sunrise_and_sunset_join_the_hours() {
+        // às 14:15, o pôr do sol (18:52) entra logo depois das 18h, e o nascer de amanhã (5:20)
+        // depois das 5h; a faixa continua com 24 colunas
+        let w = process(&sample_data(), "Florianópolis");
+        let hours = w["hours"].as_array().unwrap();
+        assert_eq!(hours.len(), NEXT_HOURS);
+        let at = |label: &str| hours.iter().position(|h| h[0] == label).unwrap_or_else(|| panic!("{label}"));
+        assert_eq!(at("18:52"), at("18h") + 1);
+        assert_eq!(hours[at("18:52")][1], "sunset");
+        assert_eq!(hours[at("18:52")][2], "Pôr do sol");
+        assert_eq!(at("5:20"), at("5h") + 1);
+        assert_eq!(hours[at("5:20")][1], "sunrise");
+        assert_eq!(hours[at("5:20")][5], 1, "o nascer é de amanhã");
+        // clicar na coluna do pôr do sol abre o dia dele, na hora dele
+        let cfg = json!({"tempo": {"city": "Florianópolis"}, "app": {}});
+        let mut t = Tempo::sample("inicio", 0, 0.0, Mode::M);
+        let (mut c, mut cache, mut out) = (cfg.clone(), json!({}), Vec::new());
+        let mut ctx = Ctx { cfg: &mut c, cache: &mut cache, key: "tempo", out: &mut out };
+        t.act(HOUR + at("18:52") as u32, &mut ctx);
+        assert_eq!(t.view.get(), View::Day(0));
+        // a vista de um dia não muda (as colunas são as 24 horas)
+        assert_eq!(t.day_hours(0).len(), 24);
+    }
+
+    #[test]
+    fn the_line_follows_the_weather() {
+        let hours = |codes: &[i64]| json!(codes.iter().enumerate().map(|(i, c)| json!([if i == 0 { "Agora".to_string() } else { format!("{}h", 14 + i) }, "x", 20, c, 0])).collect::<Vec<_>>());
+        let line = |codes: &[i64], gusts| sky_line(&hours(codes), gusts);
+        assert_eq!(line(&[95, 95, 63, 3], None), Some(("Trovoadas até 16h, depois chuva".into(), "thunder")));
+        assert_eq!(line(&[63, 3], None), Some(("Chuva até 15h, depois nublado".into(), "rain")));
+        assert_eq!(line(&[73, 73], None), Some(("Neve nas próximas horas".into(), "snow")));
+        assert_eq!(line(&[45, 2], None), Some(("Neblina até 15h, depois parcialmente nublado".into(), "fog")));
+        assert_eq!(line(&[1, 1], Some(71)), Some(("Ventos de até 71 km/h".into(), "wind")));
+        assert_eq!(line(&[1, 1, 71], None), Some(("Neve a partir das 16h".into(), "snow")));
+        assert_eq!(line(&[1, 1, 61], None), Some(("Chuva a partir das 16h".into(), "rain")));
+        assert_eq!(line(&[0, 1, 2], None), None);
+    }
+
+    #[test]
+    fn windy_and_new_icons() {
+        let mut data = sample_data();
+        data["current"]["wind_gusts_10m"] = json!(80.0);
+        let w = process(&data, "Florianópolis");
+        assert_eq!((w["desc"].as_str(), w["icon"].as_str(), w["windy"].as_bool()), (Some("Ventania"), Some("wind"), Some(true)));
+        assert_eq!(w["rain_line"], "Ventos de até 80 km/h");
+        // chovendo, ventar não vira ventania
+        data["current"]["weather_code"] = json!(63);
+        assert_eq!(process(&data, "x")["windy"], false);
+        assert_eq!(weather_icon(65, true), "heavy_rain");
+        assert_eq!(weather_icon(99, true), "hail");
+        assert_eq!(weather_icon(95, true), "thunder");
+    }
+
+    #[test]
+    fn the_sky_redraws_every_minute_and_storms_animate() {
+        let (mut cfg, mut cache, mut out) = (json!({"tempo": {}, "app": {}}), json!({}), Vec::new());
+        let mut ctx = Ctx { cfg: &mut cfg, cache: &mut cache, key: "tempo", out: &mut out };
+        let mut t = Tempo::sample("inicio", 0, 0.0, Mode::M);
+        t.next_weather = None;
+        assert!(t.next_tick().unwrap() <= Instant::now() + SKY_EVERY);
+        assert!(!t.tick(&mut ctx));
+        t.sky_at.set(Instant::now() - Duration::from_millis(1));
+        assert!(t.tick(&mut ctx), "redesenha o céu");
+        assert!(t.sky_at.get() > Instant::now());
+        // céu limpo e nublado ficam parados; chuva, neve, vento e trovoada animam
+        assert_eq!(Tempo::sample_sky(3, 10.0, false, Mode::M).overlay_fps(), 0);
+        assert_eq!(Tempo::sample_sky(45, 10.0, false, Mode::M).overlay_fps(), 0);
+        for code in [53, 63, 65, 73, 95, 99] {
+            assert_eq!(Tempo::sample_sky(code, 10.0, false, Mode::M).overlay_fps(), RAIN_FPS, "{code}");
+        }
+        assert_eq!(Tempo::sample_sky(1, 10.0, true, Mode::M).overlay_fps(), RAIN_FPS);
+        // o tremor do trovão obedece à opção
+        let storm = Tempo::sample_sky(95, 19.0, false, Mode::M);
+        assert!(storm.storm.flash(Instant::now()) > 0.5);
+        storm.shake_on.set(false);
+        assert_eq!(storm.shake(), (0.0, 0.0));
+        assert!(!shakes(&json!({"tempo": {"tremer": false}})));
+        assert!(shakes(&json!({"tempo": {}})));
     }
 
     #[test]

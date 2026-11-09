@@ -168,14 +168,22 @@ pub fn draw_welcome(st: &mut WelcomeState, ui: &mut Ui, v: &View) {
 
 /// Passo 1: os widgets em cartões (3 em cima e o resto embaixo, no meio), com a miniatura de
 /// verdade no tamanho médio.
+/// Os cartões das boas-vindas: quantos por linha e quantas linhas de descrição cabem. Até seis
+/// widgets, três por linha (duas linhas de descrição); com mais, quatro por linha, mais estreitos,
+/// com uma linha a mais de descrição (a altura que sobra das duas linhas de cartões).
+pub(crate) fn welcome_grid() -> (usize, usize) {
+    if widgets::KEYS.len() > 6 { (4, 3) } else { (3, 2) }
+}
+
 fn step_widgets(st: &mut WelcomeState, ui: &mut Ui, x: f32, w: f32, v: &View) {
-    let (gap, cols) = (14.0, 3);
+    let gap = 14.0;
+    let (cols, lines) = welcome_grid();
     let count = widgets::KEYS.len();
     let rows = count.div_ceil(cols);
     let tile_w = (w - gap * (cols - 1) as f32) / cols as f32;
     let tile_h = (CONTENT_H - gap * (rows - 1) as f32) / rows as f32;
-    // embaixo da miniatura: o nome e duas linhas de descrição
-    let stage_h = tile_h - 74.0;
+    // embaixo da miniatura: o nome e as linhas de descrição
+    let stage_h = tile_h - 44.0 - 15.0 * lines as f32;
     let s = ui.s();
     let medium = widgets::Layout::of(Mode::M);
     let zoom = ((tile_w - 20.0) / medium.w).min((stage_h - 8.0) / medium.h);
@@ -203,7 +211,7 @@ fn step_widgets(st: &mut WelcomeState, ui: &mut Ui, x: f32, w: f32, v: &View) {
         }
         let title_y = ty + stage_h + 24.0;
         ui.text(tx + 14.0, title_y, widgets::title(key), 13.5, FG, Face::Semibold, Anchor::LM, Some(tile_w - 52.0));
-        for (j, line) in ui.wrap(widgets::description(key), 11.0, tile_w - 28.0, 2).iter().enumerate() {
+        for (j, line) in ui.wrap(widgets::description(key), 11.0, tile_w - 28.0, lines).iter().enumerate() {
             ui.text(tx + 14.0, title_y + 20.0 + 15.0 * j as f32, line, 11.0, MUTED, Face::Regular, Anchor::LM, Some(tile_w - 28.0));
         }
         let (cx, cy) = (tx + tile_w - 22.0, title_y);
@@ -298,14 +306,15 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        // a largura do texto num cartão das boas-vindas (3 por linha, como em step_widgets)
-        let tile_w = (WELCOME_W - 2.0 * SIDE - 2.0 * 14.0) / 3.0;
+        // a largura do texto num cartão das boas-vindas (como em step_widgets)
+        let (cols, n) = welcome_grid();
+        let tile_w = (WELCOME_W - 2.0 * SIDE - (cols - 1) as f32 * 14.0) / cols as f32;
         let max_w = tile_w - 28.0;
         let c = crate::gfx::Canvas::new(10, 10, 1.0);
         for key in widgets::KEYS {
-            let lines = c.wrap(widgets::description(key), Face::Regular, 11.0, max_w, 2);
+            let lines = c.wrap(widgets::description(key), Face::Regular, 11.0, max_w, n);
             let last = lines.last().unwrap();
-            assert!(c.text_width(last, Face::Regular, 11.0) <= max_w, "{key}: a descrição passa de duas linhas e vira \"…\": {last:?}");
+            assert!(c.text_width(last, Face::Regular, 11.0) <= max_w && !last.ends_with('…'), "{key}: a descrição passa de {n} linhas e vira \"…\": {last:?}");
         }
     }
 
@@ -314,9 +323,11 @@ mod tests {
         assert!(CONTENT_Y + CONTENT_H <= FOOT_LINE - 12.0);
         assert!(BUTTONS_Y + 32.0 <= WELCOME_H - 12.0, "os botões cabem embaixo da linha do rodapé");
         // passo 1: todos os widgets em cartões com espaço para a miniatura, o nome e a descrição
-        let rows = widgets::KEYS.len().div_ceil(3) as f32;
+        let (cols, lines) = welcome_grid();
+        let rows = widgets::KEYS.len().div_ceil(cols) as f32;
         let tile_h = (CONTENT_H - 14.0 * (rows - 1.0)) / rows;
-        assert!(tile_h - 74.0 >= 80.0, "miniatura de {} px", tile_h - 74.0);
+        let stage = tile_h - 44.0 - 15.0 * lines as f32;
+        assert!(stage >= 80.0, "miniatura de {stage} px");
         // passo 2: as três linhas e o aviso
         assert!(CONTENT_Y + 3.0 * (ROW_H + ROW_GAP) + 20.0 <= FOOT_LINE);
         // passo 3: as dicas (2 × 2) e a lista dos widgets
