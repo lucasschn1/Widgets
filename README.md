@@ -235,7 +235,11 @@ dele (só se ainda não houver outra; uma cópia das configurações do Claude C
 de cada conversa. Quem já usava o app encontra este widget na Galeria de widgets.
 
 <p align="center">
-  <img src="docs/images/claude.png" width="620" alt="Uso do Claude nos três tamanhos">
+  <img src="docs/images/claude.png" width="620" alt="Uso do Claude nos três tamanhos, com o Clawd programando no notebook">
+</p>
+
+<p align="center">
+  <img src="docs/images/claude-clawd.png" width="620" alt="O Clawd no médio: tomando café, de Sherlock com a lupa, ouvindo música de fone e, no limite, lendo do lado da plaquinha VOLTO LOGO">
 </p>
 
 ## Do tamanho que você quiser

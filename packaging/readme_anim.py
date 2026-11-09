@@ -29,13 +29,6 @@ def load(name):
     return frames, durations
 
 
-def save_gif(frames, durations, path):
-    # cada quadro com a sua paleta: as músicas têm cores muito diferentes entre si, e uma paleta
-    # só para todas deixaria os degradês granulados
-    quantized = [f.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG) for f in frames]
-    quantized[0].save(path, save_all=True, append_images=quantized[1:], duration=durations, loop=0, optimize=True, disposal=1)
-
-
 def save_delta_gif(frames, durations, path):
     """GIF com uma paleta só e, em cada quadro, transparente o que não mudou desde o anterior.
 
@@ -80,7 +73,8 @@ def main():
     cover, cover_ms = load("capa")
     save_delta_gif(cover, cover_ms, ROOT / "docs" / "images" / "capa.gif")
     music, music_ms = load("musica")
-    save_gif(music, music_ms, ROOT / "docs" / "images" / "musica.gif")
+    # (uma paleta para o GIF todo: com o fundo escuro, uma por quadro deixava o arquivo com o dobro)
+    save_delta_gif(music, music_ms, ROOT / "docs" / "images" / "musica.gif")
     island, island_ms = load("ilha")
     island[0].save(ROOT / "docs" / "images" / "ilha.webp", save_all=True, append_images=island[1:], duration=island_ms, loop=0, quality=86, method=6)
     sizes, sizes_ms = load("tamanhos")
