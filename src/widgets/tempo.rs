@@ -963,7 +963,13 @@ impl Tempo {
 
     /// Fundo: o céu, com estrelas nas noites limpas.
     fn draw_sky(&self, c: &mut Canvas, mode: Mode) {
-        sky::draw_back(c, Self::width(mode), self.height(mode), Self::radius(mode), self.sky_weather(), &self.clock());
+        let (w, h, r) = (Self::width(mode), self.height(mode), Self::radius(mode));
+        if self.weather.is_some() {
+            sky::draw_back(c, w, h, r, self.sky_weather(), &self.clock());
+        } else {
+            // ainda sem a previsão (abrindo pela primeira vez): o céu cinza, sem detalhes
+            sky::draw_plain(c, w, h, r, Weather::Cloudy, &self.clock());
+        }
     }
 
     /// Faixa de horas que rola (`off` em colunas), com as setinhas nas pontas quando há mais.

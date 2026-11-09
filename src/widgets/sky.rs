@@ -231,10 +231,15 @@ pub fn colors(weather: Weather, clock: &Clock) -> (Rgba, Rgba) {
 
 // ---------- a camada de baixo ----------
 
-/// O céu inteiro atrás do conteúdo: cores, luz do sol ou da lua, estrelas, nuvens e neblina.
-pub fn draw_back(c: &mut Canvas, w: f32, h: f32, r: f32, weather: Weather, clock: &Clock) {
+/// Só o degradê do céu (sem a previsão ainda: nada de nuvens, estrelas ou luz).
+pub fn draw_plain(c: &mut Canvas, w: f32, h: f32, r: f32, weather: Weather, clock: &Clock) {
     let (top, bottom) = colors(weather, clock);
     c.gradient_round_rect(0.0, 0.0, w, h, r, &[(0.0, top.alpha(0.94)), (1.0, bottom.alpha(0.94))], 0.0, h);
+}
+
+/// O céu inteiro atrás do conteúdo: cores, luz do sol ou da lua, estrelas, nuvens e neblina.
+pub fn draw_back(c: &mut Canvas, w: f32, h: f32, r: f32, weather: Weather, clock: &Clock) {
+    draw_plain(c, w, h, r, weather, clock);
     let look = weather.look();
     c.push_round_clip(0.0, 0.0, w, h, r);
     lights(c, w, h, look.cloud, clock);
@@ -311,8 +316,11 @@ fn clouds(c: &mut Canvas, w: f32, h: f32, weather: Weather, look: &Look, clock: 
             let (cw, ch) = (180.0 * k, 100.0 * k);
             let x = rnd.f() * (w + cw * 1.2) - cw * 0.6;
             let y = (l.y.0 + (l.y.1 - l.y.0) * rnd.f()) * zone - ch * 0.35;
-            let img = cloud_sprite(v, lt, lb, k * c.s);
-            c.image_px(&img, ((x - cw * 0.1) * c.s).round(), (y * c.s).round(), img.w as f32, img.h as f32, l.alpha);
+            // em meia resolução e em tamanhos arredondados (desfocada, esticar não aparece, e o
+            // desfoque custa 4 vezes menos e se repete entre nuvens parecidas)
+            let img = cloud_sprite(v, lt, lb, (k * c.s * 5.0).round() / 10.0);
+            let s = c.s;
+            c.image_px(&img, ((x - cw * 0.1) * s).round(), (y * s).round(), (cw * 1.2 * s).round(), (ch * 1.2 * s).round(), l.alpha);
         }
     }
 }
