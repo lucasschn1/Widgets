@@ -1,5 +1,5 @@
 //! Gera as imagens do README com os widgets de verdade (dados de exemplo), em vidro sobre um
-//! papel de parede em degradê:
+//! papel de parede grafite, com luzes suaves:
 //!
 //!   cargo test readme -- --ignored --nocapture
 //!
@@ -39,22 +39,58 @@ fn frames_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Degradê azul, roxo, rosa e laranja (parecido com os papéis de parede do Windows 11).
-fn wallpaper(w: u32, h: u32) -> Image {
-    let mut c = Canvas::new(w, h, 1.0);
+/// Um fundo de manchas de luz suaves sobre uma cor de base, com um grão fino (para o degradê não
+/// formar faixas): a base e as manchas (x e y do centro, de 0 a 1; o raio, em frações da
+/// altura; a cor; a força).
+struct Fundo {
+    base: [f32; 3],
+    spots: &'static [(f32, f32, f32, [f32; 3], f32)],
+    grain: f32,
+}
+
+/// Grafite: quase preto azulado, com luzes discretas.
+const GRAFITE: Fundo = Fundo {
+    base: [14.0, 17.0, 26.0],
+    spots: &[
+        (0.08, 0.05, 0.75, [72.0, 82.0, 196.0], 0.62),
+        (0.88, 0.18, 0.6, [124.0, 72.0, 178.0], 0.38),
+        (0.95, 1.02, 0.7, [214.0, 118.0, 62.0], 0.42),
+        (0.18, 1.0, 0.55, [38.0, 120.0, 142.0], 0.3),
+    ],
+    grain: 1.0,
+};
+fn mesh(w: u32, h: u32, f: &Fundo) -> Image {
+    let mut img = Image::new(w, h);
     let (wf, hf) = (w as f32, h as f32);
-    c.gradient_round_rect(
-        0.0,
-        0.0,
-        wf,
-        hf,
-        0.0,
-        &[(0.0, Rgba::rgb(92, 84, 246)), (0.45, Rgba::rgb(176, 92, 222)), (0.78, Rgba::rgb(234, 118, 138)), (1.0, Rgba::rgb(250, 152, 88))],
-        0.0,
-        hf,
-    );
-    c.gradient_h(0.0, 0.0, wf, hf, 0.0, &[(0.0, Rgba(36, 110, 246, 190)), (0.6, Rgba(36, 110, 246, 0)), (1.0, Rgba(36, 110, 246, 0))], 0.0, wf);
-    c.finish()
+    for y in 0..h {
+        for x in 0..w {
+            let (u, v) = (x as f32 / hf, y as f32 / hf);
+            let mut c = f.base;
+            for &(sx, sy, r, col, k) in f.spots {
+                let (dx, dy) = (u - sx * wf / hf, v - sy);
+                let a = k * (-(dx * dx + dy * dy) / (r * r)).exp();
+                for i in 0..3 {
+                    c[i] += (col[i] - c[i]) * a;
+                }
+            }
+            // grão: um ruído fixo por pixel
+            let mut n = (x.wrapping_mul(374_761_393) ^ y.wrapping_mul(668_265_263)).wrapping_mul(1_274_126_177);
+            n ^= n >> 13;
+            let g = ((n & 0xff) as f32 / 255.0 - 0.5) * 2.0 * f.grain;
+            let i = ((y * w + x) * 4) as usize;
+            img.px[i] = (c[2] + g).clamp(0.0, 255.0) as u8;
+            img.px[i + 1] = (c[1] + g).clamp(0.0, 255.0) as u8;
+            img.px[i + 2] = (c[0] + g).clamp(0.0, 255.0) as u8;
+            img.px[i + 3] = 255;
+        }
+    }
+    img
+}
+
+/// O papel de parede das imagens: grafite, quase preto azulado, com luzes discretas (azul em
+/// cima à esquerda, roxo à direita, âmbar e verde-água embaixo).
+fn wallpaper(w: u32, h: u32) -> Image {
+    mesh(w, h, &GRAFITE)
 }
 
 /// O conteúdo do widget (sem o vidro) e o raio dos cantos, em pixels.
@@ -81,7 +117,8 @@ fn readme_sample(key: &str, mode: Mode) -> (Box<dyn Kind>, Value) {
         "midia" => (Box::new(song(0, 0.0)), cfg),
         "github" => (Box::new(GitHub::sample(&cfg, &json!({}))), cfg),
         "pomodoro" => (Box::new(Pomodoro::new(&pomodoro_cfg())), pomodoro_cfg()),
-        _ => (Box::new(Claude::sample()), cfg),
+        // o Clawd programando no notebook
+        _ => (Box::new(Claude::sample_busy()), cfg),
     }
 }
 
@@ -408,6 +445,33 @@ fn readme() {
     // ---------- um widget por imagem, nos três tamanhos ----------
     for key in ["github", "pomodoro", "claude"] {
         save(&trio(key), &docs().join(format!("{key}.png")));
+    }
+
+    // ---------- o Clawd: quatro momentos no médio ----------
+    {
+        use crate::widgets::clawd::Anim;
+        let views: [(Claude, &str); 4] = [
+            (Claude::sample_busy().with_crab(Anim::Coffee, 0.55), "Uma pausa para o café"),
+            (Claude::sample_sherlock().with_crab(Anim::Investigate, 0.4), "De Sherlock, de vez em quando"),
+            (Claude::sample().with_crab(Anim::Music, 0.3), "Ouvindo música"),
+            (Claude::sample_ko().with_crab(Anim::Read, 0.1), "No limite: volto logo"),
+        ];
+        let (margin, gap, label_h) = (48, 36, 40);
+        let mut items = Vec::new();
+        let mut labels = Vec::new();
+        let (mut w, mut h) = (0, 0);
+        for (k, (kind, label)) in views.iter().enumerate() {
+            let (img, radius) = content(kind, Mode::M, &cfg);
+            let (iw, ih) = (img.w as i32, img.h as i32);
+            let (x, y) = (margin + (k as i32 % 2) * (iw + gap), margin + (k as i32 / 2) * (label_h + ih + gap) + label_h);
+            labels.push(Label { text: (*label).into(), x: (x + iw / 2) as f32, y: (y - 14) as f32 });
+            items.push(Item { img, radius, x, y });
+            w = w.max(x + iw + margin);
+            h = h.max(y + ih + margin);
+        }
+        let wall = wallpaper(w as u32, h as u32);
+        let bd = Backdrop::from_picture(&wall, BLUR, S);
+        save(&compose(&wall, &bd, &items, &labels), &docs().join("claude-clawd.png"));
     }
 
     // ---------- janelas: configurações e boas-vindas ----------
