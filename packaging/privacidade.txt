@@ -6,7 +6,7 @@ Os Widgets não têm conta, telemetria nem anúncios. O app só acessa a interne
 - GitHub: envia ao api.github.com o usuário do GitHub que você informar.
 - Tocando agora: quando um vídeo do YouTube toca no navegador, envia ao youtube.com o título e o canal do vídeo, só para buscar a capa em alta resolução. Dá para desligar em Configurações > Tocando agora > Capa em alta do YouTube.
 - Atualizações: a cada 6 horas, pergunta ao GitHub qual é a versão mais recente, sem enviar nada sobre você. Dá para desligar em Configurações > Sobre > Procurar atualizações sozinho.
-- Uso do Claude, Sistema e Pomodoro: não conversam com ninguém.
+- Uso do Claude, Sistema, Pomodoro e Bateria: não conversam com ninguém.
 
 As configurações ficam no seu computador, em %APPDATA%\Widgets.
 

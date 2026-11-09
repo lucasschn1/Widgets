@@ -768,6 +768,9 @@ impl App {
         if self.cards[i].drag.is_some() {
             return;
         }
+        // a borda de vidro reflete a luz do mouse
+        let (gx, gy) = self.cards[i].logical(x, y);
+        self.cards[i].move_glow(gx, gy);
         if !self.cards[i].animating() && !self.sh.editing {
             let (lx, ly) = self.cards[i].logical(x, y);
             let mode = self.cards[i].mode;

@@ -150,7 +150,7 @@ pub fn default_setting(name: &str) -> Value {
         "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" => json!(true),
         "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("sempre"),
-        "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true}),
+        "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true, "bateria": true}),
         _ => Value::Null,
     }
 }

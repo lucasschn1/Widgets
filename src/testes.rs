@@ -7,6 +7,7 @@
 use serde_json::{json, Value};
 
 use crate::gfx::{Canvas, Image};
+use crate::widgets::battery::Battery;
 use crate::widgets::claude::Claude;
 use crate::widgets::github::GitHub;
 use crate::widgets::media::Media;
@@ -24,7 +25,7 @@ fn com() {
 }
 
 fn empty_cfg() -> Value {
-    json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "claude": {}, "app": {}})
+    json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "claude": {}, "bateria": {}, "app": {}})
 }
 
 fn pomodoro_cfg(fase: &str, running: bool) -> Value {
@@ -45,6 +46,24 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         out.push((format!("tempo início {m}"), Box::new(Tempo::sample("inicio", 0, 0.0, mode)), cfg.clone()));
         out.push((format!("tempo rolado {m}"), Box::new(Tempo::sample("inicio", 0, 9.5, mode)), cfg.clone()));
         out.push((format!("tempo chovendo {m}"), Box::new(Tempo::sample_raining(3.0, mode)), cfg.clone()));
+        // cada clima do app Tempo da Apple, em horas diferentes (a trovoada com um raio caindo)
+        for (name, code, hour, windy) in [
+            ("céu limpo de madrugada", 0, 3.0, false),
+            ("nascer do sol", 1, 6.0, false),
+            ("pôr do sol", 0, 18.6, false),
+            ("poucas nuvens", 2, 9.0, false),
+            ("nublado", 3, 11.0, false),
+            ("nublado de noite", 3, 23.0, false),
+            ("neblina", 45, 8.0, false),
+            ("garoa", 53, 21.0, false),
+            ("chuva forte", 65, 16.0, false),
+            ("trovoada", 95, 19.0, false),
+            ("granizo", 99, 15.0, false),
+            ("neve", 73, 10.0, false),
+            ("ventania", 1, 12.0, true),
+        ] {
+            out.push((format!("tempo {name} {m}"), Box::new(Tempo::sample_sky(code, hour, windy, mode)), cfg.clone()));
+        }
         for page in 0..4 {
             out.push((format!("tempo detalhes p{page} {m}"), Box::new(Tempo::sample("detalhes", page, 0.0, mode)), cfg.clone()));
         }
@@ -99,6 +118,18 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         }
     }
     out.push(("claude trabalhando".into(), Box::new(Claude::sample_busy()), cfg.clone()));
+    // a bateria em cada estado, e no meio de cada animação
+    out.push(("bateria".into(), Box::new(Battery::sample()), cfg.clone()));
+    out.push(("bateria carregando".into(), Box::new(Battery::sample_charging()), cfg.clone()));
+    out.push(("bateria baixa".into(), Box::new(Battery::sample_low()), cfg.clone()));
+    out.push(("bateria pc de mesa".into(), Box::new(Battery::sample_desktop()), cfg.clone()));
+    out.push(("bateria só o notebook".into(), Box::new(Battery::sample_alone()), cfg.clone()));
+    out.push(("bateria sem nada".into(), Box::new(Battery::sample_nothing()), cfg.clone()));
+    for ms in [0, 150, 400, 800] {
+        out.push((format!("bateria ligando na tomada {ms}"), Box::new(Battery::sample_plugging(ms)), cfg.clone()));
+        out.push((format!("bateria cheia {ms}"), Box::new(Battery::sample_full(ms)), cfg.clone()));
+        out.push((format!("bateria aparelhos mudando {ms}"), Box::new(Battery::sample_changing(ms)), cfg.clone()));
+    }
     out.push(("claude de Sherlock".into(), Box::new(Claude::sample_sherlock()), cfg.clone()));
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));
     out

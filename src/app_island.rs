@@ -17,6 +17,13 @@ use crate::widgets::media::{self, fmt_time};
 use crate::widgets::{island_act, IslandInfo};
 
 const KEY: &str = "midia";
+/// a ilha inteira (pílula, textos e botões) neste tamanho, em relação à escala da tela
+const SIZE: f32 = 0.86;
+
+/// A escala da ilha no ponto (x, y) da tela: a do monitor, um pouco menor.
+fn island_scale(x: i32, y: i32) -> f32 {
+    win::scale_at(x, y) * SIZE
+}
 /// margem transparente em volta da pílula (a sombra curta)
 const PAD: f32 = 8.0;
 const STATE_MS: f32 = 480.0;
@@ -296,6 +303,9 @@ impl Island {
         if a_cur > 0.01 {
             self.draw_layer(&mut c, self.shape, info, ox, oy, lw, lh, a_cur);
         }
+        if let (Some(i), Morph::None) = (info, self.morph) {
+            self.draw_volume(&mut c, i, ox, oy, lw, lh);
+        }
         // o cartão de verdade, esticado na forma de agora: na volta, termina exatamente como o
         // cartão que reaparece no lugar
         let fa = self.face_alpha();
@@ -410,6 +420,28 @@ impl Island {
         }
     }
 
+    /// A roda do mouse mudou o volume: uma barra com o alto-falante, por cima do que fica no meio
+    /// da pílula (no meio da fechada; no lugar do título da média; no lugar do app da aberta).
+    fn draw_volume(&self, c: &mut Canvas, info: &IslandInfo, ox: f32, oy: f32, lw: f32, lh: f32) {
+        let (Some(level), a) = (info.volume, info.volume_hud) else { return };
+        if a <= 0.01 {
+            return;
+        }
+        // (de onde a onde vai a barra, a altura dela e o bloco de texto que ela cobre)
+        let (x0, x1, cy, top, bottom) = match self.shape {
+            Shape::Compact => (ox + 42.0, ox + lw - 50.0, oy + lh / 2.0, oy + lh / 2.0 - 11.0, oy + lh / 2.0 + 11.0),
+            Shape::Medium => (ox + 76.0, ox + lw - 104.0, oy + lh / 2.0, oy + 8.0, oy + lh - 8.0),
+            Shape::Large => (ox + 92.0, ox + lw - 64.0, oy + 58.0, oy + 40.0, oy + 76.0),
+        };
+        // o fundo preto da pílula por cima do texto, que some enquanto a barra aparece
+        c.fill_round_rect(x0 - 6.0, top, x1 + 6.0, bottom, 8.0, BLACK.alpha(a));
+        let fade = |col: Rgba| col.with_a((col.3 as f32 * a) as u8);
+        c.text(x0 + 7.0, cy, "\u{e995}", Face::Icons, 12.0, fade(FG), Anchor::MM, None);
+        let (bx0, bx1) = (x0 + 22.0, x1);
+        c.fill_round_rect(bx0, cy - 2.0, bx1, cy + 2.0, 2.0, fade(WHITE.with_a(64)));
+        c.fill_round_rect(bx0, cy - 2.0, bx0 + ((bx1 - bx0) * level.clamp(0.0, 1.0)).max(4.0), cy + 2.0, 2.0, fade(WHITE.with_a(240)));
+    }
+
     /// Cinco ondas no ritmo do som (alternando as duas cores da capa).
     fn draw_eq(&self, c: &mut Canvas, x: f32, cy: f32, max_h: f32, info: &IslandInfo, a: f32) {
         for (i, level) in self.levels.iter().enumerate() {
@@ -473,7 +505,7 @@ impl App {
             Some((x, y)) if win::on_screen(x as i32, (y + 10.0) as i32) => (x, y),
             _ => self.island_default_anchor(card_rect, s0),
         };
-        let s = win::scale_at(anchor.0 as i32, (anchor.1 + 10.0) as i32);
+        let s = island_scale(anchor.0 as i32, (anchor.1 + 10.0) as i32);
         let info = self.cards[j].kind.island();
         let card_color = info.as_ref().map(|i| i.colors[0].mix(BLACK, 0.55)).unwrap_or(Rgba::rgb(40, 30, 60));
         let card_face = (animate && self.sh.animations).then(|| self.cards[j].face(&self.sh));
@@ -631,7 +663,7 @@ impl App {
                 if isl.dragging {
                     isl.dragging = false;
                     // no monitor novo, a escala dele
-                    isl.s = win::scale_at(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10);
+                    isl.s = island_scale(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10);
                     isl.snap_to_target();
                     events::set_cursor(isl.hwnd, Cursor::Arrow);
                     self.save_island_pos();
@@ -711,6 +743,10 @@ impl App {
         let Some(j) = self.media_index() else { return };
         let steps = delta as f32 / 120.0;
         self.with_kind(j, |k, ctx| k.wheel(0.0, 0.0, steps, Mode::M, ctx));
+        // a barra de volume aparece já, sem esperar o próximo quadro
+        if let Some(isl) = &mut self.island {
+            isl.next_frame = Instant::now();
+        }
     }
 
     /// Depois de mudar a combinação de monitores: a ilha continua na tela.
@@ -725,7 +761,7 @@ impl App {
         };
         if let Some(isl) = &mut self.island {
             isl.anchor = anchor;
-            isl.s = win::scale_at(anchor.0 as i32, anchor.1 as i32 + 10);
+            isl.s = island_scale(anchor.0 as i32, anchor.1 as i32 + 10);
             isl.snap_to_target();
         }
     }
@@ -982,7 +1018,17 @@ mod tests {
             can_toggle: true,
             can_next: true,
             can_seek: true,
+            volume: Some(0.62),
+            volume_hud: 0.0,
         };
+        let with_volume = IslandInfo { volume_hud: 1.0, ..info.clone() };
+        for shape in [Shape::Compact, Shape::Medium, Shape::Large] {
+            let mut isl = island(shape, Morph::None, 1.0);
+            let (img, _) = isl.render(Some(&with_volume));
+            let path = std::env::temp_dir().join(format!("ilha_volume_{shape:?}.png"));
+            crate::gfx::save_png(&img, &path).unwrap();
+            println!("{}", path.display());
+        }
         for (shape, morph, p, name) in [
             (Shape::Compact, Morph::None, 1.0, "compacta"),
             (Shape::Medium, Morph::None, 1.0, "media"),

@@ -106,6 +106,7 @@ pub fn icon(name: &str) -> &'static str {
         "github" => "\u{e943}",
         "pomodoro" => "\u{e916}",
         "claude" => "\u{e734}",
+        "bateria" => "\u{e83f}",
         "avisos" => "\u{ea8f}",
         "atalhos" => "\u{e765}",
         "sobre" => "\u{e946}",

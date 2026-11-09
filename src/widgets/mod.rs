@@ -4,11 +4,13 @@
 //! Para criar um widget novo: um módulo aqui com um tipo que implemente `Kind`, e uma linha em
 //! `create` e em `KEYS`.
 
+pub mod battery;
 pub mod claude;
 pub mod clawd;
 pub mod github;
 pub mod media;
 pub mod pomodoro;
+pub mod sky;
 pub mod system;
 pub mod tempo;
 
@@ -45,7 +47,7 @@ pub const DEFAULT_MODE: Mode = Mode::M;
 
 /// Arrumação da primeira vez: colunas a partir da borda direita da tela, cada uma de cima para
 /// baixo. Um widget aberto depois vai para baixo dos da coluna dele (ou começa a coluna dele).
-pub const FIRST_LAYOUT: &[&[&str]] = &[&["sistema", "pomodoro", "github", "tempo"], &["midia", "claude"]];
+pub const FIRST_LAYOUT: &[&[&str]] = &[&["sistema", "pomodoro", "github", "tempo"], &["midia", "claude", "bateria"]];
 
 /// Coluna do widget na arrumação da primeira vez.
 pub fn first_column(key: &str) -> usize {
@@ -53,10 +55,10 @@ pub fn first_column(key: &str) -> usize {
 }
 
 /// Os widgets disponíveis, na ordem dos menus e das configurações.
-pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro", "claude"];
+pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro", "claude", "bateria"];
 
 /// Widgets que chegaram depois: quem já usava o app não os vê aparecer sozinhos (ficam na galeria).
-pub const ADDED_LATER: &[&str] = &["claude"];
+pub const ADDED_LATER: &[&str] = &["claude", "bateria"];
 
 /// Nome do widget `key` (sem criar o widget).
 pub fn title(key: &str) -> &'static str {
@@ -67,6 +69,7 @@ pub fn title(key: &str) -> &'static str {
         "github" => "GitHub",
         "pomodoro" => "Pomodoro",
         "claude" => "Uso do Claude",
+        "bateria" => "Bateria",
         _ => "Widget",
     }
 }
@@ -80,6 +83,7 @@ pub fn description(key: &str) -> &'static str {
         "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
         "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
         "claude" => "Quanto você já usou da sessão de 5 horas e da semana no Claude Code.",
+        "bateria" => "A bateria do notebook e a dos fones, mouses e teclados conectados.",
         _ => "",
     }
 }
@@ -93,6 +97,7 @@ pub fn icon_name(key: &str) -> &'static str {
         "github" => "github",
         "pomodoro" => "pomodoro",
         "claude" => "claude",
+        "bateria" => "bateria",
         _ => "widgets",
     }
 }
@@ -104,6 +109,7 @@ pub fn sample(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
         "sistema" => Some(Box::new(system::System::sample())),
         "github" => Some(Box::new(github::GitHub::sample(cfg, cache))),
         "claude" => Some(Box::new(claude::Claude::sample())),
+        "bateria" => Some(Box::new(battery::Battery::sample())),
         _ => create(key, cfg, cache),
     }
 }
@@ -117,6 +123,7 @@ pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
         "github" => Some(Box::new(github::GitHub::new(cfg, cache))),
         "pomodoro" => Some(Box::new(pomodoro::Pomodoro::new(cfg))),
         "claude" => Some(Box::new(claude::Claude::new())),
+        "bateria" => Some(Box::new(battery::Battery::new(cache))),
         _ => None,
     }
 }
@@ -241,6 +248,10 @@ pub struct IslandInfo {
     pub can_toggle: bool,
     pub can_next: bool,
     pub can_seek: bool,
+    /// o volume do app (0 a 1; None: sem o volume dele) e o quanto o aviso de volume aparece
+    /// agora (0 a 1; a roda do mouse acabou de mudar o volume)
+    pub volume: Option<f32>,
+    pub volume_hud: f32,
 }
 
 /// Ações do Tocando agora que a ilha usa (os mesmos números do widget).
@@ -345,6 +356,10 @@ pub trait Kind {
     /// Quadros por segundo da camada animada (0: sem animação).
     fn overlay_fps(&self) -> u32 {
         0
+    }
+    /// O cartão inteiro deslocado agora, em pontos (o tremor do trovão no Tempo).
+    fn shake(&self) -> (f32, f32) {
+        (0.0, 0.0)
     }
     /// O mouse acabou de entrar no widget; devolve true se a camada animada mudou de ritmo
     /// (`overlay_fps`).

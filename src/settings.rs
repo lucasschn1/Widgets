@@ -17,13 +17,14 @@ pub const SIDEBAR: f32 = 240.0;
 pub const TOP: f32 = 78.0;
 pub use crate::updates::VERSION;
 
-pub const NOTIFY: [(&str, &str, &str); 6] = [
+pub const NOTIFY: [(&str, &str, &str); 7] = [
     ("cpu", "CPU alta", "Quando a CPU passa de 90% por 3 minutos"),
     ("ram", "Memória quase cheia", "Quando a memória passa de 90% por 3 minutos"),
     ("disco", "Disco quase cheio", "Quando o disco C: passa de 95% de uso"),
     ("chuva", "Chuva chegando", "Quando a previsão indica chuva na próxima hora"),
     ("github", "Revisão pedida no GitHub", "Quando alguém pede sua revisão num pull request"),
     ("pomodoro", "Pomodoro", "No fim de cada foco e de cada pausa"),
+    ("bateria", "Pouca bateria num dispositivo", "Quando um fone, mouse ou teclado conectado passa de 15%"),
 ];
 
 pub const TIPS: [(&str, &str); 5] = [
@@ -195,6 +196,8 @@ pub struct Row(pub String, pub Option<String>, pub Control);
 
 fn section(ui: &mut Ui, x: f32, y: f32, title: &str) -> f32 {
     ui.text(x + 2.0, y, title, 13.0, FG, Face::Semibold, Anchor::LA, None);
+    #[cfg(test)]
+    tests::placed(x, y, y + 20.0);
     y + 28.0
 }
 
@@ -210,6 +213,8 @@ fn rows(ui: &mut Ui, x: f32, y: f32, w: f32, rows: Vec<Row>) -> f32 {
         lines.push((text_w, ls));
     }
     ui.card(x, y, x + w, y + heights.iter().sum::<f32>());
+    #[cfg(test)]
+    tests::placed(x, y, y + heights.iter().sum::<f32>());
     let mut top = y;
     for (i, (Row(title, _, control), (h, (text_w, ls)))) in rows.iter().zip(heights.iter().zip(lines)).enumerate() {
         let row = (x, top, x + w, top + h);
@@ -556,6 +561,8 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Atualizar agora".into(), Some("O clima atualiza sozinho a cada 15 minutos".into()),
                     if visible { Control::Button("atualizar_clima", "Atualizar".into(), A::Widget("tempo", widgets::tempo::UPDATE_WEATHER), "secondary", Some("refresh")) } else { Control::None }),
                 Row("Avisar quando for chover".into(), Some(NOTIFY[3].2.into()), notify("chuva")),
+                Row("Tremer com o trovão".into(), Some("Nas trovoadas, o widget treme de leve logo depois de cada raio".into()),
+                    sw("tempo_tremer", widgets::tempo::shakes(&v.sh.cfg), A::Toggle("tempo_tremer"))),
             ]);
             // sugestões por cima do resto da página (a primeira linha tem 66 de altura)
             st.city.draw(ui, x + w - 18.0 - 300.0, entry_top + 66.0 / 2.0 + 21.0, 300.0);
@@ -582,6 +589,14 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Row("Avisar pedidos de revisão".into(), Some(NOTIFY[4].2.into()), notify("github")),
             ])
         }
+        "bateria" => {
+            let y = section(ui, x, y, "Dispositivos");
+            rows(ui, x, y, w, vec![
+                Row("Avisar com pouca bateria".into(), Some(NOTIFY[6].2.into()), notify("bateria")),
+                Row("Quais aparecem".into(), Some("Os que informam a bateria ao Windows: a maioria dos fones e dos mouses e teclados Bluetooth. Os que usam um receptor USB próprio só mostram a carga no app do fabricante".into()), Control::None),
+                Row("Clique".into(), Some("No anel, abre as configurações de energia; na lista, as de Bluetooth".into()), Control::None),
+            ])
+        }
         "claude" => {
             use crate::claude_usage::{self as usage, Link};
             use widgets::claude::{CONNECT, DISCONNECT};
@@ -592,7 +607,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
                 Link::Missing => ("O Claude Code não foi encontrado neste computador", Control::None),
             };
             let y = section(ui, x, y, "Claude Code");
-            rows(ui, x, y, w, vec![
+            let y = rows(ui, x, y, w, vec![
                 Row("Conexão".into(), Some(state.into()), control),
                 Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana".into()), Control::None),
             ]);
@@ -642,6 +657,7 @@ pub fn size_id(key: &str) -> &'static str {
         "midia" => "tamanho:midia",
         "github" => "tamanho:github",
         "claude" => "tamanho:claude",
+        "bateria" => "tamanho:bateria",
         _ => "tamanho:pomodoro",
     }
 }
@@ -653,6 +669,7 @@ fn notify_id(kind: &str) -> &'static str {
         "disco" => "aviso:disco",
         "chuva" => "aviso:chuva",
         "github" => "aviso:github",
+        "bateria" => "aviso:bateria",
         _ => "aviso:pomodoro",
     }
 }
@@ -766,6 +783,35 @@ mod tests {
         let rows = widgets::KEYS.len().div_ceil(2) as f32;
         assert!(content_h >= 56.0 + rows * (262.0 + 16.0), "altura {content_h}");
         assert!(max_scroll > 0.0, "a página precisa rolar até o último cartão");
+    }
+
+    thread_local! {
+        /// títulos de seção e cartões desenhados: (x, topo, base)
+        static PLACED: std::cell::RefCell<Vec<(f32, f32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn placed(x: f32, top: f32, bottom: f32) {
+        PLACED.with(|p| p.borrow_mut().push((x, top, bottom)));
+    }
+
+    #[test]
+    fn titles_and_cards_never_overlap() {
+        // cada título fica acima do seu cartão, e o cartão seguinte começa abaixo do anterior
+        // (a página do Claude Code desenhava a segunda seção por cima da primeira)
+        com();
+        let pages: Vec<&'static str> = nav_items().into_iter().map(|(page, _, _)| page).filter(|p| *p != "-").collect();
+        for page in pages {
+            PLACED.with(|p| p.borrow_mut().clear());
+            let _ = page_draw(page, 0.0);
+            let mut placed = PLACED.with(|p| p.borrow().clone());
+            placed.sort_by(|a, b| (a.0, a.1).partial_cmp(&(b.0, b.1)).unwrap());
+            for pair in placed.windows(2) {
+                let ((xa, _, bottom), (xb, top, _)) = (pair[0], pair[1]);
+                if xa == xb {
+                    assert!(top >= bottom - 0.5, "{page}: um bloco em y={top} começa antes do anterior acabar (y={bottom})");
+                }
+            }
+        }
     }
 
     #[test]
