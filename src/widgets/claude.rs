@@ -80,13 +80,35 @@ const TEXT: Face = Face::Custom("Outfit", 400);
 /// os títulos e o botão
 const BOLD: Face = Face::Custom("Outfit", 600);
 
+/// No médio, quantos quadradinhos o Clawd fica à esquerda do meio com o notebook de lado (ou a
+/// plaquinha) à direita, e quanto tempo leva andando até lá (ou de volta).
+const MID_SHIFT: f32 = 5.0;
+const SLIDE_MS: f32 = 600.0;
+
+/// A partir de quanto do diário o limite foi atingido (o Clawd põe a plaquinha e vai ler).
+const LIMIT_AT: f64 = 0.995;
+
+/// A metade da largura e da altura da grade do Clawd, num lugar de `unit` pontos.
+fn crab_half(unit: f32) -> (f32, f32) {
+    (clawd::COLS * clawd::CELL * unit / 2.0, clawd::ROWS * clawd::CELL * unit / 2.0)
+}
+
+/// De onde o Clawd é visto trabalhando em cada tamanho: no pequeno, o notebook de frente, no
+/// colo (de lado não caberia entre as pontas do anel); no médio e no grande, de lado, com a tela
+/// à mostra.
+fn view_of(mode: Mode) -> clawd::View {
+    if mode == Mode::P { clawd::View::Front } else { clawd::View::Side }
+}
+
 /// De quanto em quanto tempo ler de novo o histórico de conversas (para os dias da semana).
 const HISTORY_EVERY: Duration = Duration::from_secs(30 * 60);
 /// Intervalo entre os quadros enquanto anima.
 const FRAME: Duration = Duration::from_millis(16);
 /// A altura do centro do Clawd sozinho embaixo de um medidor (na abertura de baixo do anel, no
-/// lugar do sol) e o tamanho dos quadradinhos dele aí.
+/// lugar do sol) e o tamanho dos quadradinhos dele aí (o `unit` de `clawd::draw`). No pequeno,
+/// um pouco mais embaixo: o gorro, a lâmpada, o chapéu e os "z" não chegam ao "Uso diário".
 const CRAB_Y: f32 = 127.0;
+const CRAB_Y_SMALL: f32 = 129.0;
 const CRAB_UNIT_SOLO: f32 = 2.0;
 /// No médio com números, o Clawd fica no meio, entre os dois anéis: o centro dele e o tamanho
 /// dos quadradinhos (2,4 pontos: 3 pixels a 125%, como no pequeno). Embaixo dele, o que está
@@ -238,11 +260,12 @@ const WIDE_Q: f32 = WIDE / 4.0;
 const BRAND_X: f32 = 22.0;
 const BRAND_Y: f32 = 20.0;
 const BRAND_SIZE: f32 = 14.0;
-/// Embaixo do nome: a que distância dele e até onde vai (sem chegar ao Clawd).
+/// Embaixo do nome: a que distância dele e até onde vai (sem chegar ao Clawd, com folga para a
+/// caneca do lado dele e para ele andar até a plaquinha, 4 quadradinhos à esquerda).
 const SUBTITLE_DY: f32 = 21.0;
-const SUBTITLE_W: f32 = LARGE_CRAB_X - 9.0 * CRAB_UNIT_MID - 10.0 - BRAND_X;
+const SUBTITLE_W: f32 = LARGE_CRAB_X - (clawd::COLS / 2.0 + 4.0) * clawd::CELL * CRAB_UNIT_MID - 10.0 - BRAND_X;
 /// O Clawd no grande: no canto de cima à direita, com o notebook de lado chegando à margem.
-const LARGE_CRAB_X: f32 = WIDE - 22.0 - (clawd::SIDE_COLS - 9.0) * CRAB_UNIT_MID;
+const LARGE_CRAB_X: f32 = WIDE - 22.0 - (clawd::SIDE_COLS - clawd::COLS / 2.0) * clawd::CELL * CRAB_UNIT_MID;
 const LARGE_CRAB_Y: f32 = 36.0;
 
 fn geom(mode: Mode) -> Geom {
@@ -320,6 +343,11 @@ pub struct Claude {
     busy_since: Option<Instant>,
     /// o Clawd foi para a barra de tarefas (o lugar dele no widget fica vazio)
     perched: bool,
+    /// no médio: se o Clawd está à esquerda do meio (com o notebook ou a plaquinha à direita;
+    /// None: ainda não sabe, vale o de agora) e ele andando de um lugar para o outro (de quantos
+    /// quadradinhos para quantos, desde quando)
+    shifted: Option<bool>,
+    slide: Option<(f32, f32, Instant)>,
 }
 
 impl Claude {
@@ -344,6 +372,8 @@ impl Claude {
             turns: HashMap::new(),
             busy_since: None,
             perched: false,
+            shifted: None,
+            slide: None,
         };
         c.reload(true);
         c.read_activity();
@@ -406,14 +436,40 @@ impl Claude {
     /// O mesmo exemplo, com o Clawd no meio de uma animação (`t` de 0 a 1).
     #[cfg(test)]
     pub fn with_crab(mut self, anim: clawd::Anim, t: f32) -> Claude {
+        let dressed = self.crab.scene(clawd::View::Side).hat;
         self.crab = Crab::playing(anim, t);
+        if dressed {
+            self.crab = std::mem::take(&mut self.crab).dressed();
+        }
         self
     }
 
-    /// Com o Claude Code trabalhando agora (o Clawd escrevendo no caderno).
+    /// Com o Claude Code trabalhando agora (o Clawd no notebook).
     #[cfg(test)]
     pub fn sample_busy() -> Claude {
         Claude::sample().idle_for(5.0)
+    }
+
+    /// Trabalhando, numa tarefa de Sherlock (de chapéu de detetive).
+    #[cfg(test)]
+    pub fn sample_sherlock() -> Claude {
+        let mut c = Claude::sample_busy();
+        c.crab = Crab::new().dressed();
+        c
+    }
+
+    /// O diário no limite (100%, volta daqui a 1 h 40): o Clawd lendo do lado da plaquinha.
+    #[cfg(test)]
+    pub fn sample_ko() -> Claude {
+        Claude::sample_with(1.0, 0.62, 1.67 * 3600.0)
+    }
+
+    /// Conectado, mas ainda esperando os primeiros números do Claude Code.
+    #[cfg(test)]
+    pub fn sample_waiting() -> Claude {
+        let mut c = Claude::sample();
+        c.view = View { usage: None, link: Link::Connected };
+        c
     }
 
     /// Ainda sem ligação com o Claude Code (o botão de conectar).
@@ -454,6 +510,8 @@ impl Claude {
             turns: HashMap::new(),
             busy_since: None,
             perched: false,
+            shifted: None,
+            slide: None,
         }
     }
 
@@ -539,13 +597,19 @@ impl Claude {
     }
 
     /// Como o Clawd está: dormindo sem números ou depois de um bom tempo sem o Claude Code
-    /// responder (acorda com o mouse em cima), suando com o diário perto do limite, escrevendo
-    /// no caderno enquanto o Claude Code trabalha.
+    /// responder (acorda com o mouse em cima), lendo do lado da plaquinha "VOLTO LOGO" com o
+    /// diário no limite (até ele reiniciar), suando perto do limite, no notebook enquanto o
+    /// Claude Code trabalha.
     fn mood(&self) -> Mood {
         let now = self.now();
-        if self.pointer.is_none() && (!self.has_data() || self.quiet() > NAP_AFTER) {
+        let daily = self.session().map(|w| w.used_at(now));
+        if !self.has_data() && self.pointer.is_none() {
             Mood::Sleepy
-        } else if self.session().is_some_and(|w| w.used_at(now) >= 0.85) {
+        } else if daily.is_some_and(|u| u >= LIMIT_AT) {
+            Mood::Limit
+        } else if self.pointer.is_none() && self.quiet() > NAP_AFTER {
+            Mood::Sleepy
+        } else if daily.is_some_and(|u| u >= 0.85) {
             Mood::Worried
         } else if self.has_data() && self.busy() {
             Mood::Busy
@@ -623,16 +687,44 @@ impl Claude {
     /// Onde o Clawd fica em cada tamanho: (centro x, centro y, tamanho dos quadradinhos; o
     /// centro é o do corpo, o notebook de lado fica à direita). No grande, no canto de cima à
     /// direita; sem números no pequeno, grande no meio; com um medidor só, na abertura de baixo
-    /// do anel (no lugar do ícone do diário); com dois, entre eles (um pouco para a esquerda,
-    /// para o notebook caber até o anel da direita).
+    /// do anel (no lugar do ícone do diário); com dois, no meio, entre eles.
     fn crab_spot(&self, mode: Mode) -> (f32, f32, f32) {
+        self.crab_spot_at(mode, self.mid_shift())
+    }
+
+    /// O mesmo, com o Clawd do médio `shift` quadradinhos à esquerda do meio.
+    fn crab_spot_at(&self, mode: Mode, shift: f32) -> (f32, f32, f32) {
         match mode {
             Mode::G => (LARGE_CRAB_X, LARGE_CRAB_Y, CRAB_UNIT_MID),
             Mode::P if self.needs_connect() && self.view.link == Link::Off => (SMALL / 2.0, 50.0, 3.0),
-            Mode::P => (SMALL / 2.0, CRAB_Y, CRAB_UNIT_SOLO),
+            Mode::P => (SMALL / 2.0, CRAB_Y_SMALL, CRAB_UNIT_SOLO),
             Mode::M if !self.has_data() => (MID_GAUGE_X, CRAB_Y, CRAB_UNIT_SOLO),
-            Mode::M => (WIDE / 2.0 - 2.0 * CRAB_UNIT_MID, CRAB_MID_Y, CRAB_UNIT_MID),
+            Mode::M => (WIDE / 2.0 - shift * clawd::CELL * CRAB_UNIT_MID, CRAB_MID_Y, CRAB_UNIT_MID),
         }
+    }
+
+    /// No médio, o Clawd vai para a esquerda quando há algo à direita dele (o notebook de lado,
+    /// ou a plaquinha no limite): o desenho todo fica no meio. Sozinho, ele fica no meio.
+    fn wants_shift(&self) -> bool {
+        let playing = |a| self.crab.is_playing(a);
+        matches!(self.mood(), Mood::Busy | Mood::Limit) || playing(Anim::Done) || playing(Anim::SignUp) || playing(Anim::SignDown)
+    }
+
+    /// Quantos quadradinhos à esquerda do meio o Clawd do médio está agora (andando, no meio do
+    /// caminho).
+    fn mid_shift(&self) -> f32 {
+        let at = |on: bool| if on { MID_SHIFT } else { 0.0 };
+        match self.slide {
+            Some((from, to, start)) if start.elapsed().as_secs_f32() * 1000.0 < SLIDE_MS => {
+                from + (to - from) * ease_in_out(start.elapsed().as_secs_f32() * 1000.0 / SLIDE_MS)
+            }
+            _ => at(self.shifted.unwrap_or_else(|| self.wants_shift())),
+        }
+    }
+
+    /// Está andando de um lugar para o outro no médio?
+    fn sliding(&self) -> bool {
+        self.slide.is_some_and(|(_, _, start)| start.elapsed().as_secs_f32() * 1000.0 < SLIDE_MS)
     }
 
     /// O Clawd está no lugar do ícone do diário (o sol) neste tamanho?
@@ -653,16 +745,25 @@ impl Claude {
 
     /// O que o Clawd está fazendo, escrito embaixo dele no médio ("" parado, sem nada a dizer).
     fn doing(&self) -> &'static str {
-        if self.crab.is_playing(Anim::Done) {
+        let playing = |a| self.crab.is_playing(a);
+        if playing(Anim::Done) {
             return "pronto";
         }
+        if playing(Anim::Party) || playing(Anim::SignDown) {
+            return "limite reiniciou";
+        }
         match self.mood() {
-            Mood::Busy if self.crab.is_playing(Anim::Think) => "pensando",
-            Mood::Busy if self.crab.is_playing(Anim::Idea) => "teve uma ideia",
-            Mood::Busy if self.crab.is_playing(Anim::Coffee) => "tomando café",
+            Mood::Busy if playing(Anim::Think) => "pensando",
+            Mood::Busy if playing(Anim::Investigate) => "investigando",
+            Mood::Busy if playing(Anim::Idea) => "teve uma ideia",
+            Mood::Busy if playing(Anim::Coffee) => "tomando café",
             Mood::Busy => "programando",
             Mood::Sleepy => "cochilando",
             Mood::Worried => "perto do limite",
+            Mood::Limit if playing(Anim::SignUp) => "volto logo",
+            Mood::Limit if playing(Anim::Nod) => "cochilando",
+            Mood::Limit => "lendo",
+            Mood::Normal if playing(Anim::Music) => "ouvindo música",
             Mood::Normal => "",
         }
     }
@@ -670,18 +771,22 @@ impl Claude {
     /// O ponto (x, y) está em cima do Clawd (com uma folga em volta)?
     fn on_crab(&self, x: f32, y: f32, mode: Mode) -> bool {
         let (cx, cy, unit) = self.crab_spot(mode);
-        (x - cx).abs() <= clawd::COLS * unit / 2.0 + 4.0 && (y - cy).abs() <= clawd::ROWS * unit / 2.0 + 4.0
+        let (hw, hh) = crab_half(unit);
+        (x - cx).abs() <= hw + 4.0 && (y - cy).abs() <= hh + 4.0
     }
 
     /// O Clawd agora neste tamanho, trabalhando no notebook: no pequeno, de frente, no colo
     /// (de lado não caberia entre as pontas do anel); no médio e no grande, de lado, com a tela à
     /// mostra.
     fn crab_pose(&self, mode: Mode) -> clawd::Pose {
-        if mode == Mode::P {
-            self.crab.laptop_pose(self.mood(), self.gaze)
-        } else {
-            self.crab.side_pose(self.mood(), self.gaze)
+        let mut p = self.crab.pose(self.mood(), self.gaze, view_of(mode));
+        // andando de lado no médio: as patas se revezam
+        if let (Mode::M, Some((_, _, start))) = (mode, self.slide.filter(|_| self.sliding())) {
+            if p.legs == clawd::Legs::Stand {
+                p.legs = if (start.elapsed().as_millis() / 100) % 2 == 0 { clawd::Legs::StepA } else { clawd::Legs::StepB };
+            }
         }
+        p
     }
 
     /// Desenha o Clawd no lugar dele (na barra de tarefas, o lugar fica vazio, com um aviso).
@@ -1087,7 +1192,7 @@ impl Claude {
 pub const PERCH_W: f32 = 240.0;
 pub const PERCH_H: f32 = 74.0;
 pub const PERCH_UNIT: f32 = 2.4;
-pub const PERCH_CRAB: (f32, f32) = (PERCH_W - 6.0 - (clawd::SIDE_COLS - 9.0) * PERCH_UNIT, PERCH_H - 5.0 * PERCH_UNIT);
+pub const PERCH_CRAB: (f32, f32) = (PERCH_W - 6.0 - (clawd::SIDE_COLS - clawd::COLS / 2.0) * clawd::CELL * PERCH_UNIT, PERCH_H - clawd::ROWS / 2.0 * clawd::CELL * PERCH_UNIT);
 /// O balão: altura e onde fica a borda de baixo (a ponta desce até perto da cabeça dele).
 const BALLOON_H: f32 = 26.0;
 const BALLOON_BOTTOM: f32 = 32.0;
@@ -1133,7 +1238,7 @@ fn tool_line(tool: &Tool, names: bool) -> (String, Rgba) {
 impl Claude {
     /// O Clawd na barra: sempre com o notebook de lado, sem ninguém com o mouse em cima.
     fn perch_pose(&self) -> clawd::Pose {
-        self.crab.side_pose(self.mood(), None)
+        self.crab.pose(self.mood(), None, clawd::View::Side)
     }
 
     /// O que o balão diz agora (a frase e a cor do pontinho); None: sem balão (parado ou
@@ -1149,6 +1254,7 @@ impl Claude {
                 None => ("Pensando…".into(), Rgba::rgb(190, 170, 255)),
             }),
             Mood::Worried => Some(("Perto do limite diário".into(), ALERT)),
+            Mood::Limit => Some(("Limite diário atingido · volto logo".into(), ALERT)),
             _ => None,
         }
     }
@@ -1320,7 +1426,8 @@ impl Kind for Claude {
             }
             POKE_CRAB => {
                 let (cx, cy, unit) = self.crab_spot(mode);
-                let (hw, hh) = (clawd::COLS * unit / 2.0 + 4.0, clawd::ROWS * unit / 2.0 + 4.0);
+                let (hw, hh) = crab_half(unit);
+                let (hw, hh) = (hw + 4.0, hh + 4.0);
                 Some((cx - hw, cy - hh, cx + hw, cy + hh, 6.0))
             }
             _ => {
@@ -1376,7 +1483,7 @@ impl Kind for Claude {
 
     fn next_tick(&self) -> Option<Instant> {
         // enquanto o arco anima, um quadro a cada 16 ms; o Clawd, nos quadros dele
-        let next = if self.animating() { self.due.min(Instant::now() + FRAME) } else { self.due };
+        let next = if self.animating() || self.sliding() { self.due.min(Instant::now() + FRAME) } else { self.due };
         Some(next.min(self.crab.next_tick()))
     }
 
@@ -1400,7 +1507,7 @@ impl Kind for Claude {
         // o mouse chegou em cima dele: acena
         let near = self.on_crab(x, y, mode);
         if near && !self.near_crab && !self.crab.animating() {
-            self.crab.play(Anim::Wave);
+            self.crab.greet(self.mood());
             redraw = true;
         }
         self.near_crab = near;
@@ -1446,7 +1553,19 @@ impl Kind for Claude {
         self.busy_since = if busy { Some(self.busy_since.unwrap_or_else(Instant::now)) } else { None };
         self.crab.tired = self.busy_since.is_some_and(|t| t.elapsed() >= clawd::COFFEE_AFTER);
         self.crab.pace = if self.activity.busy.is_some() { clawd::pace_for(self.activity.steps as f32) } else { clawd::PACE };
+        self.crab.music = self.has_data();
         redraw |= self.crab.tick(mood);
+        // no médio, anda para o lado quando o notebook (ou a plaquinha) aparece ou sai
+        let want = self.wants_shift();
+        if self.shifted != Some(want) {
+            if self.shifted.is_some() {
+                let target = if want { MID_SHIFT } else { 0.0 };
+                self.slide = Some((self.mid_shift(), target, Instant::now()));
+            }
+            self.shifted = Some(want);
+            redraw = true;
+        }
+        redraw |= self.sliding();
         // dormiu ou acordou (cochilo depois de um tempo sem o Claude Code, ou o mouse)
         if mood != self.shown_mood {
             self.shown_mood = mood;
@@ -1468,51 +1587,158 @@ mod tests {
         serde_json::json!({"claude": {}, "app": {}})
     }
 
+    /// A que distância (pontos) o retângulo `r` está do traço do anel com centro (gx, gy), raio
+    /// `rad` e espessura `w` (negativo: em cima dele). O anel vai de 135° a 405° (o vão é embaixo,
+    /// de 45° a 135°), com pontas redondas.
+    fn ring_clearance(r: [f32; 4], gx: f32, gy: f32, rad: f32, w: f32) -> f32 {
+        let point = |px: f32, py: f32| {
+            let (dx, dy) = (px - gx, py - gy);
+            let angle = dy.atan2(dx).to_degrees().rem_euclid(360.0);
+            let d = if !(45.0..=135.0).contains(&angle) {
+                ((dx * dx + dy * dy).sqrt() - rad).abs()
+            } else {
+                let end = |a: f32| (gx + rad * a.to_radians().cos(), gy + rad * a.to_radians().sin());
+                let ((ax, ay), (bx, by)) = (end(45.0), end(135.0));
+                (px - ax).hypot(py - ay).min((px - bx).hypot(py - by))
+            };
+            d - w / 2.0
+        };
+        // longe do anel (todo por dentro ou todo por fora): a conta direta
+        let (nx, ny) = (gx.clamp(r[0], r[2]), gy.clamp(r[1], r[3]));
+        let near = (nx - gx).hypot(ny - gy);
+        let far = [(r[0], r[1]), (r[2], r[1]), (r[0], r[3]), (r[2], r[3])].iter().map(|&(x, y)| (x - gx).hypot(y - gy)).fold(0.0, f32::max);
+        if near > rad + w / 2.0 + 6.0 {
+            return near - rad - w / 2.0;
+        }
+        if far < rad - w / 2.0 - 6.0 {
+            return rad - w / 2.0 - far;
+        }
+        // perto: em pontos de 0,4 em 0,4 pt pelo retângulo
+        let (nx, ny) = (((r[2] - r[0]) / 0.4).ceil().max(1.0) as i32, ((r[3] - r[1]) / 0.4).ceil().max(1.0) as i32);
+        let mut best = f32::INFINITY;
+        for i in 0..=nx {
+            for j in 0..=ny {
+                best = best.min(point(r[0] + (r[2] - r[0]) * i as f32 / nx as f32, r[1] + (r[3] - r[1]) * j as f32 / ny as f32));
+            }
+        }
+        best
+    }
+
+    /// Os textos e botões de cada tamanho que o Clawd não pode tocar: (nome, x0, y0, x1, y1).
+    fn obstacles(w: &Claude, mode: Mode) -> Vec<(&'static str, [f32; 4])> {
+        let mut out = Vec::new();
+        let g = geom(mode);
+        let drawn: Vec<(Limit, f32)> = if w.needs_connect() && w.view.link == Link::Off && mode == Mode::P {
+            Vec::new()
+        } else if mode == Mode::P || (mode == Mode::M && !w.has_data()) {
+            vec![g.gauges[0]]
+        } else {
+            g.gauges.to_vec()
+        };
+        // o número e o nome no meio de cada anel
+        for (_, x) in drawn {
+            let cap = g.num * 0.7;
+            let label = (g.num * 0.29).clamp(10.5, 12.0);
+            let base = g.cy + (cap - label - 8.0) / 2.0;
+            out.push(("número", [x - g.num * 0.85, base - cap - 1.0, x + g.num * 0.85, base + 1.0]));
+            out.push(("nome do anel", [x - label * 2.4, base + 5.0, x + label * 2.4, base + 6.0 + label * 1.2]));
+        }
+        match mode {
+            Mode::P if w.needs_connect() && w.view.link == Link::Off => {
+                out.push(("Uso do Claude", [32.0, 82.0, 122.0, 98.0]));
+            }
+            Mode::M if w.has_data() => {
+                out.push(("o que ele faz", [WIDE / 2.0 - 40.0, DOING_Y - 1.0, WIDE / 2.0 + 40.0, DOING_Y + 14.0]));
+                for x in gauge_xs(Mode::M) {
+                    out.push(("nota", [x - NOTE_W / 2.0, NOTE_Y - 1.0, x + NOTE_W / 2.0, NOTE_Y + 14.0]));
+                }
+            }
+            Mode::M => {
+                out.push(("título", [170.0, 24.0, WIDE - 16.0, 42.0]));
+                out.push(("texto", [170.0, 44.0, WIDE - 16.0, 88.0]));
+            }
+            Mode::G => {
+                out.push(("Uso do Claude", [BRAND_X, BRAND_Y - 2.0, 124.0, BRAND_Y + 16.0]));
+                out.push(("subtítulo", [BRAND_X, BRAND_Y + SUBTITLE_DY - 1.0, BRAND_X + SUBTITLE_W, BRAND_Y + SUBTITLE_DY + 14.0]));
+            }
+            _ => {}
+        }
+        if w.needs_connect() && w.view.link == Link::Off {
+            let (x0, y0, x1, y1) = connect_rect(mode);
+            out.push(("botão", [x0, y0, x1, y1]));
+        }
+        out
+    }
+
     #[test]
-    fn crab_has_room_in_every_size() {
-        // o Clawd (com folga para pular e para os "z") cabe no cartão e não encosta nos anéis,
-        // nos ícones nem no botão de conectar
-        for (name, w) in [("com números", Claude::sample()), ("sem conectar", Claude::sample_unlinked())] {
+    fn crab_fits_every_frame_in_every_size() {
+        // todos os quadros de todas as animações que podem tocar em cada estado, em cada tamanho e
+        // em cinco escalas de tela (com os quadradinhos em pixels inteiros, como no desenho): o
+        // Clawd fica a 6 pt da borda e a 2 pt dos anéis, dos textos e do botão
+        const MARGIN: f32 = 6.0;
+        const PAD: f32 = 2.0;
+        let states = [
+            ("com números", Claude::sample()),
+            ("trabalhando", Claude::sample_busy()),
+            ("perto do limite", Claude::sample_limit()),
+            ("no limite", Claude::sample_ko()),
+            ("cochilando", Claude::sample().idle_for(NAP_AFTER + 60.0)),
+            ("sem conectar", Claude::sample_unlinked()),
+            ("esperando os números", Claude::sample_waiting()),
+        ];
+        let mut cache: HashMap<(String, bool, bool), Vec<(Option<Anim>, Vec<clawd::Cell>)>> = HashMap::new();
+        let mut checked = 0;
+        for (name, w) in &states {
+            let data = w.has_data();
+            // o humor de agora e, com o mouse em cima, o de acordado
+            let mut moods = vec![w.mood()];
+            if moods[0] == Mood::Sleepy {
+                moods.push(Mood::Normal);
+            }
             for mode in Mode::ALL {
                 let l = super::super::Layout::of(mode);
-                let (cx, cy, unit) = w.crab_spot(mode);
-                let (hw, hh) = (clawd::COLS * unit / 2.0, clawd::ROWS * unit / 2.0);
-                // no médio e no grande, o notebook de lado vai até a coluna 26 (à direita)
-                let right = if mode == Mode::P { hw } else { (clawd::SIDE_COLS - clawd::COLS / 2.0) * unit };
-                let (x0, y0, x1, y1) = (cx - hw, cy - hh - 3.0 * unit, cx + right, cy + hh);
-                // no grande, o que está escrito embaixo do nome não chega a ele
-                if mode == Mode::G {
-                    assert!(BRAND_X + SUBTITLE_W < x0 - 6.0, "o texto do título encosta no Clawd");
-                }
-                assert!(x0 >= 6.0 && y0 >= 6.0 && x1 <= l.w - 6.0 && y1 <= l.h - 6.0, "{name} {mode:?}: fora do cartão");
-                if mode == Mode::G || (mode == Mode::P && w.needs_connect()) {
-                    continue; // no título do grande e sozinho no meio do pequeno
-                }
+                let view = view_of(mode);
+                let obstacles = obstacles(w, mode);
+                let rings: Vec<(f32, f32)> = obstacles.iter().filter(|o| o.0 == "número").map(|o| ((o.1[0] + o.1[2]) / 2.0, geom(mode).cy)).collect();
                 let g = geom(mode);
-                for &(limit, gx) in g.gauges {
-                    if !w.has_data() && mode == Mode::M && limit == Limit::Weekly {
-                        continue; // sem números, o médio mostra só o diário
+                for &mood in &moods {
+                    let key = (format!("{mood:?}"), view == clawd::View::Side, data);
+                    let frames = cache.entry(key).or_insert_with(|| clawd::frames_for(mood, view, data));
+                    for s in [1.0, 1.25, 1.5, 1.75, 2.0] {
+                        for (anim, cells) in frames.iter() {
+                            // no médio, à esquerda com o notebook ou a plaquinha à direita; no
+                            // meio sozinho; o que toca nos dois, nos dois lugares (e no caminho)
+                            let right = matches!(mood, Mood::Busy | Mood::Limit) || matches!(anim, Some(Anim::Done | Anim::SignUp | Anim::SignDown));
+                            let shifts: &[f32] = if right { &[MID_SHIFT] } else { &[0.0, MID_SHIFT] };
+                            for &shift in shifts {
+                            let (cx, cy, unit) = w.crab_spot_at(mode, shift);
+                            let (x0, y0, c) = clawd::origin(s, cx, cy, unit);
+                            checked += 1;
+                            for &(x, y, cw, ch, col) in cells {
+                                if col.3 < 10 {
+                                    continue;
+                                }
+                                let r = [x0 + x as f32 * c, y0 + y as f32 * c, x0 + (x + cw) as f32 * c, y0 + (y + ch) as f32 * c];
+                                let at = || format!("{name}, {mode:?}, {mood:?}, a {}%: {r:?}", s * 100.0);
+                                assert!(r[0] >= MARGIN - 0.01 && r[1] >= MARGIN - 0.01 && r[2] <= l.w - MARGIN + 0.01 && r[3] <= l.h - MARGIN + 0.01, "sai do cartão ({})", at());
+                                for &(gx, gy) in &rings {
+                                    assert!(ring_clearance(r, gx, gy, g.r, g.w) >= PAD - 0.05, "encosta no anel ({})", at());
+                                }
+                                for (what, b) in &obstacles {
+                                    let apart = (b[0] - r[2]).max(r[0] - b[2]).max(b[1] - r[3]).max(r[1] - b[3]);
+                                    assert!(apart >= PAD - 0.05, "encosta em \"{what}\" ({})", at());
+                                }
+                            }
+                            }
+                        }
                     }
-                    // nenhum canto do Clawd em cima do trilho do anel (fora do vão de baixo)
-                    // (nem os "z", que vão até 4 quadradinhos à direita)
-                    for (px, py) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1), (cx, y0), (cx + hw + 4.0 * unit, y0)] {
-                        let d = (px - gx).hypot(py - g.cy);
-                        let angle = (py - g.cy).atan2(px - gx).to_degrees().rem_euclid(360.0);
-                        let in_gap = (45.0..=135.0).contains(&angle);
-                        assert!(in_gap || d < g.r - g.w || d > g.r + g.w, "{name} {mode:?}: em cima do anel em ({px}, {py})");
-                    }
-                    // nem em cima do ícone que ficou (sol ou calendário)
-                    if w.shows_icon(limit, mode) {
-                        let (ix, iy, ir) = (gx, g.cy + g.r * 0.86, g.w * 0.9 + 3.0);
-                        assert!(x1 < ix - ir || x0 > ix + ir || y1 < iy - ir || y0 > iy + ir, "{name} {mode:?}: em cima do ícone");
-                    }
-                }
-                if w.needs_connect() {
-                    let (bx0, by0, bx1, by1) = connect_rect(mode);
-                    assert!(x1 < bx0 || x0 > bx1 || y1 < by0 || y0 > by1, "{name} {mode:?}: em cima do botão");
                 }
             }
         }
+        assert!(checked > 10_000, "{checked}");
+        // no grande, o que está escrito embaixo do nome não chega ao Clawd
+        let (cx, _, unit) = Claude::sample().crab_spot(Mode::G);
+        assert!(BRAND_X + SUBTITLE_W <= cx - crab_half(unit).0 - 10.0 + 0.01);
     }
 
     #[test]
@@ -1526,19 +1752,22 @@ mod tests {
         let px = |u: f32| (u * 1.25).round();
         assert_eq!(px(unit), 3.0);
         assert_eq!(px(unit), px(w.crab_spot(Mode::P).2), "do mesmo tamanho que no pequeno");
-        // no meio (o corpo um pouco à esquerda: com o notebook de lado, o desenho fica no meio)
-        assert!((cx + (clawd::SIDE_COLS / 2.0 - clawd::COLS / 2.0) * unit - WIDE / 2.0).abs() <= 2.0 * unit + 0.01, "fora do meio");
+        // sozinho, no meio; trabalhando, o corpo um pouco à esquerda: com o notebook de lado, o
+        // desenho todo fica no meio
+        assert!((cx - WIDE / 2.0).abs() < 0.01, "fora do meio");
+        let (bx, _, _) = Claude::sample_busy().crab_spot(Mode::M);
+        assert!((bx + (clawd::SIDE_COLS / 2.0 - clawd::COLS / 2.0) * clawd::CELL * unit - WIDE / 2.0).abs() < 0.01, "trabalhando, fora do meio");
         // no médio com números, nenhum anel tem ícone: o lugar é da nota de quando reinicia
         assert!(!w.shows_icon(Limit::Daily, Mode::M) && !w.shows_icon(Limit::Weekly, Mode::M));
         assert!(w.shows_icon(Limit::Weekly, Mode::G) && !w.shows_icon(Limit::Daily, Mode::P));
         // o que ele faz fica embaixo dele (mesmo de patas esticadas), sem encostar nos anéis
         let g = geom(Mode::M);
-        assert!(cy + (clawd::ROWS / 2.0 + 1.0) * unit < DOING_Y, "a palavra encosta no Clawd");
+        assert!(cy + (clawd::ROWS / 2.0 + 3.0) * clawd::CELL * unit < DOING_Y, "a palavra encosta no Clawd");
         // na altura do alto da palavra, até onde vai o anel da esquerda (por fora)
         let (outer, dy) = (g.r + g.w / 2.0, DOING_Y - g.cy);
         let ring_right = g.gauges[0].1 + (outer * outer - dy * dy).max(0.0).sqrt();
         let c = Canvas::new(10, 10, 1.0);
-        for word in ["escrevendo", "pensando", "teve uma ideia", "tomando café", "pronto", "cochilando", "perto do limite"] {
+        for word in ["programando", "pensando", "investigando", "teve uma ideia", "tomando café", "pronto", "cochilando", "perto do limite", "volto logo", "lendo", "limite reiniciou", "ouvindo música", "na barra de tarefas"] {
             let half = c.text_width(word, TEXT, 10.5) / 2.0;
             assert!(WIDE / 2.0 - half > ring_right + 4.0, "\"{word}\" encosta no anel");
         }
@@ -1554,18 +1783,72 @@ mod tests {
     fn small_crab_works_on_the_laptop_on_his_lap() {
         // trabalhando, o pequeno tem o notebook de frente, no colo; o médio e o grande, de lado,
         // com a tela à mostra
-        let w = Claude::sample_busy().with_crab(Anim::Write, 0.3);
+        let w = Claude::sample_busy().with_crab(Anim::Type, 0.3);
         let small = w.crab_pose(Mode::P);
-        assert!(small.laptop.is_some_and(|l| l.open) && small.side.is_none() && small.notebook.is_none());
+        assert!(small.front.is_some_and(|l| l.open) && small.side.is_none());
         for mode in [Mode::M, Mode::G] {
             let p = w.crab_pose(mode);
-            assert!(p.side.is_some_and(|s| s.open) && p.laptop.is_none() && p.notebook.is_none(), "{mode:?}");
+            assert!(p.side.is_some_and(|s| s.open) && p.front.is_none(), "{mode:?}");
         }
         // parado, sem notebook em nenhum tamanho
         assert!(Mode::ALL.iter().all(|&m| {
             let p = Claude::sample().crab_pose(m);
-            p.laptop.is_none() && p.side.is_none()
+            p.front.is_none() && p.side.is_none()
         }));
+        // de Sherlock, de chapéu nos três tamanhos (o cachimbo só de lado)
+        let w = Claude::sample_sherlock();
+        for mode in Mode::ALL {
+            let p = w.crab_pose(mode);
+            assert!(p.hat.is_some() && p.pipe.is_some() == (mode != Mode::P), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn in_the_medium_size_the_crab_walks_aside_for_the_laptop() {
+        let tick = |w: &mut Claude| {
+            let mut req = Vec::new();
+            let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+            w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req })
+        };
+        // parado, no meio
+        let mut w = Claude::sample();
+        tick(&mut w);
+        assert!((w.crab_spot(Mode::M).0 - WIDE / 2.0).abs() < 0.01);
+        // começou a trabalhar: anda para a esquerda, sem pular, com as patas se revezando
+        w.view.usage.as_mut().unwrap().updated = w.now() - 5.0;
+        assert!(tick(&mut w) && w.sliding());
+        assert!((w.crab_spot(Mode::M).0 - WIDE / 2.0).abs() < 1.0, "pulou para o lado");
+        assert!(matches!(w.crab_pose(Mode::M).legs, clawd::Legs::StepA | clawd::Legs::StepB));
+        assert!(Kind::next_tick(&w).unwrap() <= Instant::now() + FRAME);
+        // e chega lá: o notebook à direita, o desenho todo no meio
+        w.slide = w.slide.map(|(a, b, _)| (a, b, Instant::now() - Duration::from_secs(1)));
+        let shifted = WIDE / 2.0 - MID_SHIFT * clawd::CELL * CRAB_UNIT_MID;
+        assert!((w.crab_spot(Mode::M).0 - shifted).abs() < 0.01);
+        // nos outros tamanhos, nada muda
+        assert_eq!(w.crab_spot(Mode::P), Claude::sample().crab_spot(Mode::P));
+        assert_eq!(w.crab_spot(Mode::G), Claude::sample().crab_spot(Mode::G));
+    }
+
+    #[test]
+    fn at_the_limit_the_crab_reads_beside_the_sign() {
+        let w = Claude::sample_ko();
+        assert_eq!(w.mood(), Mood::Limit);
+        // nem o mouse nem o tempo sem o Claude Code mudam isso: ele lê até o limite reiniciar
+        assert_eq!(Claude::sample_ko().idle_for(NAP_AFTER + 60.0).mood(), Mood::Limit);
+        assert_eq!(Claude::sample_ko().with_pointer(40.0, 40.0, Mode::P).mood(), Mood::Limit);
+        for mode in Mode::ALL {
+            let p = w.crab_pose(mode);
+            assert!(p.sign.is_some() && p.book.is_some(), "{mode:?}");
+        }
+        assert_eq!(w.doing(), "lendo");
+        assert_eq!(w.balloon(true).unwrap().0, "Limite diário atingido · volto logo");
+        // no tick, o humor novo toca a placa subindo; quando reinicia, recolhe e comemora
+        let mut w = Claude::sample_ko();
+        let mut req = Vec::new();
+        let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+        w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
+        assert!(w.crab.is_playing(Anim::SignUp));
+        assert_eq!(w.doing(), "volto logo");
     }
 
     /// O widget na tela de `w` × `h` pontos, a `p` da troca de `from` para `to` (`p` None: só
@@ -1633,7 +1916,7 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let w = Claude::sample_busy().with_crab(Anim::Write, 0.4);
+        let w = Claude::sample_busy().with_crab(Anim::Type, 0.4);
         let steps = 9;
         let (cell_w, cell_h, s) = (340.0, 470.0, 1.25);
         let pairs = [(Mode::P, Mode::M), (Mode::M, Mode::G), (Mode::G, Mode::P)];
@@ -1643,9 +1926,9 @@ mod tests {
         // embaixo: a janela da barra de tarefas em vários momentos (com a barra embaixo)
         let c = cfg();
         let env = Env { cfg: &c, key: "claude" };
-        let mut editing = Claude::sample_busy().with_crab(Anim::Write, 0.5);
+        let mut editing = Claude::sample_busy().with_crab(Anim::Type, 0.5);
         editing.activity.tool = Some(Tool { name: "Edit".into(), input: r"C:\dev\src\claude.rs".into() });
-        let mut running = Claude::sample_busy().with_crab(Anim::Tap, 0.3);
+        let mut running = Claude::sample_sherlock().with_crab(Anim::Investigate, 0.3);
         running.activity.tool = Some(Tool { name: "Bash".into(), input: "cargo test --release".into() });
         let states = [
             editing,
@@ -1657,6 +1940,7 @@ mod tests {
             Claude::sample().with_crab(Anim::Done, 0.8),
             Claude::sample(),
             Claude::sample().idle_for(NAP_AFTER + 60.0).with_crab(Anim::Snooze, 0.3),
+            Claude::sample_ko(),
         ];
         let base = cell_h * pairs.len() as f32;
         for (k, st) in states.iter().enumerate() {
@@ -1705,6 +1989,10 @@ mod tests {
         assert_eq!(Claude::sample_busy().with_crab(Anim::Idea, 0.5).doing(), "teve uma ideia");
         assert_eq!(Claude::sample_busy().with_crab(Anim::Coffee, 0.5).doing(), "tomando café");
         assert_eq!(Claude::sample().with_crab(Anim::Done, 0.5).doing(), "pronto");
+        assert_eq!(Claude::sample_sherlock().with_crab(Anim::Investigate, 0.5).doing(), "investigando");
+        assert_eq!(Claude::sample().with_crab(Anim::Music, 0.5).doing(), "ouvindo música");
+        assert_eq!(Claude::sample().with_crab(Anim::Party, 0.5).doing(), "limite reiniciou");
+        assert_eq!(Claude::sample_ko().doing(), "lendo");
         assert_eq!(Claude::sample().idle_for(NAP_AFTER + 60.0).doing(), "cochilando");
         assert_eq!(Claude::sample_limit().doing(), "perto do limite");
     }
@@ -1758,17 +2046,17 @@ mod tests {
     fn crab_hops_as_soon_as_the_button_goes_down() {
         for w in [Claude::sample(), Claude::sample_busy(), Claude::sample_unlinked()] {
             let mut w = w;
-            let still = clawd::cells(&w.crab.pose(w.mood(), None));
+            let still = clawd::cells(&w.crab.pose(w.mood(), None, clawd::View::Side));
             // apertou em cima do Clawd: redesenha já, com ele saindo do lugar
             assert!(Kind::pressed(&mut w, POKE_CRAB));
-            assert_ne!(clawd::cells(&w.crab.pose(w.mood(), None)), still);
+            assert_ne!(clawd::cells(&w.crab.pose(w.mood(), None, clawd::View::Side)), still);
             // soltou: o clique não recomeça o pulo que já está acontecendo
             w.crab = clawd::Crab::playing(Anim::Hop, 0.4);
-            let pose = w.crab.pose(w.mood(), None);
+            let pose = w.crab.pose(w.mood(), None, clawd::View::Side);
             let mut req = Vec::new();
             let (mut c, mut cache) = (cfg(), serde_json::json!({}));
             w.act(POKE_CRAB, &mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
-            assert_eq!(w.crab.pose(w.mood(), None), pose);
+            assert_eq!(w.crab.pose(w.mood(), None, clawd::View::Side), pose);
             // outras áreas não reagem ao apertar
             assert!(!Kind::pressed(&mut w, OPEN_USAGE));
         }
@@ -1946,9 +2234,13 @@ mod tests {
         assert_eq!(Kind::perch_key(&idle, &env), Kind::perch_key(&idle, &env));
         // tudo dentro da janela: o notebook chega perto da borda direita e as patas na de baixo
         let (cx, cy) = PERCH_CRAB;
-        assert!(cx + (clawd::SIDE_COLS - 9.0) * PERCH_UNIT <= PERCH_W - 4.0);
-        assert!((cy + 5.0 * PERCH_UNIT - PERCH_H).abs() < 0.01);
-        assert!(cy - 8.0 * PERCH_UNIT > BALLOON_BOTTOM + 6.0, "o balão encosta no Clawd (ou na lâmpada)");
+        let c = clawd::CELL * PERCH_UNIT;
+        assert!(cx + (clawd::SIDE_COLS - clawd::COLS / 2.0) * c <= PERCH_W - 4.0);
+        assert!((cy + clawd::ROWS / 2.0 * c - PERCH_H).abs() < 0.01);
+        // (no limite, a placa passa 2 colunas do notebook)
+        assert!(cx + (clawd::SIDE_COLS + 2.0 - clawd::COLS / 2.0) * c <= PERCH_W);
+        // o chapéu e a lâmpada vão até 6 quadradinhos acima da grade
+        assert!(cy - (clawd::ROWS / 2.0 + 6.0) * c > BALLOON_BOTTOM + 6.0, "o balão encosta no Clawd (ou na lâmpada)");
     }
 
     #[test]
