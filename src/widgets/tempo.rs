@@ -1757,6 +1757,21 @@ impl Kind for Tempo {
         }
     }
 
+    fn uses_wheel(&self, _x: f32, y: f32, mode: Mode) -> bool {
+        if !self.navigable() || mode == Mode::P {
+            return false;
+        }
+        match self.view_for(mode) {
+            // na tela principal, só em cima da faixa das horas
+            View::Main => {
+                let top = main_hours_y(mode);
+                (top - 4.0..=top + main_strip_h(mode) + 4.0).contains(&y)
+            }
+            View::Day(_) => true,
+            View::Details => Self::pages(mode) > 1,
+        }
+    }
+
     fn wheel(&mut self, _x: f32, y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
         if !self.navigable() {
             return;
