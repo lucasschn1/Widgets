@@ -101,7 +101,7 @@ pub enum Anchor {
 }
 
 impl Anchor {
-    fn parts(self) -> (char, char) {
+    pub fn parts(self) -> (char, char) {
         match self {
             Anchor::LA => ('l', 'a'),
             Anchor::LM => ('l', 'm'),
@@ -748,6 +748,13 @@ impl Canvas {
     pub fn text_width(&self, text: &str, face: Face, size: f32) -> f32 {
         let px = self.font_px(size, face);
         with(|g| g.measure(text, face, px).1) / self.s
+    }
+
+    /// Distância do topo da fonte (onde fica o `y` das âncoras `*A`) até a linha de base, em
+    /// unidades lógicas.
+    pub fn baseline(&self, face: Face, size: f32) -> f32 {
+        let px = self.font_px(size, face);
+        with(|g| g.measure("0", face, px).2) / self.s
     }
 
     /// Quebra o texto em até `max_lines` linhas de largura `max_w`; a última leva o resto

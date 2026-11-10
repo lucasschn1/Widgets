@@ -487,9 +487,23 @@ pub fn now() -> f64 {
 
 /// "14:32" de um horário em segundos desde 1970.
 pub fn clock_at(epoch: f64) -> String {
-    let delta = epoch - now();
-    let t = local_time();
-    let secs = (t.hour as i64 * 3600 + t.minute as i64 * 60 + t.second as i64 + delta.round() as i64).rem_euclid(86400);
+    let t = unsafe { GetLocalTime() };
+    let local = t.wHour as f64 * 3600.0 + t.wMinute as f64 * 60.0 + t.wSecond as f64 + t.wMilliseconds as f64 / 1000.0;
+    clock_with_offset(epoch, utc_offset(local, now()))
+}
+
+/// O fuso de agora em segundos (múltiplo de 1 minuto), da hora local do dia (`local`, em
+/// segundos) e do horário em segundos desde 1970 (`utc`), lidos quase juntos.
+fn utc_offset(local: f64, utc: f64) -> f64 {
+    let off = (local - utc.rem_euclid(86400.0)).rem_euclid(86400.0);
+    (off / 60.0).round() * 60.0
+}
+
+/// "HH:MM" de `epoch` num fuso de `offset` segundos. (Antes, a hora local vinha sem os
+/// milissegundos e o resto da conta com eles: um horário bem na virada do minuto, como o
+/// "Reinicia às 14:00" do Claude, alternava entre 13:59 e 14:00 a cada redesenho.)
+fn clock_with_offset(epoch: f64, offset: f64) -> String {
+    let secs = ((epoch + offset).floor() as i64).rem_euclid(86400);
     format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
 }
 
@@ -542,5 +556,41 @@ pub fn style_window(hwnd: HWND, caption: Option<crate::theme::Rgba>, frameless: 
     }
     if frameless {
         set(34, colorref(crate::theme::Rgba::rgb(60, 60, 70))); // borda
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_does_not_flicker_at_the_turn_of_the_minute() {
+        // reinicia às 14:00:00 em ponto (UTC-3): lido em qualquer fração de segundo, é sempre 14:00
+        let resets = 1_762_794_000.0; // 17:00:00 UTC
+        for ms in [0.0f64, 0.2, 0.5, 0.7, 0.999] {
+            let utc = resets - 5400.0 + ms; // 12:30:00,xxx no horário local
+            let local = 12.0 * 3600.0 + 30.0 * 60.0 + (ms * 1000.0).floor() / 1000.0;
+            assert_eq!(clock_with_offset(resets, utc_offset(local, utc)), "14:00", "{ms}");
+        }
+        // um segundo antes ainda é 13:59
+        assert_eq!(clock_with_offset(resets - 1.0, -3.0 * 3600.0), "13:59");
+    }
+
+    #[test]
+    fn offset_across_midnight() {
+        // 23:50 local em UTC-3 (02:50 UTC do dia seguinte) e 01:00 local em UTC+5 (20:00 UTC)
+        assert_eq!(utc_offset(23.0 * 3600.0 + 50.0 * 60.0, 86400.0 * 10.0 + 2.0 * 3600.0 + 50.0 * 60.0), 21.0 * 3600.0);
+        assert_eq!(clock_with_offset(86400.0 * 10.0 + 3.0 * 3600.0, 21.0 * 3600.0), "00:00");
+        assert_eq!(clock_with_offset(86400.0 * 10.0 + 20.0 * 3600.0, utc_offset(3600.0, 86400.0 * 10.0 + 20.0 * 3600.0)), "01:00");
+    }
+
+    #[test]
+    fn clock_at_now_is_the_local_time() {
+        let t = local_time();
+        let shown = clock_at(now());
+        let (h, m) = (shown[..2].parse::<u16>().unwrap(), shown[3..].parse::<u16>().unwrap());
+        // (a virada do minuto pode cair entre as duas leituras)
+        let mins = |h: u16, m: u16| (h * 60 + m) as i32;
+        assert!((mins(h, m) - mins(t.hour, t.minute)).rem_euclid(1440) <= 1, "{shown} vs {}:{}", t.hour, t.minute);
     }
 }
