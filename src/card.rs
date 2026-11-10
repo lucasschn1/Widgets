@@ -42,10 +42,13 @@ pub struct ResizeAnim {
     pub save: bool,
     /// na metade direita da tela, a borda direita fica parada
     right: bool,
-    /// o tamanho de antes e se o widget desenha cada quadro da troca (`Kind::draw_between`);
-    /// senão, a imagem de um tamanho vai dando lugar à do outro
+    /// o tamanho de antes e se o widget desenha cada quadro da troca (`Kind::draw_between`)
     from: Mode,
     morph: bool,
+    /// senão, o que ele desenha em cada tamanho, gravado: as peças iguais andam de um para o
+    /// outro (`morph::draw`); sem as duas (sem animações, ou abrindo os detalhes no mesmo
+    /// tamanho), a imagem de um tamanho vai dando lugar à do outro
+    recs: Option<Box<(crate::morph::Recording, crate::morph::Recording)>>,
 }
 
 /// Quanto dura a troca de tamanho desenhada quadro a quadro: mais que a de sempre, para dar tempo
@@ -408,6 +411,7 @@ impl Card {
             right: false,
             from: self.mode,
             morph: false,
+            recs: None,
         });
         self.hot = None;
         self.composed = None;
@@ -681,17 +685,19 @@ impl Card {
         let right = self.grows_left(self.card_rect());
         let from = self.mode;
         let morph = sh.animations && self.kind.morphs(from, mode);
+        // os outros widgets também trocam peça a peça: grava o que cada tamanho desenha
+        let recs = (sh.animations && !morph).then(|| {
+            let env = Env { cfg: &sh.cfg, key: self.key() };
+            let rec = |m: Mode| crate::morph::record(self.kind.as_ref(), m, self.s, sh.text_scale, &env);
+            Box::new((rec(from), rec(mode)))
+        });
         let old = self.render(from, sh);
         let r0 = self.radius_px(from);
         self.mode = mode;
         let new = self.render(mode, sh);
         let r1 = self.radius_px(mode);
         let (x, y) = self.pos;
-        let ms = match (sh.animations, morph) {
-            (false, _) => 0,
-            (true, true) => MORPH_MS,
-            (true, false) => ANIM_MS,
-        };
+        let ms = if sh.animations { MORPH_MS } else { 0 };
         self.anim = Some(ResizeAnim {
             old,
             new,
@@ -706,6 +712,7 @@ impl Card {
             right,
             from,
             morph,
+            recs,
         });
         self.hot = None;
         self.content = None;
@@ -731,6 +738,12 @@ impl Card {
             c.text_scale = sh.text_scale;
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw_between(&mut c, a.from, self.mode, t, &env);
+            c.finish()
+        } else if let Some(recs) = &a.recs {
+            // as peças que existem nos dois tamanhos andam de um lugar para o outro
+            let mut c = Canvas::new(w, h, self.s);
+            c.text_scale = sh.text_scale;
+            crate::morph::draw(&mut c, &recs.0, &recs.1, t);
             c.finish()
         } else {
             // os dois estados presos no mesmo canto, um sumindo e o outro aparecendo

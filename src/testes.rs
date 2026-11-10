@@ -268,3 +268,77 @@ fn every_widget_has_its_registry_entries() {
     }
 }
 
+/// Todos os widgets, em todos os estados, trocam de tamanho peça a peça sem quebrar; e o último
+/// quadro da troca é o desenho do tamanho novo (nada a mais, nada faltando).
+#[test]
+fn every_widget_morphs_between_every_size() {
+    com();
+    for (name, kind, cfg) in cases() {
+        let env = Env { cfg: &cfg, key: kind.key() };
+        for &from in kind.sizes() {
+            for &to in kind.sizes().iter().filter(|&&m| m != from) {
+                let (a, b) = (crate::morph::record(kind.as_ref(), from, S, 1.0, &env), crate::morph::record(kind.as_ref(), to, S, 1.0, &env));
+                for p in [0.5] {
+                    let l = Layout::of(if p < 0.5 { from } else { to });
+                    let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
+                    crate::morph::draw(&mut c, &a, &b, p);
+                    let _ = c.finish();
+                }
+                // no fim, igual ao desenho de sempre do tamanho novo
+                let l = Layout::of(to);
+                let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
+                crate::morph::draw(&mut c, &a, &b, 1.0);
+                let end = c.finish();
+                let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
+                kind.draw(&mut c, to, &env);
+                let normal = c.finish();
+                let diff = end.px.iter().zip(&normal.px).filter(|(x, y)| (**x as i32 - **y as i32).abs() > 24).count();
+                assert!(diff * 100 <= end.px.len(), "{name} {from:?} → {to:?}: o fim da troca difere do desenho ({diff} de {})", end.px.len());
+            }
+        }
+    }
+}
+
+/// Cada widget trocando de tamanho (pequeno → médio → grande → pequeno), em quadros, num PNG
+/// por widget na pasta temporária (para conferir de olho as trocas peça a peça).
+///
+///   cargo test --release testes::morph_sheets -- --ignored --nocapture
+#[test]
+#[ignore]
+fn morph_sheets() {
+    use crate::theme::{ease_spring, Rgba};
+    com();
+    let cfg = empty_cfg();
+    let kinds: Vec<(&str, Box<dyn Kind>, Value)> = vec![
+        ("tempo", Box::new(Tempo::sample("inicio", 0, 0.0, Mode::M)), cfg.clone()),
+        ("sistema", Box::new(System::sample()), cfg.clone()),
+        ("midia", Box::new(Media::sample()), cfg.clone()),
+        ("github", Box::new(GitHub::sample(&cfg, &json!({}))), cfg.clone()),
+        ("pomodoro", Box::new(Pomodoro::new(&pomodoro_cfg("foco", true))), pomodoro_cfg("foco", true)),
+        ("bateria", Box::new(Battery::sample()), cfg.clone()),
+    ];
+    let steps = [0.0, 0.15, 0.3, 0.45, 0.6, 0.8, 1.0];
+    let trips = [(Mode::P, Mode::M), (Mode::M, Mode::G), (Mode::G, Mode::P)];
+    let s = 1.0;
+    let (cell_w, cell_h) = (widgets::WIDE + 16.0, widgets::LARGE_H + 16.0);
+    for (name, kind, cfg) in kinds {
+        let env = Env { cfg: &cfg, key: kind.key() };
+        let mut sheet = Canvas::new((cell_w * steps.len() as f32) as u32, (cell_h * trips.len() as f32) as u32, s);
+        sheet.fill_round_rect(0.0, 0.0, cell_w * steps.len() as f32, cell_h * trips.len() as f32, 0.0, Rgba::rgb(60, 52, 96));
+        for (row, &(from, to)) in trips.iter().enumerate() {
+            let (a, b) = (crate::morph::record(kind.as_ref(), from, s, 1.0, &env), crate::morph::record(kind.as_ref(), to, s, 1.0, &env));
+            for (col, &p) in steps.iter().enumerate() {
+                let e = ease_spring(p);
+                let (la, lb) = (Layout::of(from), Layout::of(to));
+                let (w, h) = (la.w + (lb.w - la.w) * e, la.h + (lb.h - la.h) * e);
+                let mut c = Canvas::new(w.round().max(1.0) as u32, h.round().max(1.0) as u32, s);
+                c.fill_round_rect(0.0, 0.0, w, h, la.radius + (lb.radius - la.radius) * e, Rgba(30, 30, 40, 235));
+                crate::morph::draw(&mut c, &a, &b, p);
+                sheet.image(&c.finish(), col as f32 * cell_w + 8.0, row as f32 * cell_h + 8.0);
+            }
+        }
+        let path = std::env::temp_dir().join(format!("troca_{name}.png"));
+        crate::gfx::save_png(&sheet.finish(), &path).unwrap();
+        println!("{}", path.display());
+    }
+}
