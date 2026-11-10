@@ -1,5 +1,6 @@
 //! Pilhas de widgets, como as do iPhone e do Mac: vários widgets no mesmo lugar, um por vez,
-//! trocando com a roda do mouse (os pontinhos na borda direita dizem qual é qual). Para empilhar,
+//! trocando com a roda do mouse (ao trocar, bolinhas ao lado do cartão dizem qual é qual, como no
+//! macOS). Para empilhar,
 //! arraste um widget e solte no meio de outro; para tirar, clique direito → "Tirar da pilha".
 //!
 //! Cada widget continua sendo um cartão completo, com a janela dele: os de baixo ficam escondidos
@@ -179,8 +180,7 @@ impl App {
                 }
                 let c = &mut self.cards[j];
                 if c.mode != mode && c.kind.sizes().contains(&mode) {
-                    c.mode = mode;
-                    c.stale = true;
+                    c.set_mode_now(mode);
                     widgets::store_size(self.sh.cfg.obj_mut(key), mode);
                     dirty = true;
                 }
@@ -242,7 +242,12 @@ impl App {
         let (pos, mode) = (self.cards[a].pos, self.cards[a].mode);
         self.cards[b].pos = pos;
         if self.cards[b].mode != mode && self.cards[b].kind.sizes().contains(&mode) {
-            self.cards[b].mode = mode;
+            self.cards[b].set_mode_now(mode);
+        }
+        // e nada de desenho de outro tamanho guardado (o que fazia o cartão animar a altura)
+        let size = self.cards[b].card_size();
+        if self.cards[b].content.as_ref().is_some_and(|img| (img.w as i32, img.h as i32) != size) {
+            self.cards[b].content = None;
         }
         let now = Instant::now();
         let hover = self.cards[a].hover;
@@ -254,6 +259,8 @@ impl App {
             c.hot = None;
             c.pressing = false;
         }
+        // as bolinhas aparecem (ao lado do cartão) e somem sozinhas logo depois
+        self.cards[b].dots_at = Some(now);
         // o mouse está em cima: o novo já entra como se o mouse tivesse entrado nele
         self.cards[b].hover = hover;
         self.cards[b].set_hover(true);
@@ -315,11 +322,12 @@ impl App {
         self.cards[i].slide = None;
         self.cards[i].pos = pos;
         if self.cards[i].mode != mode {
-            self.cards[i].mode = mode;
+            self.cards[i].set_mode_now(mode);
             widgets::store_size(self.sh.cfg.obj_mut(ki), mode);
         }
         self.show_drop_hint(None);
         self.apply_stacks();
+        self.cards[i].dots_at = Some(Instant::now());
         self.cards[i].refresh(&self.sh);
         self.cards[i].present(&self.sh, true);
         self.moved(i);

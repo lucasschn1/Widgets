@@ -49,6 +49,10 @@ const M_QUIT: u32 = 300_009;
 const M_EDIT: u32 = 300_010;
 const M_FOCUS_END: u32 = 300_011;
 const M_FOCUS: u32 = 300_020; // + minutos (0 = até desligar)
+/// as durações do modo foco no menu, em minutos (0 = até desligar). Só elas valem como comando:
+/// "M_FOCUS + qualquer número" engolia outros comandos (o "Tirar da pilha", 300_034, virava
+/// modo foco por 14 minutos)
+const FOCUS_MINUTES: [(&str, u32); 4] = [("30 minutos", 30), ("1 hora", 60), ("2 horas", 120), ("Até eu desligar", 0)];
 const M_WIDGET: u32 = 300_100; // + índice em widgets::KEYS
 const M_LAYOUT: u32 = 301_000; // + índice do layout
 const M_LAYOUT_DEL: u32 = 302_000; // + índice do layout
@@ -148,6 +152,12 @@ pub struct App {
     /// arrastando: o widget em que o arrastado seria empilhado ao soltar
     drop_target: Option<usize>,
     pub quit: bool,
+}
+
+/// Os minutos do modo foco de um comando do menu (None: não é do modo foco).
+fn focus_minutes(id: u32) -> Option<u32> {
+    let m = id.checked_sub(M_FOCUS)?;
+    FOCUS_MINUTES.iter().any(|f| f.1 == m).then_some(m)
 }
 
 /// Acorda o laço principal (para as threads que buscam dados).
@@ -1172,7 +1182,7 @@ impl App {
                 let when = until.map(|t| format!(" (até {})", win::clock_at(t))).unwrap_or_default();
                 vec![MenuItem::Cmd(format!("Sair do modo foco{when}"), M_FOCUS_END)]
             }
-            None => [("30 minutos", 30), ("1 hora", 60), ("2 horas", 120), ("Até eu desligar", 0)]
+            None => FOCUS_MINUTES
                 .iter()
                 .map(|(label, minutes)| MenuItem::Cmd(label.to_string(), M_FOCUS + minutes))
                 .collect(),
@@ -1247,7 +1257,7 @@ impl App {
                 }
             }
             M_FOCUS_END => self.end_focus(),
-            id if (M_FOCUS..M_FOCUS + 1000).contains(&id) => self.start_focus(id - M_FOCUS),
+            id if focus_minutes(id).is_some() => self.start_focus(focus_minutes(id).unwrap_or(0)),
             id if (M_LAYOUT..M_LAYOUT + 1000).contains(&id) => {
                 if let Some(name) = self.layout_names().get((id - M_LAYOUT) as usize).cloned() {
                     self.apply_layout(&name);
@@ -2092,7 +2102,20 @@ fn stack_in(rects: &[Rect], i: usize, top: Rect, limit: i32) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::stack_in;
+    use super::*;
+
+    /// Só as durações do menu ligam o modo foco: os outros comandos (como o "Tirar da pilha", que
+    /// caía no meio da faixa dele) chegam onde devem.
+    #[test]
+    fn menu_commands_do_not_fall_into_focus_mode() {
+        for id in [M_SETTINGS, M_TIPS, M_GALLERY, M_SAVE_LAYOUT, M_UNSTACK, M_PEEK, M_ARRANGE, M_LOCK, M_CLOSE, M_QUIT, M_EDIT, M_FOCUS_END] {
+            assert_eq!(focus_minutes(id), None, "{id}");
+        }
+        for (_, m) in FOCUS_MINUTES {
+            assert_eq!(focus_minutes(M_FOCUS + m), Some(m));
+        }
+        assert_eq!(focus_minutes(M_FOCUS + 14), None);
+    }
 
     #[test]
     fn stack_follows_the_chain_below() {
