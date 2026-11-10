@@ -271,15 +271,7 @@ fn compose(wall: &Image, bd: &Backdrop, items: &[Item], labels: &[Label]) -> Ima
     let mut c = Canvas::new(wall.w, wall.h, 1.0);
     c.image(wall, 0.0, 0.0);
     for it in items {
-        // sombra suave embaixo do cartão
-        let pad = 36.0;
-        let (w, h) = (it.img.w as f32, it.img.h as f32);
-        let mut sh = Canvas::new((w + 2.0 * pad) as u32, (h + 2.0 * pad) as u32, 1.0);
-        sh.fill_round_rect(pad, pad + 10.0, pad + w, pad + h + 10.0, it.radius, Rgba(20, 10, 40, 70));
-        let mut shadow = sh.finish();
-        let (sw, shh) = (shadow.w, shadow.h);
-        blur(&mut shadow.px, sw, shh, 4, 16.0);
-        c.image(&shadow, it.x as f32 - pad, it.y as f32 - pad);
+        // sem sombra, como no app
         let glass = bd.glass(&it.img, it.radius, it.x, it.y, GLASS_TINT);
         c.image(&glass, it.x as f32, it.y as f32);
     }

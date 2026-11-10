@@ -64,24 +64,6 @@ fn ease_out_quick(t: f32) -> f32 {
     1.0 - (1.0 - t) * (1.0 - t)
 }
 
-/// Sombra suave embaixo do cartão, do tamanho da janela (cartão de w×h pixels mais a margem `m`).
-/// As bordas mais fracas ficam totalmente transparentes: ali os cliques passam para a área de
-/// trabalho, como antes.
-pub fn card_shadow(w: u32, h: u32, m: u32, radius: f32, s: f32) -> Image {
-    let (ww, wh) = (w + 2 * m, h + 2 * m);
-    let mut c = Canvas::new(ww, wh, 1.0);
-    let (m, drop) = (m as f32, (2.0 * s).round());
-    c.fill_round_rect(m, m + drop, m + w as f32, m + h as f32 + drop, radius, Rgba(8, 6, 20, 96));
-    let mut img = c.finish();
-    crate::imgops::blur(&mut img.px, ww, wh, 4, 3.2 * s);
-    for p in img.px.chunks_mut(4) {
-        if p[3] < 10 {
-            p.copy_from_slice(&[0, 0, 0, 0]);
-        }
-    }
-    img
-}
-
 /// Desenha um widget num tamanho e escala quaisquer (miniaturas, prévia).
 pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
     let l = Layout::of(mode);
@@ -127,8 +109,6 @@ pub struct Card {
     pub outside_since: Option<Instant>,
     pub content: Option<Image>,
     composed: Option<((i32, i32), u64, (u32, u32), Image)>,
-    /// sombra pronta para o tamanho atual: ((largura, altura, raio), imagem)
-    shadow: Option<((u32, u32, u32), Image)>,
     /// mudou algo enquanto estava pausado ou escondido
     pub stale: bool,
     pub close_hot: bool,
@@ -173,7 +153,6 @@ impl Card {
             outside_since: None,
             content: None,
             composed: None,
-            shadow: None,
             stale: false,
             close_hot: false,
             status: Status::default(),
@@ -195,7 +174,8 @@ impl Card {
     }
 
     /// A luz do mouse na borda de vidro: um traço liso, mais forte perto do cursor, que acende e
-    /// apaga junto com o resto do que aparece com o mouse em cima (`hover`).
+    /// apaga junto com o resto do que aparece com o mouse em cima (`hover`). Só na borda: o
+    /// interior do cartão não clareia com o mouse (como nos widgets do macOS).
     fn draw_glow(&self, c: &mut Canvas, sh: &Shared) {
         let Some((gx, gy)) = self.glow else { return };
         if self.hover <= 0.0 || sh.editing || !sh.animations || self.drag.is_some() {
@@ -204,7 +184,7 @@ impl Card {
         let lay = self.layout(self.mode);
         let m = MARGIN;
         let a = self.hover.clamp(0.0, 1.0);
-        c.glow_round_rect(m, m, m + lay.w, m + lay.h, lay.radius, m + gx, m + gy, GLOW_RADIUS, WHITE.with_a((150.0 * a) as u8), 1.2, 0.07);
+        c.glow_round_rect(m, m, m + lay.w, m + lay.h, lay.radius, m + gx, m + gy, GLOW_RADIUS, WHITE.with_a((150.0 * a) as u8), 1.2, 0.0);
     }
 
     pub fn key(&self) -> &'static str {
@@ -412,20 +392,12 @@ impl Card {
             let glass = sh.backdrop.glass(content, self.radius_px(self.mode), self.pos.0 + m, self.pos.1 + m, sh.tint);
             self.composed = Some((key.0, key.1, key.2, glass));
         }
-        let (gw, gh) = {
-            let g = &self.composed.as_ref().unwrap().3;
-            (g.w, g.h)
-        };
-        let radius = self.radius_px(self.mode);
-        let shadow_key = (gw, gh, (radius * 10.0) as u32);
-        if self.shadow.as_ref().map(|s| s.0) != Some(shadow_key) {
-            self.shadow = Some((shadow_key, card_shadow(gw, gh, m as u32, radius, self.s)));
-        }
         let glass = &self.composed.as_ref().unwrap().3;
         let (w, h) = (glass.w + 2 * m as u32, glass.h + 2 * m as u32);
         let mut c = Canvas::new(w, h, self.s);
-        c.image(&self.shadow.as_ref().unwrap().1, 0.0, 0.0);
-        // o tremor do trovão leva o vidro e a camada animada juntos (a sombra fica)
+        // sem sombra, como os widgets do macOS: em volta do vidro, a margem fica transparente (e
+        // os cliques ali passam para a área de trabalho)
+        // o tremor do trovão leva o vidro e a camada animada juntos
         let (dx, dy) = if sh.animations && self.anim.is_none() { self.kind.shake() } else { (0.0, 0.0) };
         c.image(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
@@ -712,7 +684,7 @@ impl Card {
         let y = (a.y as f32 + (a.to.1 - a.y) as f32 * e).round() as i32;
         let radius = a.r0 + (a.r1 - a.r0) * e;
         let glass = sh.backdrop.glass(&content, radius, x + m, y + m, sh.tint);
-        let mut img = card_shadow(w, h, m as u32, radius, self.s);
+        let mut img = Image::new(w + 2 * m as u32, h + 2 * m as u32);
         img.over(&glass, m, m);
         win::blit(self.hwnd, &img, Some((x, y)), self.opacity(sh));
         if t >= 1.0 {
