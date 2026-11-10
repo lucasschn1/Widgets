@@ -53,6 +53,24 @@ const DAY_STRIP_G: f32 = 104.0;
 const DAY_TILES_G: f32 = 182.0;
 const DAY_TILE_H: f32 = (LARGE_H - DAY_TILES_G - 14.0 - G_TILE_GAP) / 2.0;
 const SCROLL_MS: f32 = 260.0;
+/// Condição do tempo no pequeno: tamanho e distância entre as duas linhas, quando quebra.
+const COMPACT_DESC_SIZE: f32 = 12.0;
+const COMPACT_DESC_LINE: f32 = 15.0;
+
+/// Tamanho do nome de um evento ("Nascer", "Pôr do sol") na faixa de horas: 10, ou menos (até
+/// 8,5) para caber em `max_w`.
+fn event_label_size(c: &Canvas, text: &str, max_w: f32) -> f32 {
+    let mut size = 10.0;
+    while size > 8.5 && c.text_width(text, Face::Semibold, size) > max_w {
+        size -= 0.25;
+    }
+    size
+}
+
+/// Tamanho da condição no cabeçalho do médio (`big` = grande).
+fn top_desc_size(big: bool) -> f32 {
+    if big { 13.5 } else { 12.5 }
+}
 const RAIN_BLUE: Rgba = Rgba::rgb(110, 200, 255);
 /// faixa do índice UV: baixo, moderado, alto, muito alto e extremo
 const UV_STOPS: [(f32, Rgba); 5] =
@@ -1022,13 +1040,23 @@ impl Tempo {
                 let size = if big { 26.0 } else { 22.0 };
                 c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), W - pad - size, city_y - 2.0);
                 let (dy, my) = if big { (48.0, 67.0) } else { (40.0, 57.0) };
-                c.text(W - pad, dy, wx.str_of("desc").unwrap_or(""), Face::Semibold, if big { 13.5 } else { 12.5 }, FG, Anchor::RA, Some(150.0));
+                let max_w = self.top_desc_w(c, big);
+                c.text(W - pad, dy, wx.str_of("desc").unwrap_or(""), Face::Semibold, top_desc_size(big), FG, Anchor::RA, Some(max_w));
                 c.text(W - pad, my, &self.minmax(), Face::Regular, if big { 12.0 } else { 11.0 }, MUTED, Anchor::RA, None);
             }
             None => {
                 c.text(W - pad, 40.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
             }
         }
+    }
+
+    /// Largura livre para a condição no cabeçalho do médio e do grande: tudo o que sobra à
+    /// direita da temperatura ("Predominantemente limpo" não cabia nos 150 de antes).
+    fn top_desc_w(&self, c: &Canvas, big: bool) -> f32 {
+        let pad = if big { G_PAD } else { M_PAD };
+        let temp_size = if big { 54.0 } else { 40.0 };
+        let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), Face::Light, temp_size);
+        W - pad - temp_end - 14.0
     }
 
     /// Faixa de horas com colunas largas: hora, ícone e temperatura (no grande, a chance de chuva
@@ -1056,7 +1084,11 @@ impl Tempo {
                 c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
             }
             match h[2].as_str() {
-                Some(name) => c.text(cx, y + temp_y + 1.5, name, Face::Semibold, 10.0, FG, Anchor::MA, Some(col)),
+                Some(name) => {
+                    // "Pôr do sol" diminui um pouco nas colunas mais estreitas, em vez de virar "Pôr do s…"
+                    let size = event_label_size(c, name, col - 2.0);
+                    c.text(cx, y + temp_y + 1.5 + (10.0 - size) / 2.0, name, Face::Semibold, size, FG, Anchor::MA, Some(col))
+                }
                 None => c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None),
             };
         }
@@ -1116,7 +1148,12 @@ impl Tempo {
             Some(wx) => {
                 let size = 22.0;
                 c.image(&weather_art(wx.str_of("icon").unwrap_or("clouds"), (size * c.s).round() as u32), SMALL - 16.0 - size, 14.0);
-                c.text(x, 104.0, wx.str_of("desc").unwrap_or(""), Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
+                // a condição comprida ("Predominantemente limpo") quebra em duas linhas, subindo
+                let lines = c.wrap(wx.str_of("desc").unwrap_or(""), Face::Semibold, COMPACT_DESC_SIZE, w, 2);
+                let top = 104.0 - COMPACT_DESC_LINE * (lines.len().max(1) - 1) as f32;
+                for (k, line) in lines.iter().enumerate() {
+                    c.text(x, top + COMPACT_DESC_LINE * k as f32, line, Face::Semibold, COMPACT_DESC_SIZE, FG, Anchor::LA, Some(w));
+                }
                 c.text(x, 121.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
             }
             None => {
@@ -2153,6 +2190,48 @@ mod tests {
         assert_eq!(weather_icon(65, true), "heavy_rain");
         assert_eq!(weather_icon(99, true), "hail");
         assert_eq!(weather_icon(95, true), "thunder");
+    }
+
+    /// Nenhuma condição do tempo fica cortada com "…": no médio e no grande cabe ao lado da
+    /// temperatura (mesmo uma larga, de três algarismos com sinal); no pequeno, em até duas linhas.
+    #[test]
+    fn conditions_are_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        let mut descs: Vec<&str> = (0..=99).map(wmo).filter(|d| *d != "—").collect();
+        descs.push("Ventania");
+        let small_w = SMALL - 32.0;
+        for temp in [24, -18] {
+            let mut t = Tempo::sample("inicio", 0, 0.0, Mode::M);
+            t.weather.as_mut().unwrap()["temp"] = json!(temp);
+            for big in [false, true] {
+                let max_w = t.top_desc_w(&c, big);
+                for d in &descs {
+                    let w = c.text_width(d, Face::Semibold, top_desc_size(big));
+                    assert!(w <= max_w, "{d:?} com {temp}° ({w} > {max_w}, grande: {big})");
+                }
+            }
+        }
+        for d in &descs {
+            let lines = c.wrap(d, Face::Semibold, COMPACT_DESC_SIZE, small_w, 2);
+            assert!(lines.len() <= 2);
+            for l in &lines {
+                assert!(c.text_width(l, Face::Semibold, COMPACT_DESC_SIZE) <= small_w, "{d:?}: {l:?} não cabe no pequeno");
+            }
+        }
+        // o caso que aparecia cortado: no pequeno, em duas linhas
+        assert_eq!(c.wrap(wmo(1), Face::Semibold, COMPACT_DESC_SIZE, small_w, 2), ["Predominantemente", "limpo"]);
+        // "Pôr do sol" e "Nascer" na faixa de horas do médio e do grande (o grande mostrava "Pôr do s…")
+        for mode in [Mode::M, Mode::G] {
+            let (x0, x1) = main_strip_bounds(mode);
+            let col = (x1 - x0) / HOURS as f32;
+            for name in ["Pôr do sol", "Nascer"] {
+                let size = event_label_size(&c, name, col - 2.0);
+                assert!(c.text_width(name, Face::Semibold, size) <= col - 2.0, "{name:?} não cabe na coluna ({mode:?})");
+            }
+        }
     }
 
     #[test]

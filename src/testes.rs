@@ -129,6 +129,7 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         out.push((format!("bateria ligando na tomada {ms}"), Box::new(Battery::sample_plugging(ms)), cfg.clone()));
         out.push((format!("bateria cheia {ms}"), Box::new(Battery::sample_full(ms)), cfg.clone()));
         out.push((format!("bateria aparelhos mudando {ms}"), Box::new(Battery::sample_changing(ms)), cfg.clone()));
+        out.push((format!("bateria números rolando {ms}"), Box::new(Battery::sample_rolling(ms)), cfg.clone()));
     }
     out.push(("claude de Sherlock".into(), Box::new(Claude::sample_sherlock()), cfg.clone()));
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));

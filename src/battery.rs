@@ -27,7 +27,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 // ---------- o notebook ----------
 
 /// A bateria do notebook agora.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Power {
     /// carga, de 0 a 100
     pub percent: f32,
@@ -42,6 +42,10 @@ pub struct Power {
     /// a capacidade de agora sobre a de fábrica (0 a 1)
     pub health: Option<f32>,
     pub cycles: Option<u32>,
+    /// a energia que resta, em mWh (do driver)
+    pub left_mwh: Option<u32>,
+    /// o consumo agora, na bateria, em mW (do driver; varia muito de um segundo para outro)
+    pub drain_mw: Option<u32>,
 }
 
 /// A bateria do notebook (None: o PC não tem bateria).
@@ -58,15 +62,17 @@ pub fn power() -> Option<Power> {
         plugged,
         charging: plugged && st.BatteryFlag & 8 != 0,
         secs_left: (!plugged && st.BatteryLifeTime != u32::MAX).then_some(st.BatteryLifeTime),
-        secs_to_full: None,
-        health: None,
-        cycles: None,
+        ..Default::default()
     };
     if let Some(d) = driver_details() {
         if d.designed > 0 && d.full > 0 {
             p.health = Some((d.full as f32 / d.designed as f32).min(1.0));
         }
         p.cycles = (d.cycles > 0).then_some(d.cycles);
+        p.left_mwh = (d.capacity > 0).then_some(d.capacity);
+        if !plugged && d.rate < 0 {
+            p.drain_mw = Some(d.rate.unsigned_abs());
+        }
         if p.charging && d.rate > 0 && d.full > d.capacity {
             p.secs_to_full = Some(((d.full - d.capacity) as f64 / d.rate as f64 * 3600.0) as u32);
         }
@@ -454,6 +460,9 @@ mod tests {
     fn this_pc() {
         let t = std::time::Instant::now();
         println!("{:?} ({:?})", power(), t.elapsed());
+        if let Some(d) = driver_details() {
+            println!("driver: projetada {} mWh, cheia {} mWh, agora {} mWh, ritmo {} mW, ciclos {}", d.designed, d.full, d.capacity, d.rate, d.cycles);
+        }
         let t = std::time::Instant::now();
         for d in devices() {
             println!("{d:?}");
