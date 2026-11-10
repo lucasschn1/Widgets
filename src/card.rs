@@ -199,6 +199,20 @@ impl Card {
         }
     }
 
+    /// Muda de tamanho na hora, sem animar (numa pilha, para ficar do tamanho do de cima). O
+    /// desenho guardado é do tamanho de antes e vai fora: com ele, o próximo `refresh` achava que
+    /// o widget tinha mudado de altura sozinho (como ao abrir os detalhes de um anel), animava a
+    /// altura e empurrava os vizinhos.
+    pub fn set_mode_now(&mut self, mode: Mode) {
+        if mode == self.mode {
+            return;
+        }
+        self.mode = mode;
+        self.content = None;
+        self.composed = None;
+        self.stale = true;
+    }
+
     /// A troca de widget numa pilha: quanto já foi (0 a 1) e se este entra; None: parado.
     fn swap_progress(&self) -> Option<(f32, bool)> {
         self.swap.map(|(at, entering)| ((at.elapsed().as_secs_f32() * 1000.0 / SWAP_MS).min(1.0), entering))
@@ -939,6 +953,22 @@ mod tests {
 
     fn card() -> Card {
         Card::new(Box::new(crate::widgets::battery::Battery::sample()), HWND::default(), Mode::M, 1.0)
+    }
+
+    /// Mudar de tamanho na hora (numa pilha) não deixa o desenho do tamanho de antes: senão o
+    /// cartão animava a altura sozinho ao aparecer.
+    #[test]
+    fn changing_size_at_once_drops_the_old_drawing() {
+        let mut c = card();
+        c.content = Some(Image::new(320, 154));
+        c.set_mode_now(Mode::G);
+        assert_eq!(c.mode, Mode::G);
+        assert!(c.content.is_none() && c.stale && c.anim.is_none());
+        // o mesmo tamanho: nada muda
+        c.content = Some(Image::new(320, 448));
+        c.stale = false;
+        c.set_mode_now(Mode::G);
+        assert!(c.content.is_some() && !c.stale);
     }
 
     /// Numa pilha: o que entra cresce até o tamanho (com mola) enquanto aparece, o que sai

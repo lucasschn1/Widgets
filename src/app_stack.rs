@@ -179,8 +179,7 @@ impl App {
                 }
                 let c = &mut self.cards[j];
                 if c.mode != mode && c.kind.sizes().contains(&mode) {
-                    c.mode = mode;
-                    c.stale = true;
+                    c.set_mode_now(mode);
                     widgets::store_size(self.sh.cfg.obj_mut(key), mode);
                     dirty = true;
                 }
@@ -242,7 +241,12 @@ impl App {
         let (pos, mode) = (self.cards[a].pos, self.cards[a].mode);
         self.cards[b].pos = pos;
         if self.cards[b].mode != mode && self.cards[b].kind.sizes().contains(&mode) {
-            self.cards[b].mode = mode;
+            self.cards[b].set_mode_now(mode);
+        }
+        // e nada de desenho de outro tamanho guardado (o que fazia o cartão animar a altura)
+        let size = self.cards[b].card_size();
+        if self.cards[b].content.as_ref().is_some_and(|img| (img.w as i32, img.h as i32) != size) {
+            self.cards[b].content = None;
         }
         let now = Instant::now();
         let hover = self.cards[a].hover;
@@ -315,7 +319,7 @@ impl App {
         self.cards[i].slide = None;
         self.cards[i].pos = pos;
         if self.cards[i].mode != mode {
-            self.cards[i].mode = mode;
+            self.cards[i].set_mode_now(mode);
             widgets::store_size(self.sh.cfg.obj_mut(ki), mode);
         }
         self.show_drop_hint(None);
