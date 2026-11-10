@@ -157,6 +157,9 @@ fn ink(img: &Image) -> f32 {
 #[test]
 fn skeletons_only_while_loading_for_the_first_time_and_inside_the_card() {
     use crate::widgets::CARD_PAD;
+    // (alguns exemplos desenham imagens: precisam do COM, que nem sempre outro teste já ligou nesta
+    // thread; no CI, sem ele, o Direct2D não abria)
+    com();
     let mut shown = 0;
     for (name, kind, _) in cases() {
         for &mode in kind.sizes() {
