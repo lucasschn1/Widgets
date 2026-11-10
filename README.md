@@ -266,9 +266,16 @@ teclados Bluetooth). Os que usam um receptor USB próprio só mostram a carga no
 ## Do tamanho que você quiser
 
 Clique no botão que aparece no canto, ou dê dois cliques no widget. O pequeno é um quadrado, o
-médio tem a largura de dois pequenos lado a lado e o grande tem espaço para as listas. Os
-vizinhos se ajeitam sozinhos. Para mover, é só arrastar: eles se encaixam uns nos outros e nas
-bordas da tela (segure `Alt` para soltar livre).
+médio tem a largura de dois pequenos lado a lado e o grande tem espaço para as listas. Na troca,
+o que aparece nos dois tamanhos anda até o lugar novo, e os vizinhos se ajeitam sozinhos. Para
+mover, é só arrastar: eles se encaixam uns nos outros e nas bordas da tela (segure `Alt` para
+soltar livre).
+
+**Pilhas.** Solte um widget no meio de outro e os dois viram uma pilha, como no iPhone: ocupam o
+lugar de um só e a roda do mouse troca entre eles (os pontinhos na borda direita dizem qual é
+qual). Em cima das horas do Tempo, da lista do GitHub, da barra de volume do Tocando agora e do
+anel do Pomodoro, a roda continua fazendo o que faz no widget. Para desfazer, clique direito →
+**Tirar da pilha**.
 
 <table>
   <tr>
