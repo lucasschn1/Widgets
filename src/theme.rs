@@ -32,6 +32,16 @@ pub const ACCENT_HOVER: Rgba = Rgba::rgb(64, 156, 255);
 pub const DANGER: Rgba = Rgba::rgb(255, 69, 58);
 pub const DARK_GLYPH: Rgba = Rgba(28, 28, 30, 255);
 
+// as cores de estado, as mesmas em todos os widgets: um pouco menos saturadas que as do sistema
+// (o verde, o vermelho e o azul puros gritavam no vidro escuro). As de marca (Spotify, YouTube,
+// GitHub, Claude) ficam como são.
+pub const GREEN: Rgba = Rgba::rgb(88, 204, 130);
+pub const AMBER: Rgba = Rgba::rgb(240, 184, 84);
+pub const RED: Rgba = Rgba::rgb(242, 102, 92);
+pub const BLUE: Rgba = Rgba::rgb(82, 158, 245);
+pub const PINK: Rgba = Rgba::rgb(242, 96, 128);
+pub const CYAN: Rgba = Rgba::rgb(112, 200, 242);
+
 // medidas em pixels "lógicos" (96 dpi); multiplicadas pela escala da tela
 pub const MARGIN: f32 = 8.0; // área transparente em volta do cartão, para o botão sobressair
 pub const BADGE_D: f32 = 20.0;
@@ -69,7 +79,7 @@ pub const HOVER_SURFACE: Rgba = Rgba(255, 255, 255, 20);
 pub const HOVER_EDGE: Rgba = Rgba(255, 255, 255, 40);
 pub const PRESS_SURFACE: Rgba = Rgba(0, 0, 0, 34);
 pub const HOVER_FADE_MS: u64 = 120;
-pub const STALE_DOT: Rgba = Rgba(255, 184, 0, 255); // aviso de dados desatualizados
+pub const STALE_DOT: Rgba = AMBER; // aviso de dados desatualizados
 pub const STALE_XY: (f32, f32) = (12.0, 12.0);
 
 /// Movimento que sai devagar, acelera e assenta suave no ponto, sem passar dele (uma mola

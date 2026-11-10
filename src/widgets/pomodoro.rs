@@ -43,9 +43,9 @@ impl Phase {
     }
     pub fn color(self) -> Rgba {
         match self {
-            Phase::Foco => Rgba::rgb(255, 99, 88),
-            Phase::Pausa => Rgba::rgb(48, 209, 88),
-            Phase::Longa => Rgba::rgb(10, 132, 255),
+            Phase::Foco => RED,
+            Phase::Pausa => GREEN,
+            Phase::Longa => BLUE,
         }
     }
     fn default_minutes(self) -> i64 {
@@ -78,7 +78,7 @@ const DURATION: u32 = 1000; // + fase * 1000 + minutos
 const EVERY: u32 = 900; // + n
 
 const W: f32 = WIDE;
-const PAD: f32 = 20.0;
+const PAD: f32 = super::CARD_PAD;
 const C_RING: (f32, f32, f32, f32) = (SMALL / 2.0, 62.0, 104.0, 9.0); // cx, cy, diâmetro, espessura
 const M_RING: (f32, f32, f32, f32) = (77.0, MEDIUM_H / 2.0, 110.0, 8.0);
 const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
@@ -573,6 +573,12 @@ impl Kind for Pomodoro {
     }
 
     /// Roda do mouse: um minuto a mais ou a menos (parado no início, muda a duração da fase).
+    fn uses_wheel(&self, x: f32, y: f32, mode: Mode) -> bool {
+        // numa pilha, o tempo pela roda só em cima do anel
+        let (cx, cy, d, _) = Self::ring(mode);
+        (x - cx).hypot(y - cy) <= d / 2.0 + 6.0
+    }
+
     fn wheel(&mut self, _x: f32, _y: f32, steps: f32, _mode: Mode, ctx: &mut Ctx) {
         let n = steps.round();
         let delta = 60.0 * if n != 0.0 { n as f64 } else if steps > 0.0 { 1.0 } else { -1.0 };

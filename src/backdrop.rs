@@ -249,6 +249,7 @@ impl Backdrop {
                 *c = (*c as f32 + (t - *c as f32) * amount).round() as u8;
             }
         }
+        grain(&mut base, x, y);
         finish_glass(&base.to_image(), content, radius, self.scale_for(x, y))
     }
 }
@@ -268,6 +269,32 @@ pub fn finish_glass(base: &Image, content: &Image, radius: f32, s: f32) -> Image
     c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
     c.pop_clip();
     c.finish()
+}
+
+/// quanto o granulado do vidro clareia ou escurece cada pixel, no máximo (de 0 a 255)
+pub const GRAIN: f32 = 2.5;
+
+/// Um granulado quase invisível no vidro (o pedaço `base` do fundo, com o canto em (x, y) na
+/// tela): os degradês grandes e escuros do vidro formavam faixas visíveis, e o ruído as desfaz.
+/// O grão é preso à tela, e não ao cartão: arrastando o widget, ele não "nada" junto.
+pub fn grain(base: &mut Rgb, x: i32, y: i32) {
+    let w = base.w as i32;
+    for (i, p) in base.px.chunks_exact_mut(3).enumerate() {
+        let (px, py) = (x + i as i32 % w, y + i as i32 / w);
+        let n = (noise(px, py) - 0.5) * 2.0 * GRAIN;
+        for c in p.iter_mut() {
+            *c = (*c as f32 + n).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// Um número de 0 a 1 que parece sorteado, mas é sempre o mesmo para o mesmo pixel.
+fn noise(x: i32, y: i32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd816_3841);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x5bd1_e995);
+    h ^= h >> 15;
+    (h & 0xffff) as f32 / 65535.0
 }
 
 fn load_wallpaper(path: &str) -> Option<Image> {
@@ -302,6 +329,31 @@ impl Backdrop {
                 *c = (*c as f32 + (tc - *c as f32) * amount).round() as u8;
             }
         }
+        grain(&mut base, x, y);
         finish_glass(&base.to_image(), content, radius, s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O granulado é leve, preso à tela e não muda a cor média do vidro.
+    #[test]
+    fn grain_is_faint_fixed_to_the_screen_and_neutral() {
+        let flat = Rgb::filled(64, 64, (40, 40, 48));
+        let mut a = Rgb::filled(64, 64, (40, 40, 48));
+        grain(&mut a, 100, 200);
+        let diffs: Vec<i32> = a.px.iter().zip(&flat.px).map(|(x, y)| *x as i32 - *y as i32).collect();
+        assert!(diffs.iter().all(|d| d.abs() <= GRAIN.ceil() as i32), "forte demais");
+        assert!(diffs.iter().any(|d| *d != 0), "sem grão");
+        let mean = diffs.iter().sum::<i32>() as f32 / diffs.len() as f32;
+        assert!(mean.abs() < 0.3, "mudou a cor média: {mean}");
+        // o mesmo pedaço da tela tem o mesmo grão, venha de que cartão vier
+        let mut b = Rgb::filled(64, 64, (40, 40, 48));
+        grain(&mut b, 99, 200);
+        assert_eq!(&a.px[..63 * 3], &b.px[3..64 * 3]);
+        // sem cinza puro saindo colorido: os três canais mexem juntos
+        assert!(a.px.chunks(3).all(|p| p[0] as i32 - 40 == p[2] as i32 - 48));
     }
 }
