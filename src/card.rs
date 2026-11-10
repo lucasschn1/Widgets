@@ -92,6 +92,10 @@ const PRESS_WHOLE: f32 = 0.2;
 /// tamanho com mola enquanto aparece. A duração e quanto eles encolhem.
 pub const SWAP_MS: f32 = 380.0;
 const SWAP_SHRINK: f32 = 0.06;
+/// As bolinhas da pilha, como no macOS: fora do cartão, do lado direito, sem fundo. Aparecem ao
+/// trocar de widget, ficam este tempo e somem neste outro.
+const DOTS_SHOW_MS: f32 = 1000.0;
+const DOTS_FADE_MS: f32 = 300.0;
 
 /// O esqueleto pulsando enquanto o widget busca os dados pela primeira vez: o ciclo e a
 /// opacidade dos blocos, do mais fraco ao mais forte.
@@ -149,8 +153,10 @@ pub struct Card {
     pub stacked: bool,
     /// numa pilha: a troca de widget em andamento (desde quando, true = este entra)
     pub swap: Option<(Instant, bool)>,
-    /// numa pilha: a posição deste widget e quantos são (os pontinhos na borda direita)
+    /// numa pilha: a posição deste widget e quantos são (as bolinhas ao lado do cartão)
     pub dots: Option<(usize, usize)>,
+    /// quando as bolinhas apareceram (ao trocar de widget); somem sozinhas logo depois
+    pub dots_at: Option<Instant>,
     /// arrastando outro widget por cima deste: soltar empilha os dois
     pub drop_hint: bool,
 }
@@ -195,6 +201,7 @@ impl Card {
             stacked: false,
             swap: None,
             dots: None,
+            dots_at: None,
             drop_hint: false,
         }
     }
@@ -232,22 +239,37 @@ impl Card {
         }
     }
 
-    /// Os pontinhos da pilha, na borda direita (com o mouse em cima ou trocando).
+    /// Quanto as bolinhas da pilha aparecem agora (0 a 1): inteiras logo depois da troca,
+    /// sumindo em seguida.
+    fn dots_alpha(&self) -> f32 {
+        let Some(at) = self.dots_at else { return 0.0 };
+        let ms = at.elapsed().as_secs_f32() * 1000.0;
+        if ms < DOTS_SHOW_MS {
+            1.0
+        } else {
+            1.0 - ease_in_out(((ms - DOTS_SHOW_MS) / DOTS_FADE_MS).min(1.0))
+        }
+    }
+
+    /// As bolinhas da pilha, como no macOS: fora do cartão, na margem transparente do lado
+    /// direito, sem fundo (não cobrem nada do widget); a do widget de cima mais forte. Com uma
+    /// sombra bem leve, para aparecer também em papéis de parede claros.
     fn draw_dots(&self, c: &mut Canvas) {
         let Some((at, n)) = self.dots else { return };
-        let a = if self.swap.is_some() { 1.0 } else { self.hover };
-        if a <= 0.0 || n < 2 {
+        let a = self.dots_alpha();
+        // (o que está saindo não desenha: as do que entra já estão no mesmo lugar)
+        if a <= 0.0 || n < 2 || matches!(self.swap, Some((_, false))) {
             return;
         }
         let lay = self.layout(self.mode);
-        let (gap, r) = (8.0, 2.2);
-        let x = MARGIN + lay.w - 7.0;
+        let (gap, r) = (7.0, 2.6);
+        let x = MARGIN + lay.w + MARGIN / 2.0;
         let y0 = MARGIN + lay.h / 2.0 - gap * (n - 1) as f32 / 2.0;
-        // um fundo de vidro escuro atrás deles, para aparecer em cima de qualquer conteúdo
-        c.fill_round_rect(x - 4.5, y0 - 6.0, x + 4.5, y0 + gap * (n - 1) as f32 + 6.0, 4.5, Rgba(20, 20, 26, (130.0 * a) as u8));
         for k in 0..n {
-            let col = if k == at { FG.alpha(0.95 * a) } else { FG.alpha(0.35 * a) };
-            c.fill_circle(x, y0 + gap * k as f32, r, col);
+            let y = y0 + gap * k as f32;
+            c.fill_circle(x, y + 0.4, r + 0.7, Rgba(0, 0, 0, (45.0 * a) as u8));
+            let col = if k == at { WHITE.alpha(0.95 * a) } else { WHITE.alpha(0.4 * a) };
+            c.fill_circle(x, y, r, col);
         }
     }
 
@@ -884,7 +906,9 @@ impl Card {
     }
 
     pub fn next_frame(&self) -> Option<Instant> {
-        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() || (self.swap.is_some() && !self.swap_done()) {
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() || (self.swap.is_some() && !self.swap_done())
+            || self.dots_at.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < DOTS_SHOW_MS + DOTS_FADE_MS)
+        {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
         }
         let mut wait = None;
@@ -969,6 +993,30 @@ mod tests {
         c.stale = false;
         c.set_mode_now(Mode::G);
         assert!(c.content.is_some() && !c.stale);
+    }
+
+    /// As bolinhas da pilha aparecem ao trocar de widget e somem sozinhas logo depois (como no
+    /// macOS), sem depender do mouse.
+    #[test]
+    fn stack_dots_show_on_a_switch_and_then_fade() {
+        let mut c = card();
+        c.dots = Some((1, 3));
+        assert_eq!(c.dots_alpha(), 0.0);
+        c.set_hover(true);
+        c.hover = 1.0;
+        assert_eq!(c.dots_alpha(), 0.0, "só o mouse em cima não mostra");
+        c.dots_at = Some(Instant::now());
+        assert_eq!(c.dots_alpha(), 1.0);
+        assert!(c.next_frame().is_some(), "redesenha para sumir");
+        c.dots_at = Some(Instant::now() - Duration::from_millis((DOTS_SHOW_MS + DOTS_FADE_MS / 2.0) as u64));
+        let mid = c.dots_alpha();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        c.dots_at = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(c.dots_alpha(), 0.0);
+        // e ficam na margem transparente, fora do cartão (sem passar da janela)
+        let lay = c.layout(c.mode);
+        let x = MARGIN + lay.w + MARGIN / 2.0;
+        assert!(x - 3.3 > MARGIN + lay.w && x + 3.3 < 2.0 * MARGIN + lay.w);
     }
 
     /// Numa pilha: o que entra cresce até o tamanho (com mola) enquanto aparece, o que sai

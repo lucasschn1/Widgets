@@ -1,5 +1,6 @@
 //! Pilhas de widgets, como as do iPhone e do Mac: vários widgets no mesmo lugar, um por vez,
-//! trocando com a roda do mouse (os pontinhos na borda direita dizem qual é qual). Para empilhar,
+//! trocando com a roda do mouse (ao trocar, bolinhas ao lado do cartão dizem qual é qual, como no
+//! macOS). Para empilhar,
 //! arraste um widget e solte no meio de outro; para tirar, clique direito → "Tirar da pilha".
 //!
 //! Cada widget continua sendo um cartão completo, com a janela dele: os de baixo ficam escondidos
@@ -258,6 +259,8 @@ impl App {
             c.hot = None;
             c.pressing = false;
         }
+        // as bolinhas aparecem (ao lado do cartão) e somem sozinhas logo depois
+        self.cards[b].dots_at = Some(now);
         // o mouse está em cima: o novo já entra como se o mouse tivesse entrado nele
         self.cards[b].hover = hover;
         self.cards[b].set_hover(true);
@@ -324,6 +327,7 @@ impl App {
         }
         self.show_drop_hint(None);
         self.apply_stacks();
+        self.cards[i].dots_at = Some(Instant::now());
         self.cards[i].refresh(&self.sh);
         self.cards[i].present(&self.sh, true);
         self.moved(i);

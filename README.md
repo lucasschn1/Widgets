@@ -272,8 +272,8 @@ mover, é só arrastar: eles se encaixam uns nos outros e nas bordas da tela (se
 soltar livre).
 
 **Pilhas.** Solte um widget no meio de outro e os dois viram uma pilha, como no iPhone: ocupam o
-lugar de um só e a roda do mouse troca entre eles (os pontinhos na borda direita dizem qual é
-qual). Em cima das horas do Tempo, da lista do GitHub, da barra de volume do Tocando agora e do
+lugar de um só e a roda do mouse troca entre eles (ao trocar, bolinhas ao lado do cartão dizem
+qual é qual, como no macOS). Em cima das horas do Tempo, da lista do GitHub, da barra de volume do Tocando agora e do
 anel do Pomodoro, a roda continua fazendo o que faz no widget. Para desfazer, clique direito →
 **Tirar da pilha**.
 
