@@ -481,7 +481,10 @@ impl Battery {
         c.arc(g.cx, g.cy, g.r, START, START + SWEEP, TRACK, g.w);
         if let Some(at) = self.plug_at.filter(|&t| ms_since(t) < RIPPLE_MS) {
             let t = ease_out(ms_since(at) / RIPPLE_MS);
-            c.stroke_circle(g.cx, g.cy, g.r * (1.0 + 0.5 * t), OK.alpha(0.7 * (1.0 - t)), g.w * 0.6 * (1.0 - t) + 1.0);
+            // (cresce até 6 pt da borda do cartão, no máximo: com o anel mais perto da borda, na
+            // margem de 16, a onda de 50% a mais encostava nela)
+            let room = (g.cx.min(g.cy) - 6.0 - g.r - g.w).clamp(4.0, 0.5 * g.r);
+            c.stroke_circle(g.cx, g.cy, g.r + room * t, OK.alpha(0.7 * (1.0 - t)), g.w * 0.6 * (1.0 - t) + 1.0);
         }
         let color = level_color(self.power.as_ref().map_or(v, |p| p.percent));
         if v > 0.05 {
@@ -1615,7 +1618,10 @@ mod tests {
         com();
         let env_cfg = json!({"bateria": {}, "app": {}});
         let env = Env { cfg: &env_cfg, key: "bateria" };
-        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_plugging(300), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)] {
+        // (a onda de ligar na tomada em vários pontos do caminho: dependendo de quanto demorava o
+        // teste, ela passava ou não perto da borda)
+        let waves = [100, 300, 450, 600].map(Battery::sample_plugging);
+        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)].into_iter().chain(waves) {
             for mode in Mode::ALL {
                 let l = Layout::of(mode);
                 let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
