@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::sky::{self, Weather};
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
+use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -26,7 +26,7 @@ use crate::util;
 use crate::win;
 
 const W: f32 = WIDE;
-const PAD: f32 = 16.0;
+const PAD: f32 = CARD_PAD;
 const M_H: f32 = MEDIUM_H;
 /// colunas de horas visíveis na faixa
 const HOURS: usize = 6;
@@ -35,8 +35,8 @@ const NEXT_HOURS: usize = 24;
 const STRIP_H: f32 = 66.0;
 // tela principal, com respiro (como o Tempo da Apple): margem maior, a temperatura solta das
 // horas e, no grande, 5 dias em linhas altas
-const M_PAD: f32 = 18.0;
-const G_PAD: f32 = 20.0;
+const M_PAD: f32 = CARD_PAD;
+const G_PAD: f32 = CARD_PAD;
 const M_HOURS_Y: f32 = 88.0;
 const G_HOURS_Y: f32 = 110.0;
 /// grande: a linha que separa as horas dos dias, o aviso de chuva e os dias
@@ -71,7 +71,7 @@ fn event_label_size(c: &Canvas, text: &str, max_w: f32) -> f32 {
 fn top_desc_size(big: bool) -> f32 {
     if big { 13.5 } else { 12.5 }
 }
-const RAIN_BLUE: Rgba = Rgba::rgb(110, 200, 255);
+const RAIN_BLUE: Rgba = CYAN;
 /// faixa do índice UV: baixo, moderado, alto, muito alto e extremo
 const UV_STOPS: [(f32, Rgba); 5] =
     [(0.0, Rgba::rgb(48, 209, 88)), (0.3, Rgba::rgb(255, 214, 10)), (0.55, Rgba::rgb(255, 159, 10)), (0.8, Rgba::rgb(255, 69, 58)), (1.0, Rgba::rgb(191, 90, 242))];
@@ -1044,6 +1044,8 @@ impl Tempo {
                 c.text(W - pad, dy, wx.str_of("desc").unwrap_or(""), Face::Semibold, top_desc_size(big), FG, Anchor::RA, Some(max_w));
                 c.text(W - pad, my, &self.minmax(), Face::Regular, if big { 12.0 } else { 11.0 }, MUTED, Anchor::RA, None);
             }
+            // buscando pela primeira vez: o esqueleto do cartão fica no lugar do texto
+            None if self.first_load() => {}
             None => {
                 c.text(W - pad, 40.0, &self.weather_msg, Face::Semibold, 12.0, FG, Anchor::RA, Some(170.0));
             }
@@ -1156,6 +1158,7 @@ impl Tempo {
                 }
                 c.text(x, 121.0, &self.minmax(), Face::Regular, 11.0, MUTED, Anchor::LA, Some(w));
             }
+            None if self.first_load() => {}
             None => {
                 for (k, line) in c.wrap(&self.weather_msg, Face::Semibold, 12.0, w, 3).iter().enumerate() {
                     c.text(x, 92.0 + 16.0 * k as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
@@ -1191,6 +1194,45 @@ impl Tempo {
                 self.draw_days(c);
             }
         }
+    }
+
+    /// Buscando o tempo pela primeira vez (ainda sem nada para mostrar).
+    fn first_load(&self) -> bool {
+        self.weather.is_none() && self.status.loading
+    }
+
+    /// O esqueleto da primeira busca: a condição e a mínima/máxima no alto e, no médio e no
+    /// grande, as colunas das horas (e as linhas dos dias, no grande).
+    fn skeleton_blocks(&self, mode: Mode) -> Vec<Hot> {
+        if !self.first_load() {
+            return Vec::new();
+        }
+        if mode == Mode::P {
+            return vec![(16.0, 96.0, 104.0, 108.0, 4.0), (16.0, 118.0, 74.0, 128.0, 4.0)];
+        }
+        let big = mode == Mode::G;
+        let pad = if big { G_PAD } else { M_PAD };
+        let (dy, my) = if big { (48.0, 67.0) } else { (40.0, 57.0) };
+        let mut v = vec![(W - pad - 104.0, dy + 1.0, W - pad, dy + 13.0, 4.0), (W - pad - 64.0, my + 1.0, W - pad, my + 11.0, 4.0)];
+        let (x0, x1) = main_strip_bounds(mode);
+        let y = main_hours_y(mode);
+        let col = (x1 - x0) / HOURS as f32;
+        let (icon_y, temp_y) = if big { (17.0, 52.0) } else { (16.0, 43.0) };
+        for i in 0..HOURS {
+            let cx = x0 + col * (i as f32 + 0.5);
+            v.push((cx - 11.0, y + 1.0, cx + 11.0, y + 10.0, 3.0));
+            v.push((cx - 10.0, y + icon_y + 1.0, cx + 10.0, y + icon_y + 21.0, 6.0));
+            v.push((cx - 9.0, y + temp_y + 1.0, cx + 9.0, y + temp_y + 12.0, 3.0));
+        }
+        if big {
+            let (top, row) = self.days_geom();
+            for i in 0..G_DAYS {
+                let cy = top + row * (i as f32 + 0.5);
+                v.push((G_PAD, cy - 5.0, G_PAD + 60.0, cy + 5.0, 4.0));
+                v.push((W - G_PAD - 150.0, cy - 2.5, W - G_PAD, cy + 2.5, 2.5));
+            }
+        }
+        v
     }
 
     /// O aviso de chuva das próximas horas, quando há.
@@ -1715,6 +1757,21 @@ impl Kind for Tempo {
         }
     }
 
+    fn uses_wheel(&self, _x: f32, y: f32, mode: Mode) -> bool {
+        if !self.navigable() || mode == Mode::P {
+            return false;
+        }
+        match self.view_for(mode) {
+            // na tela principal, só em cima da faixa das horas
+            View::Main => {
+                let top = main_hours_y(mode);
+                (top - 4.0..=top + main_strip_h(mode) + 4.0).contains(&y)
+            }
+            View::Day(_) => true,
+            View::Details => Self::pages(mode) > 1,
+        }
+    }
+
     fn wheel(&mut self, _x: f32, y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
         if !self.navigable() {
             return;
@@ -1857,6 +1914,10 @@ impl Kind for Tempo {
         self.status.clone()
     }
 
+    fn skeleton(&self, mode: Mode) -> Vec<Hot> {
+        self.skeleton_blocks(mode)
+    }
+
     fn retry(&mut self, ctx: &mut Ctx) {
         self.update_weather(ctx);
     }
@@ -1938,6 +1999,16 @@ impl Tempo {
         t.fixed_hour = Some(14.25);
         // a entrada dos painéis já terminou
         t.view_at.set(Instant::now() - Duration::from_secs(5));
+        t
+    }
+
+    /// Buscando o tempo pela primeira vez (o esqueleto no lugar da condição e das horas).
+    #[cfg(test)]
+    pub fn sample_loading() -> Tempo {
+        let cfg = json!({"tempo": {"city": "Florianópolis"}, "app": {}});
+        let mut t = Tempo::new(&cfg, &json!({}));
+        t.weather = None;
+        t.status.loading = true;
         t
     }
 

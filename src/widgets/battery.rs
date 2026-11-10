@@ -23,9 +23,9 @@ use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
 
 // ---------- cores e fontes ----------
-const OK: Rgba = Rgba::rgb(52, 209, 122);
-const MID: Rgba = Rgba::rgb(245, 184, 61);
-const LOW: Rgba = Rgba::rgb(255, 90, 78);
+const OK: Rgba = crate::theme::GREEN;
+const MID: Rgba = crate::theme::AMBER;
+const LOW: Rgba = crate::theme::RED;
 const TRACK: Rgba = Rgba(255, 255, 255, 30);
 const LINE: Rgba = Rgba(255, 255, 255, 26);
 const NUM: Face = Face::Custom("Outfit", 300);
@@ -65,8 +65,10 @@ impl Ring {
 }
 
 const RING_P: Ring = Ring { cx: SMALL / 2.0, cy: 79.0, r: 55.0, w: 10.0 };
-const RING_M: Ring = Ring { cx: 68.0, cy: 70.0, r: 44.0, w: 9.0 };
-const RING_G: Ring = Ring { cx: 86.0, cy: 132.0, r: 54.0, w: 10.0 };
+const RING_M: Ring = Ring { cx: 64.0, cy: 70.0, r: 44.0, w: 9.0 };
+const RING_G: Ring = Ring { cx: 80.0, cy: 132.0, r: 54.0, w: 10.0 };
+/// a margem de dentro do cartão (a mesma de todos os widgets)
+const PAD: f32 = super::CARD_PAD;
 
 // ---------- as animações ----------
 const FRAME: Duration = Duration::from_millis(16);
@@ -130,6 +132,11 @@ fn keeps_left(shown: f64, estimate: f64) -> bool {
     (estimate - shown).abs() <= (estimate * 0.04).max(120.0)
 }
 
+/// Uma leitura que pula pelo menos isto da carga de antes (sem entrar nem sair da tomada) é
+/// estranha, e espera até `DOUBT_READINGS` leituras para ser aceita.
+const JUMP: f32 = 10.0;
+const DOUBT_READINGS: u8 = 2;
+
 /// O consumo médio novo, com a leitura `mw` feita `dt` segundos depois da anterior.
 fn smooth_drain(avg: Option<f32>, mw: f32, dt: f32) -> f32 {
     match avg {
@@ -187,6 +194,8 @@ pub struct Battery {
     shimmering: bool,
     /// os aparelhos já avisados de pouca bateria (de novo só depois de carregar)
     warned: Vec<String>,
+    /// leituras estranhas seguidas que ainda esperam confirmação (ver `steady`)
+    doubt: u8,
 }
 
 impl Battery {
@@ -226,6 +235,7 @@ impl Battery {
             mode_seen: Cell::new(None),
             shimmering: false,
             warned: Vec::new(),
+            doubt: 0,
         }
     }
 
@@ -479,7 +489,10 @@ impl Battery {
         c.arc(g.cx, g.cy, g.r, START, START + SWEEP, TRACK, g.w);
         if let Some(at) = self.plug_at.filter(|&t| ms_since(t) < RIPPLE_MS) {
             let t = ease_out(ms_since(at) / RIPPLE_MS);
-            c.stroke_circle(g.cx, g.cy, g.r * (1.0 + 0.5 * t), OK.alpha(0.7 * (1.0 - t)), g.w * 0.6 * (1.0 - t) + 1.0);
+            // (cresce até 6 pt da borda do cartão, no máximo: com o anel mais perto da borda, na
+            // margem de 16, a onda de 50% a mais encostava nela)
+            let room = (g.cx.min(g.cy) - 6.0 - g.r - g.w).clamp(4.0, 0.5 * g.r);
+            c.stroke_circle(g.cx, g.cy, g.r + room * t, OK.alpha(0.7 * (1.0 - t)), g.w * 0.6 * (1.0 - t) + 1.0);
         }
         let color = level_color(self.power.as_ref().map_or(v, |p| p.percent));
         if v > 0.05 {
@@ -677,12 +690,12 @@ impl Battery {
     fn draw_medium(&self, c: &mut Canvas) {
         if self.power.is_none() {
             // um PC de mesa: só os aparelhos
-            c.text(20.0, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
-            c.text(20.0, 33.0, &self.header_line(), TEXT, 10.5, MUTED, Anchor::LA, None);
+            c.text(PAD, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
+            c.text(PAD, 33.0, &self.header_line(), TEXT, 10.5, MUTED, Anchor::LA, None);
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 82.0, WIDE - 40.0);
+                self.draw_no_devices(c, WIDE / 2.0, 82.0, WIDE - 2.0 * PAD);
             } else {
-                self.draw_rows(c, 20.0, 56.0, WIDE - 40.0, 23.0, 4);
+                self.draw_rows(c, PAD, 56.0, WIDE - 2.0 * PAD, 23.0, 4);
             }
             return;
         }
@@ -694,19 +707,19 @@ impl Battery {
         if self.devices.is_empty() {
             self.draw_no_devices(c, 226.0, 56.0, 150.0);
         } else {
-            self.draw_rows(c, 148.0, 22.0, 152.0, 29.0, 4);
+            self.draw_rows(c, 146.0, 22.0, WIDE - PAD - 146.0, 29.0, 4);
         }
     }
 
     fn draw_large(&self, c: &mut Canvas) {
-        c.text(22.0, 20.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 14.0, FG, Anchor::LA, None);
+        c.text(PAD, 20.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 14.0, FG, Anchor::LA, None);
         let (before, t) = self.rolled(|r| &r.header);
-        draw_rolling(c, 22.0, 41.0, &self.header_line(), before, t, TEXT, 10.5, MUTED, Anchor::LA, Some(WIDE - 44.0));
+        draw_rolling(c, PAD, 41.0, &self.header_line(), before, t, TEXT, 10.5, MUTED, Anchor::LA, Some(WIDE - 2.0 * PAD));
         let Some(p) = self.power.clone() else {
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 44.0);
+                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 2.0 * PAD);
             } else {
-                self.draw_rows(c, 22.0, 70.0, WIDE - 44.0, 26.0, 14);
+                self.draw_rows(c, PAD, 70.0, WIDE - 2.0 * PAD, 26.0, 14);
             }
             return;
         };
@@ -724,22 +737,22 @@ impl Battery {
             ("Na tomada hoje", today.map_or("—".into(), duration)),
             ("Maior tempo fora", longest.map_or("—".into(), duration)),
         ];
-        let (sx0, sx1) = (176.0, WIDE - 22.0);
+        let (sx0, sx1) = (170.0, WIDE - PAD);
         for (i, (k, v)) in stats.iter().enumerate() {
             let y = 92.0 + i as f32 * 25.0;
             c.text(sx0, y, k, TEXT, 10.5, MUTED, Anchor::LA, None);
             c.text(sx1, y, v, TEXT, 11.0, FG, Anchor::RA, None);
             c.fill_round_rect(sx0, y + 18.0, sx1, y + 19.0, 0.0, LINE);
         }
-        c.fill_round_rect(22.0, 212.0, WIDE - 22.0, 213.0, 0.0, LINE);
-        c.text(22.0, 224.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LA, None);
-        c.text(WIDE - 22.0, 226.0, "verde: na tomada", TEXT, 10.0, MUTED, Anchor::RA, None);
-        self.draw_chart(c, 22.0, 246.0, WIDE - 22.0, 300.0);
-        c.fill_round_rect(22.0, 328.0, WIDE - 22.0, 329.0, 0.0, LINE);
+        c.fill_round_rect(PAD, 212.0, WIDE - PAD, 213.0, 0.0, LINE);
+        c.text(PAD, 224.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LA, None);
+        c.text(WIDE - PAD, 226.0, "verde: na tomada", TEXT, 10.0, MUTED, Anchor::RA, None);
+        self.draw_chart(c, PAD, 246.0, WIDE - PAD, 300.0);
+        c.fill_round_rect(PAD, 328.0, WIDE - PAD, 329.0, 0.0, LINE);
         if self.devices.is_empty() {
-            self.draw_no_devices(c, WIDE / 2.0, 360.0, WIDE - 44.0);
+            self.draw_no_devices(c, WIDE / 2.0, 360.0, WIDE - 2.0 * PAD);
         } else {
-            self.draw_rows(c, 22.0, 342.0, WIDE - 44.0, 25.0, 4);
+            self.draw_rows(c, PAD, 342.0, WIDE - 2.0 * PAD, 25.0, 4);
         }
     }
 
@@ -861,6 +874,24 @@ impl Battery {
     }
 
     // ---------- atualização ----------
+
+    /// A leitura a usar: uma estranha de um instante fica esperando a próxima confirmar. O
+    /// Windows às vezes devolve, por uma leitura, "sem bateria" ou uma carga muito diferente
+    /// (voltando da suspensão, por exemplo); acreditando nela, o anel sumia (ou descia até perto
+    /// de zero) e o tempo restante pulava, até a leitura seguinte, 5 s depois.
+    fn steady(&mut self, new: Option<Power>) -> Option<Power> {
+        let odd = match (&self.power, &new) {
+            (Some(_), None) => true,
+            (Some(o), Some(n)) => o.plugged == n.plugged && (o.percent - n.percent).abs() >= JUMP,
+            _ => false,
+        };
+        if odd && self.doubt < DOUBT_READINGS {
+            self.doubt += 1;
+            return self.power.clone();
+        }
+        self.doubt = 0;
+        new
+    }
 
     /// Os textos de agora: a porcentagem, a linha de baixo do anel e a de cima.
     fn current_texts(&self) -> (String, String, String) {
@@ -1239,7 +1270,8 @@ impl Kind for Battery {
             let now = Instant::now();
             if now >= self.next_power {
                 self.next_power = now + POWER_EVERY;
-                redraw |= self.apply_power(battery::power());
+                let reading = self.steady(battery::power());
+                redraw |= self.apply_power(reading);
                 self.sample_now(ctx);
             }
             if now >= self.next_devices && self.reading.is_none() {
@@ -1510,6 +1542,65 @@ mod tests {
         println!("{}", path.display());
     }
 
+    /// Uma leitura estranha de um instante ("sem bateria", ou a carga pulando de 65% para 0%)
+    /// não apaga o anel: espera a próxima. Se ela se confirmar, aí vale.
+    #[test]
+    fn odd_readings_wait_for_the_next_one() {
+        let mut b = Battery::sample();
+        let ok = b.power.clone().unwrap();
+        // "sem bateria" por uma leitura: fica a de antes
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(Some(ok.clone())), Some(ok.clone()));
+        // a carga pulando para 0% e voltando: o 0% nunca aparece
+        let mut zero = ok.clone();
+        zero.percent = 0.0;
+        assert_eq!(b.steady(Some(zero.clone())), Some(ok.clone()));
+        assert_eq!(b.steady(Some(ok.clone())), Some(ok.clone()));
+        // mudanças normais passam na hora (1% a menos, ligar na tomada mesmo com salto)
+        let mut less = ok.clone();
+        less.percent -= 1.0;
+        assert_eq!(b.steady(Some(less.clone())), Some(less.clone()));
+        let mut plugged = less.clone();
+        (plugged.plugged, plugged.percent) = (true, 40.0);
+        assert_eq!(b.steady(Some(plugged.clone())), Some(plugged.clone()));
+        // uma mudança de verdade (a bateria saiu): vale depois de se repetir
+        b.power = Some(ok.clone());
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(None), None);
+    }
+
+    /// Passando por leituras estranhas e animações, o anel termina desenhado com a cor da
+    /// carga (o verde da bateria não some).
+    #[test]
+    fn the_ring_keeps_its_color_through_odd_readings() {
+        com();
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let mut b = Battery::sample();
+        let mut p = b.power.clone().unwrap();
+        p.percent = 65.0;
+        let mut zero = p.clone();
+        zero.percent = 0.0;
+        for reading in [Some(p.clone()), None, Some(p.clone()), Some(zero), Some(p.clone()), Some(p.clone())] {
+            let r = b.steady(reading);
+            b.apply_power(r);
+            // a animação de cada mudança terminou
+            b.grow = b.grow.map(|(f, t, at, d)| (f, t, at - Duration::from_secs(5), d));
+            b.roll = None;
+        }
+        assert_eq!(b.shown(), 65.0);
+        let l = Layout::of(Mode::M);
+        let mut c = Canvas::new(l.w as u32, l.h as u32, 1.0);
+        b.draw(&mut c, Mode::M, &env);
+        let img = c.finish();
+        // um ponto no meio do arco (a 30% do caminho): verde
+        let (x, y) = RING_M.at(30.0);
+        let i = ((y.round() as u32 * img.w + x.round() as u32) * 4) as usize;
+        let (bl, g, r) = (img.px[i] as i32, img.px[i + 1] as i32, img.px[i + 2] as i32);
+        assert!(g > 150 && g > r + 40 && g > bl + 20, "o arco não está verde: {:?}", (r, g, bl));
+    }
+
     /// Depois que uma animação acaba, mais um quadro é desenhado: o último podia ficar no meio do
     /// caminho (o arco ou os dígitos pela metade) até o mouse passar em cima.
     #[test]
@@ -1613,7 +1704,10 @@ mod tests {
         com();
         let env_cfg = json!({"bateria": {}, "app": {}});
         let env = Env { cfg: &env_cfg, key: "bateria" };
-        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_plugging(300), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)] {
+        // (a onda de ligar na tomada em vários pontos do caminho: dependendo de quanto demorava o
+        // teste, ela passava ou não perto da borda)
+        let waves = [100, 300, 450, 600].map(Battery::sample_plugging);
+        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)].into_iter().chain(waves) {
             for mode in Mode::ALL {
                 let l = Layout::of(mode);
                 let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);

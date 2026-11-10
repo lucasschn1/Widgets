@@ -23,6 +23,8 @@ mod screens;
 pub(crate) mod island;
 #[path = "app_perch.rs"]
 mod perch;
+#[path = "app_stack.rs"]
+mod stack;
 use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
@@ -47,6 +49,10 @@ const M_QUIT: u32 = 300_009;
 const M_EDIT: u32 = 300_010;
 const M_FOCUS_END: u32 = 300_011;
 const M_FOCUS: u32 = 300_020; // + minutos (0 = até desligar)
+/// as durações do modo foco no menu, em minutos (0 = até desligar). Só elas valem como comando:
+/// "M_FOCUS + qualquer número" engolia outros comandos (o "Tirar da pilha", 300_034, virava
+/// modo foco por 14 minutos)
+const FOCUS_MINUTES: [(&str, u32); 4] = [("30 minutos", 30), ("1 hora", 60), ("2 horas", 120), ("Até eu desligar", 0)];
 const M_WIDGET: u32 = 300_100; // + índice em widgets::KEYS
 const M_LAYOUT: u32 = 301_000; // + índice do layout
 const M_LAYOUT_DEL: u32 = 302_000; // + índice do layout
@@ -54,6 +60,7 @@ const M_SETTINGS: u32 = 300_030;
 const M_TIPS: u32 = 300_031;
 const M_GALLERY: u32 = 300_032;
 const M_SAVE_LAYOUT: u32 = 300_033;
+const M_UNSTACK: u32 = 300_034;
 
 // botões das pílulas
 const B_UNDO: u32 = 1;
@@ -138,7 +145,19 @@ pub struct App {
     island: Option<island::Island>,
     /// o Clawd na barra de tarefas
     perch: Option<perch::Perch>,
+    /// as pilhas de widgets (vários no mesmo lugar, trocando com a roda do mouse)
+    stacks: Vec<stack::Stack>,
+    /// a roda do mouse numa pilha: quanto girou e quando foi a última troca
+    stack_wheel: (f32, Instant),
+    /// arrastando: o widget em que o arrastado seria empilhado ao soltar
+    drop_target: Option<usize>,
     pub quit: bool,
+}
+
+/// Os minutos do modo foco de um comando do menu (None: não é do modo foco).
+fn focus_minutes(id: u32) -> Option<u32> {
+    let m = id.checked_sub(M_FOCUS)?;
+    FOCUS_MINUTES.iter().any(|f| f.1 == m).then_some(m)
 }
 
 /// Acorda o laço principal (para as threads que buscam dados).
@@ -198,6 +217,9 @@ impl App {
             keep_saved_pos: false,
             island: None,
             perch: None,
+            stacks: Vec::new(),
+            stack_wheel: (0.0, Instant::now()),
+            drop_target: None,
             quit: false,
         };
         let screens_change = app.begin_screens_startup();
@@ -212,6 +234,8 @@ impl App {
         for key in visible {
             app.create_card(key, true);
         }
+        // as pilhas antes de arrumar: os de baixo de cada uma não contam
+        app.restore_stacks();
         app.place_split_system();
         app.grow_old_small();
         app.clear_small_overlaps();
@@ -418,7 +442,7 @@ impl App {
                 let w = &self.sh.cfg[key];
                 let old_h = match (w.f64_of("altura"), w.str_of("altura_tamanho")) {
                     // nunca esteve na tela (instalação nova ou widget aberto agora): não havia altura antes
-                    _ if self.cards[i].temp || w.get("x").is_none() => None,
+                    _ if self.cards[i].temp || self.cards[i].stacked || w.get("x").is_none() => None,
                     (Some(h), Some(m)) if m == mode.code() => Some(h as f32),
                     (Some(_), Some(_)) => v36(key, mode),
                     // antes da 3.6, os que não estão na lista já tinham a altura da 3.6
@@ -433,7 +457,7 @@ impl App {
             .cards
             .iter()
             .zip(&olds)
-            .map(|(c, h)| c.card_rect_at(c.pos, h.map(|h| (c.card_size().0, (h * c.s).round() as i32))))
+            .map(|(c, h)| if c.stacked { stack::NOWHERE } else { c.card_rect_at(c.pos, h.map(|h| (c.card_size().0, (h * c.s).round() as i32))) })
             .collect();
         // de cima para baixo: quem está em cima abre espaço primeiro e leva junto os de baixo
         let mut order: Vec<usize> = (0..self.cards.len()).collect();
@@ -513,11 +537,12 @@ impl App {
         }
         let col = widgets::first_column(card.key());
         let bottom_of = |c: &&Card| c.card_rect().3;
-        let lowest = match self.cards.iter().filter(|c| widgets::first_column(c.key()) == col).max_by_key(bottom_of) {
+        let laid = || self.cards.iter().filter(|c| !c.stacked);
+        let lowest = match laid().filter(|c| widgets::first_column(c.key()) == col).max_by_key(bottom_of) {
             Some(c) => c,
             // o primeiro da coluna dele: começa uma coluna nova
             None if col > 0 => return self.new_column_pos(card),
-            None => self.cards.iter().max_by_key(bottom_of).unwrap(),
+            None => laid().max_by_key(bottom_of).unwrap_or(&self.cards[0]),
         };
         let (x, y) = card.below(lowest);
         let (_, _, _, bottom) = win::area_for(lowest.card_rect());
@@ -530,7 +555,7 @@ impl App {
     /// No alto de uma coluna nova, à esquerda de todos os widgets.
     fn new_column_pos(&self, card: &Card) -> (i32, i32) {
         let (s, (w, _), m) = (card.s, card.size(), card.margin);
-        let leftmost = self.cards.iter().min_by_key(|c| c.card_rect().0).unwrap();
+        let leftmost = self.cards.iter().filter(|c| !c.stacked).min_by_key(|c| c.card_rect().0).unwrap_or(&self.cards[0]);
         let (_, top, _, _) = win::area_for(leftmost.card_rect());
         (leftmost.card_rect().0 - (WIDGET_GAP * s).round() as i32 - (w - 2 * m) - m, top + (EDGE_GAP * s).round() as i32 - m)
     }
@@ -544,7 +569,7 @@ impl App {
     /// Widgets empilhados embaixo do retângulo (encaixados um no outro), em cadeia.
     fn stack_below(&self, i: usize, rect: Option<Rect>) -> Vec<usize> {
         let limit = ((WIDGET_GAP + 8.0) * self.cards[i].s) as i32;
-        let rects: Vec<Rect> = self.cards.iter().map(|c| c.card_rect()).collect();
+        let rects: Vec<Rect> = (0..self.cards.len()).map(|j| self.layout_rect(j)).collect();
         stack_in(&rects, i, rect.unwrap_or(rects[i]), limit)
     }
 
@@ -584,21 +609,23 @@ impl App {
                 let rect = self.cards[i].card_rect();
                 let busy = self.cards.iter().enumerate().any(|(j, o)| {
                     let (w, h) = win::overlap(rect, o.card_rect());
-                    j != i && w.min(h) > 0
+                    j != i && !o.stacked && w.min(h) > 0
                 });
                 if self.sh.editing || self.sh.peeking {
                     win::set_z(self.cards[i].hwnd, Z::Topmost);
                 }
                 if busy && place {
-                    let lowest = (0..self.cards.len()).filter(|&j| j != i).max_by_key(|&j| self.cards[j].card_rect().3).unwrap();
+                    let lowest = (0..self.cards.len()).filter(|&j| j != i && !self.cards[j].stacked).max_by_key(|&j| self.cards[j].card_rect().3).unwrap();
                     let to = self.cards[i].below(&self.cards[lowest]);
                     self.cards[i].slide_to(to, ANIM_MS, &self.sh);
                 }
             }
         } else if !on {
             if let Some(i) = self.find(key) {
-                // os widgets encaixados embaixo sobem para ocupar o lugar
-                let followers = if reflow { self.stack_below(i, None) } else { Vec::new() };
+                // os widgets encaixados embaixo sobem para ocupar o lugar (numa pilha, o próximo
+                // dela fica no lugar: ninguém sobe)
+                let in_stack = self.stack_of(key).is_some();
+                let followers = if reflow && !in_stack { self.stack_below(i, None) } else { Vec::new() };
                 let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
                 if key == "midia" {
                     self.drop_island();
@@ -615,6 +642,9 @@ impl App {
                     let j = if j > i { j - 1 } else { j };
                     let to = (self.cards[j].pos.0, self.cards[j].pos.1 - shift);
                     self.cards[j].slide_to(to, ANIM_MS, &self.sh);
+                }
+                if in_stack {
+                    self.apply_stacks();
                 }
             }
         }
@@ -670,12 +700,13 @@ impl App {
     /// `start`: para onde alguns já iam (os encaixados embaixo). Devolve quem muda de lugar.
     fn make_room(&self, i: usize, old: Rect, new: Rect, start: HashMap<usize, (i32, i32)>) -> Vec<(usize, (i32, i32))> {
         let now: Vec<(i32, i32)> = self.cards.iter().map(|c| c.slide.as_ref().map(|s| s.to).unwrap_or(c.pos)).collect();
-        let rects: Vec<Rect> = self.cards.iter().zip(&now).map(|(c, p)| c.card_rect_at(*p, None)).collect();
+        let rects: Vec<Rect> = self.cards.iter().zip(&now).map(|(c, p)| if c.stacked { stack::NOWHERE } else { c.card_rect_at(*p, None) }).collect();
         let below: Vec<Vec<usize>> = (0..self.cards.len()).map(|j| self.stack_below(j, None)).collect();
         let start_rects = start.iter().map(|(&j, &p)| (j, self.cards[j].card_rect_at(p, None))).collect();
         let s = self.cards[i].s;
         screens::make_room(i, old, new, &rects, &start_rects, &below, s, win::area_for)
             .into_iter()
+            .filter(|(j, _)| !self.cards[*j].stacked)
             .map(|(j, r)| {
                 let m = self.cards[j].margin;
                 (j, (r.0 - m, r.1 - m))
@@ -839,8 +870,7 @@ impl App {
         card.press = Some(Press { x: sx, y: sy, action });
         card.drag = None;
         if action.is_some() && card.hot.is_some() {
-            card.pressing = true;
-            card.press_anim = Some((Instant::now(), true));
+            card.press_down();
             card.present(&self.sh, false);
         }
         // o widget pode reagir já ao apertar (o Clawd pula), sem esperar soltar
@@ -854,8 +884,7 @@ impl App {
     fn on_release(&mut self, i: usize, x: i32, y: i32) {
         let press = self.cards[i].press.take();
         if self.cards[i].pressing {
-            self.cards[i].pressing = false;
-            self.cards[i].press_anim = Some((Instant::now(), false));
+            self.cards[i].press_up();
             self.cards[i].present(&self.sh, false);
         }
         if self.cards[i].drag.is_some() {
@@ -904,6 +933,10 @@ impl App {
         let (lx, ly) = self.cards[i].logical(x, y);
         let mode = self.cards[i].mode;
         let steps = delta as f32 / 120.0;
+        // numa pilha, a roda troca de widget (menos onde ele mesmo usa a roda)
+        if self.stack_wheel(i, steps, lx, ly) {
+            return;
+        }
         self.with_kind(i, |k, ctx| k.wheel(lx, ly, steps, mode, ctx));
         self.cards[i].refresh(&self.sh);
     }
@@ -935,7 +968,11 @@ impl App {
         let (ox, oy) = self.cards[i].drag.unwrap();
         let mut pos = (sx - ox, sy - oy);
         let free = win::key_down(0x12); // com Alt, solta o widget sem encaixar nem reordenar
-        let column = if free { None } else { self.column_at(i, pos) };
+        // no meio de outro widget: soltar empilha os dois
+        let target = if free { None } else { self.stack_target(i, pos) };
+        self.show_drop_hint(target);
+        self.drop_target = target;
+        let column = if free || target.is_some() { None } else { self.column_at(i, pos) };
         let mut targets: HashMap<usize, (i32, i32)> = HashMap::new();
         let mut guides = GuideLines::default();
         self.preview = None;
@@ -944,14 +981,14 @@ impl App {
             let (t, slot) = self.layout_column(i, &col, pos);
             targets = t;
             self.preview = slot;
-        } else if !free {
+        } else if !free && target.is_none() {
             let (p, g) = self.snap(i, pos);
             pos = p;
             guides = g;
         }
         self.guides.show(guides, self.cards[i].s);
         for j in 0..self.cards.len() {
-            if j == i {
+            if j == i || self.cards[j].stacked {
                 continue;
             }
             let to = targets.get(&j).or(self.rest.get(&j)).copied().unwrap_or(self.cards[j].pos);
@@ -966,7 +1003,7 @@ impl App {
         let followers = self.stack_below(i, None);
         let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
         self.rest = (0..self.cards.len())
-            .filter(|&j| j != i)
+            .filter(|&j| j != i && !self.cards[j].stacked)
             .map(|j| {
                 let p = self.cards[j].pos;
                 (j, if followers.contains(&j) { (p.0, p.1 - shift) } else { p })
@@ -1056,7 +1093,7 @@ impl App {
             ys.push((b - edge - h as f32, Some(b - edge), area));
         }
         for (j, other) in self.cards.iter().enumerate() {
-            if j == i {
+            if j == i || other.stacked {
                 continue;
             }
             let rect = other.card_rect();
@@ -1095,6 +1132,14 @@ impl App {
         self.guides.hide();
         self.cards[i].present(&self.sh, true);
         self.move_dirty = None;
+        // solto no meio de outro: empilha
+        if let Some(j) = self.drop_target.take() {
+            self.preview = None;
+            self.rest.clear();
+            self.stack_onto(i, j);
+            self.on_motion(i, x, y);
+            return;
+        }
         if let Some(slot) = self.preview.take() {
             self.cards[i].slide_to(slot, REORDER_MS, &self.sh); // para o espaço aberto na coluna
         } else {
@@ -1137,7 +1182,7 @@ impl App {
                 let when = until.map(|t| format!(" (até {})", win::clock_at(t))).unwrap_or_default();
                 vec![MenuItem::Cmd(format!("Sair do modo foco{when}"), M_FOCUS_END)]
             }
-            None => [("30 minutos", 30), ("1 hora", 60), ("2 horas", 120), ("Até eu desligar", 0)]
+            None => FOCUS_MINUTES
                 .iter()
                 .map(|(label, minutes)| MenuItem::Cmd(label.to_string(), M_FOCUS + minutes))
                 .collect(),
@@ -1177,6 +1222,9 @@ impl App {
                     sizes.iter().enumerate().map(|(n, &m)| MenuItem::Radio(m.name().into(), m == current && !temp, M_SIZE + n as u32)).collect(),
                 ));
             }
+            if self.stack_of(c.key()).is_some() {
+                items.push(MenuItem::Cmd("Tirar da pilha".into(), M_UNSTACK));
+            }
             let env = widgets::Env { cfg: &self.sh.cfg, key: c.key() };
             let own = c.kind.menu(&env);
             if !own.is_empty() {
@@ -1209,7 +1257,7 @@ impl App {
                 }
             }
             M_FOCUS_END => self.end_focus(),
-            id if (M_FOCUS..M_FOCUS + 1000).contains(&id) => self.start_focus(id - M_FOCUS),
+            id if focus_minutes(id).is_some() => self.start_focus(focus_minutes(id).unwrap_or(0)),
             id if (M_LAYOUT..M_LAYOUT + 1000).contains(&id) => {
                 if let Some(name) = self.layout_names().get((id - M_LAYOUT) as usize).cloned() {
                     self.apply_layout(&name);
@@ -1228,6 +1276,11 @@ impl App {
                 self.sh.save();
             }
             M_QUIT => self.exit(),
+            M_UNSTACK => {
+                if let Some(i) = card {
+                    self.unstack(i);
+                }
+            }
             M_CLOSE => {
                 if let Some(i) = card {
                     let key = self.cards[i].key();
@@ -1456,6 +1509,9 @@ impl App {
             if self.island.is_some() && self.cards[i].key() == "midia" {
                 continue; // está como ilha
             }
+            if self.cards[i].stacked {
+                continue; // embaixo de outro numa pilha
+            }
             events::show(self.cards[i].hwnd, true);
             self.send_to_back(i);
         }
@@ -1498,7 +1554,7 @@ impl App {
 
     /// Empilha os widgets em colunas a partir da direita da tela, com o espaço padrão.
     pub fn arrange(&mut self) {
-        let mut order: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].content.is_some() && !self.cards[i].temp).collect();
+        let mut order: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].content.is_some() && !self.cards[i].temp && !self.cards[i].stacked).collect();
         if order.is_empty() {
             return;
         }
@@ -1798,6 +1854,9 @@ impl App {
 
     pub fn run_timers(&mut self) {
         let now = Instant::now();
+        // as pilhas: as trocas que terminaram e os de baixo acompanhando o de cima
+        self.finish_swaps();
+        self.sync_stacks();
         self.tooltip.tick();
         self.menu.watch();
         self.panels_tick();
@@ -2043,7 +2102,20 @@ fn stack_in(rects: &[Rect], i: usize, top: Rect, limit: i32) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::stack_in;
+    use super::*;
+
+    /// Só as durações do menu ligam o modo foco: os outros comandos (como o "Tirar da pilha", que
+    /// caía no meio da faixa dele) chegam onde devem.
+    #[test]
+    fn menu_commands_do_not_fall_into_focus_mode() {
+        for id in [M_SETTINGS, M_TIPS, M_GALLERY, M_SAVE_LAYOUT, M_UNSTACK, M_PEEK, M_ARRANGE, M_LOCK, M_CLOSE, M_QUIT, M_EDIT, M_FOCUS_END] {
+            assert_eq!(focus_minutes(id), None, "{id}");
+        }
+        for (_, m) in FOCUS_MINUTES {
+            assert_eq!(focus_minutes(M_FOCUS + m), Some(m));
+        }
+        assert_eq!(focus_minutes(M_FOCUS + 14), None);
+    }
 
     #[test]
     fn stack_follows_the_chain_below() {

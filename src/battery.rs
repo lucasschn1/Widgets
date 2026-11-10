@@ -455,6 +455,20 @@ mod tests {
 
     /// Os dispositivos e a bateria deste PC (para conferir na mão):
     ///   cargo test --release battery::tests::this_pc -- --ignored --nocapture
+    /// Um minuto lendo a bateria deste PC a cada segundo, mostrando cada leitura (para ver se o
+    /// Windows ou o driver devolvem valores estranhos de vez em quando).
+    ///
+    ///   cargo test --release battery::tests::watch_a_minute -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn watch_a_minute() {
+        for i in 0..60 {
+            let p = power();
+            println!("{i:2} {:?}", p.map(|p| (p.percent, p.plugged, p.charging, p.secs_left, p.left_mwh, p.drain_mw)));
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
     #[test]
     #[ignore]
     fn this_pc() {
