@@ -77,6 +77,7 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     let tempo_cfg = json!({"tempo": {"city": "Florianópolis"}, "app": {}});
     out.push(("tempo sem cidade".into(), Box::new(Tempo::new(&cfg, &json!({}))), cfg.clone()));
     out.push(("tempo sem dados".into(), Box::new(Tempo::new(&tempo_cfg, &json!({}))), tempo_cfg));
+    out.push(("tempo buscando pela primeira vez".into(), Box::new(Tempo::sample_loading()), cfg.clone()));
     out.push(("sistema".into(), Box::new(System::sample()), cfg.clone()));
     for which in [None, Some(1)] {
         for mode in Mode::ALL {
@@ -93,6 +94,7 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("vídeo com miniatura em alta".into(), Box::new(Media::sample_art("youtube", 1280, 720)), cfg.clone()));
     out.push(("github".into(), Box::new(GitHub::sample(&cfg, &json!({}))), cfg.clone()));
     out.push(("github sem usuário".into(), Box::new(GitHub::new(&cfg, &json!({}))), cfg.clone()));
+    out.push(("github buscando pela primeira vez".into(), Box::new(GitHub::sample_loading(&cfg)), cfg.clone()));
     for fase in ["foco", "pausa", "longa"] {
         for running in [true, false] {
             let c = pomodoro_cfg(fase, running);
@@ -150,6 +152,29 @@ fn ink(img: &Image) -> f32 {
     painted as f32 / (img.w * img.h).max(1) as f32
 }
 
+/// O esqueleto pulsando só aparece na primeira busca (sem nada para mostrar), e os blocos
+/// ficam dentro do cartão, respeitando a margem de todos os widgets.
+#[test]
+fn skeletons_only_while_loading_for_the_first_time_and_inside_the_card() {
+    use crate::widgets::CARD_PAD;
+    let mut shown = 0;
+    for (name, kind, _) in cases() {
+        for &mode in kind.sizes() {
+            let l = Layout::of(mode);
+            let blocks = kind.skeleton(mode);
+            if !blocks.is_empty() {
+                shown += 1;
+                assert!(kind.status().loading, "{name} {mode:?}: esqueleto sem estar buscando");
+            }
+            for (x0, y0, x1, y1, _) in blocks {
+                let inside = x0 >= CARD_PAD - 2.5 && y0 >= 8.0 && x1 <= l.w - CARD_PAD + 2.5 && y1 <= l.h - 8.0 && x0 < x1 && y0 < y1;
+                assert!(inside, "{name} {mode:?}: {:?}", (x0, y0, x1, y1));
+            }
+        }
+    }
+    assert!(shown >= 6, "o Tempo e o GitHub buscando, nos três tamanhos: {shown}");
+}
+
 #[test]
 fn every_widget_draws_in_every_size() {
     com();
@@ -160,8 +185,9 @@ fn every_widget_draws_in_every_size() {
             let l = Layout::of(mode);
             assert_eq!((img.w, img.h), ((l.w * S).round() as u32, (l.h * S).round() as u32), "{name} {mode:?}");
             // o conteúdo vai por cima do vidro: um widget que não desenha nada está quebrado
-            // (um aviso curto, como o "Carregando…" do GitHub no grande, ocupa uns 0,5%)
-            if ink(&img) < 0.002 {
+            // (um aviso curto, como o "Sem conexão" do GitHub no grande, ocupa uns 0,5%; buscando
+            // pela primeira vez, o esqueleto pulsando é o cartão quem desenha)
+            if ink(&img) < 0.002 && kind.skeleton(mode).is_empty() {
                 empty.push(format!("{name} {mode:?}"));
             }
         }
@@ -241,3 +267,4 @@ fn every_widget_has_its_registry_entries() {
         assert!(kind.sizes().contains(&kind.default_mode()), "{key}: o tamanho padrão não está entre os tamanhos");
     }
 }
+

@@ -70,7 +70,7 @@ const HOT: f64 = 0.9;
 const GROW_MS: f32 = 900.0;
 const TURN_MS: f32 = 450.0;
 /// O arco acima de 90%.
-const RED: Rgba = Rgba::rgb(0xFF, 0x45, 0x3A);
+const RED: Rgba = crate::theme::RED;
 
 // ---------- fontes: a Outfit, embutida no app ----------
 /// a porcentagem

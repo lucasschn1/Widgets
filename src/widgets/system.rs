@@ -13,7 +13,7 @@ use crate::theme::*;
 use crate::win;
 
 const W: f32 = WIDE;
-const PAD: f32 = 16.0;
+const PAD: f32 = super::CARD_PAD;
 const ROW_H: f32 = 38.0;
 const LIST_N: usize = 5;
 /// médio virado: linhas mais baixas, para caber 3 embaixo do cabeçalho
@@ -45,9 +45,9 @@ const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
 /// Cor do anel de cada recurso (0 CPU, 1 memória, 2 disco); o ícone do app usa as mesmas.
 pub(crate) fn color(i: usize) -> Rgba {
     match i {
-        0 => Rgba::rgb(255, 55, 95),
-        1 => Rgba::rgb(48, 209, 88),
-        _ => Rgba::rgb(100, 210, 255),
+        0 => PINK,
+        1 => GREEN,
+        _ => CYAN,
     }
 }
 
@@ -463,7 +463,7 @@ impl System {
     /// Cabeçalho do grande: "SISTEMA" na cor da CPU e os núcleos à direita.
     fn draw_header(&self, c: &mut Canvas) {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        c.text(PAD, 12.0, "SISTEMA", Face::Semibold, 11.0, Rgba::rgb(255, 107, 139), Anchor::LA, None);
+        c.text(PAD, 12.0, "SISTEMA", Face::Semibold, 11.0, PINK.mix(WHITE, 0.12), Anchor::LA, None);
         c.text(W - PAD, 12.0, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 

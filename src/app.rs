@@ -839,8 +839,7 @@ impl App {
         card.press = Some(Press { x: sx, y: sy, action });
         card.drag = None;
         if action.is_some() && card.hot.is_some() {
-            card.pressing = true;
-            card.press_anim = Some((Instant::now(), true));
+            card.press_down();
             card.present(&self.sh, false);
         }
         // o widget pode reagir já ao apertar (o Clawd pula), sem esperar soltar
@@ -854,8 +853,7 @@ impl App {
     fn on_release(&mut self, i: usize, x: i32, y: i32) {
         let press = self.cards[i].press.take();
         if self.cards[i].pressing {
-            self.cards[i].pressing = false;
-            self.cards[i].press_anim = Some((Instant::now(), false));
+            self.cards[i].press_up();
             self.cards[i].present(&self.sh, false);
         }
         if self.cards[i].drag.is_some() {

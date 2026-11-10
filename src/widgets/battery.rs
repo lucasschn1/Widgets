@@ -23,9 +23,9 @@ use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
 
 // ---------- cores e fontes ----------
-const OK: Rgba = Rgba::rgb(52, 209, 122);
-const MID: Rgba = Rgba::rgb(245, 184, 61);
-const LOW: Rgba = Rgba::rgb(255, 90, 78);
+const OK: Rgba = crate::theme::GREEN;
+const MID: Rgba = crate::theme::AMBER;
+const LOW: Rgba = crate::theme::RED;
 const TRACK: Rgba = Rgba(255, 255, 255, 30);
 const LINE: Rgba = Rgba(255, 255, 255, 26);
 const NUM: Face = Face::Custom("Outfit", 300);
@@ -65,8 +65,10 @@ impl Ring {
 }
 
 const RING_P: Ring = Ring { cx: SMALL / 2.0, cy: 79.0, r: 55.0, w: 10.0 };
-const RING_M: Ring = Ring { cx: 68.0, cy: 70.0, r: 44.0, w: 9.0 };
-const RING_G: Ring = Ring { cx: 86.0, cy: 132.0, r: 54.0, w: 10.0 };
+const RING_M: Ring = Ring { cx: 64.0, cy: 70.0, r: 44.0, w: 9.0 };
+const RING_G: Ring = Ring { cx: 80.0, cy: 132.0, r: 54.0, w: 10.0 };
+/// a margem de dentro do cartão (a mesma de todos os widgets)
+const PAD: f32 = super::CARD_PAD;
 
 // ---------- as animações ----------
 const FRAME: Duration = Duration::from_millis(16);
@@ -677,12 +679,12 @@ impl Battery {
     fn draw_medium(&self, c: &mut Canvas) {
         if self.power.is_none() {
             // um PC de mesa: só os aparelhos
-            c.text(20.0, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
-            c.text(20.0, 33.0, &self.header_line(), TEXT, 10.5, MUTED, Anchor::LA, None);
+            c.text(PAD, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
+            c.text(PAD, 33.0, &self.header_line(), TEXT, 10.5, MUTED, Anchor::LA, None);
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 82.0, WIDE - 40.0);
+                self.draw_no_devices(c, WIDE / 2.0, 82.0, WIDE - 2.0 * PAD);
             } else {
-                self.draw_rows(c, 20.0, 56.0, WIDE - 40.0, 23.0, 4);
+                self.draw_rows(c, PAD, 56.0, WIDE - 2.0 * PAD, 23.0, 4);
             }
             return;
         }
@@ -694,19 +696,19 @@ impl Battery {
         if self.devices.is_empty() {
             self.draw_no_devices(c, 226.0, 56.0, 150.0);
         } else {
-            self.draw_rows(c, 148.0, 22.0, 152.0, 29.0, 4);
+            self.draw_rows(c, 146.0, 22.0, WIDE - PAD - 146.0, 29.0, 4);
         }
     }
 
     fn draw_large(&self, c: &mut Canvas) {
-        c.text(22.0, 20.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 14.0, FG, Anchor::LA, None);
+        c.text(PAD, 20.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 14.0, FG, Anchor::LA, None);
         let (before, t) = self.rolled(|r| &r.header);
-        draw_rolling(c, 22.0, 41.0, &self.header_line(), before, t, TEXT, 10.5, MUTED, Anchor::LA, Some(WIDE - 44.0));
+        draw_rolling(c, PAD, 41.0, &self.header_line(), before, t, TEXT, 10.5, MUTED, Anchor::LA, Some(WIDE - 2.0 * PAD));
         let Some(p) = self.power.clone() else {
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 44.0);
+                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 2.0 * PAD);
             } else {
-                self.draw_rows(c, 22.0, 70.0, WIDE - 44.0, 26.0, 14);
+                self.draw_rows(c, PAD, 70.0, WIDE - 2.0 * PAD, 26.0, 14);
             }
             return;
         };
@@ -724,22 +726,22 @@ impl Battery {
             ("Na tomada hoje", today.map_or("—".into(), duration)),
             ("Maior tempo fora", longest.map_or("—".into(), duration)),
         ];
-        let (sx0, sx1) = (176.0, WIDE - 22.0);
+        let (sx0, sx1) = (170.0, WIDE - PAD);
         for (i, (k, v)) in stats.iter().enumerate() {
             let y = 92.0 + i as f32 * 25.0;
             c.text(sx0, y, k, TEXT, 10.5, MUTED, Anchor::LA, None);
             c.text(sx1, y, v, TEXT, 11.0, FG, Anchor::RA, None);
             c.fill_round_rect(sx0, y + 18.0, sx1, y + 19.0, 0.0, LINE);
         }
-        c.fill_round_rect(22.0, 212.0, WIDE - 22.0, 213.0, 0.0, LINE);
-        c.text(22.0, 224.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LA, None);
-        c.text(WIDE - 22.0, 226.0, "verde: na tomada", TEXT, 10.0, MUTED, Anchor::RA, None);
-        self.draw_chart(c, 22.0, 246.0, WIDE - 22.0, 300.0);
-        c.fill_round_rect(22.0, 328.0, WIDE - 22.0, 329.0, 0.0, LINE);
+        c.fill_round_rect(PAD, 212.0, WIDE - PAD, 213.0, 0.0, LINE);
+        c.text(PAD, 224.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LA, None);
+        c.text(WIDE - PAD, 226.0, "verde: na tomada", TEXT, 10.0, MUTED, Anchor::RA, None);
+        self.draw_chart(c, PAD, 246.0, WIDE - PAD, 300.0);
+        c.fill_round_rect(PAD, 328.0, WIDE - PAD, 329.0, 0.0, LINE);
         if self.devices.is_empty() {
-            self.draw_no_devices(c, WIDE / 2.0, 360.0, WIDE - 44.0);
+            self.draw_no_devices(c, WIDE / 2.0, 360.0, WIDE - 2.0 * PAD);
         } else {
-            self.draw_rows(c, 22.0, 342.0, WIDE - 44.0, 25.0, 4);
+            self.draw_rows(c, PAD, 342.0, WIDE - 2.0 * PAD, 25.0, 4);
         }
     }
 

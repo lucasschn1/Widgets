@@ -389,7 +389,7 @@ fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookup
 // ---------- o widget ----------
 
 const W: f32 = WIDE;
-const PAD: f32 = 18.0;
+const PAD: f32 = super::CARD_PAD;
 const ROW_H: f32 = 40.0;
 /// atividades no grande (a roda do mouse rola as outras)
 const ROWS: usize = 7;
@@ -398,13 +398,13 @@ const ICON_D: f32 = 26.0;
 // médio e grande: as últimas 28 semanas, na largura toda
 const WEEKS: i64 = 28;
 const GAP: f32 = 2.0;
-const C_PAD: f32 = 14.0;
+const C_PAD: f32 = PAD;
 const STEP: f32 = (W - 2.0 * C_PAD + GAP) / WEEKS as f32;
 const GRID_X: f32 = C_PAD;
 // pequeno (quadrado): cabeçalho, o número de contribuições e as últimas 12 semanas embaixo
 const P_WEEKS: i64 = 12;
-const P_STEP: f32 = (SMALL - 24.0 + GAP) / P_WEEKS as f32;
-const P_GRID_Y: f32 = SMALL - 12.0 - (7.0 * P_STEP - GAP);
+const P_STEP: f32 = (SMALL - 2.0 * PAD + GAP) / P_WEEKS as f32;
+const P_GRID_Y: f32 = SMALL - PAD - (7.0 * P_STEP - GAP);
 // médio e grande: cabeçalho, o placar (número grande) e o mapa; no grande, as atividades
 const HEAD_Y: f32 = 13.0;
 const NUM_Y: f32 = 29.0;
@@ -466,6 +466,15 @@ impl GitHub {
     }
 
     /// Exemplo para a galeria: os dados guardados, ou inventados se não houver.
+    /// Buscando as contribuições pela primeira vez (o esqueleto no lugar do resto).
+    #[cfg(test)]
+    pub fn sample_loading(cfg: &Value) -> GitHub {
+        let mut g = GitHub::new(cfg, &json!({}));
+        g.data = None;
+        g.status.loading = true;
+        g
+    }
+
     pub fn sample(cfg: &Value, cache: &Value) -> GitHub {
         let mut g = GitHub::new(cfg, cache);
         if g.data.is_none() {
@@ -595,7 +604,7 @@ impl GitHub {
 
     /// (semanas, x, y, passo) do mapa de contribuições no tamanho dado.
     fn grid(mode: Mode) -> (i64, f32, f32, f32) {
-        if mode == Mode::P { (P_WEEKS, 12.0, P_GRID_Y, P_STEP) } else { (WEEKS, GRID_X, GRID_Y, STEP) }
+        if mode == Mode::P { (P_WEEKS, PAD, P_GRID_Y, P_STEP) } else { (WEEKS, GRID_X, GRID_Y, STEP) }
     }
 
     /// Primeiro dia do mapa: colunas são semanas de domingo a sábado; a última é a atual.
@@ -790,13 +799,17 @@ impl Kind for GitHub {
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         let Some(d) = &self.data else {
             let h = Layout::of(mode).h;
-            if mode == Mode::G {
+            if self.status.loading {
+                // buscando pela primeira vez: o título e o esqueleto pulsando no lugar do resto
+                let (x, y) = if mode == Mode::P { (PAD, 16.0) } else { (PAD, 19.0) };
+                c.text(x, y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+            } else if mode == Mode::G {
                 c.text(PAD, 19.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
             } else if mode == Mode::P {
-                c.text(14.0, 16.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
-                for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 28.0, 4).iter().enumerate() {
-                    c.text(14.0, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 28.0));
+                c.text(PAD, 16.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+                for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 2.0 * PAD, 4).iter().enumerate() {
+                    c.text(PAD, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
                 }
             } else {
                 c.text(W / 2.0, h / 2.0, &self.msg, Face::Semibold, 12.0, FG, Anchor::MM, Some(W - 2.0 * C_PAD));
@@ -815,9 +828,10 @@ impl Kind for GitHub {
         let days = if streak == 1 { "dia" } else { "dias" };
         if mode == Mode::P {
             // cabeçalho, o placar e o mapa das últimas semanas
-            c.text(12.0, HEAD_Y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
-            c.text(SMALL - 12.0, HEAD_Y, &format!("{streak} {days}"), Face::Regular, 10.5, MUTED, Anchor::RA, None);
-            c.text(11.0, 26.0, &grouped, Face::Semibold, 28.0, FG, Anchor::LA, Some(SMALL - 24.0));
+            c.text(PAD, HEAD_Y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+            c.text(SMALL - PAD, HEAD_Y, &format!("{streak} {days}"), Face::Regular, 10.5, MUTED, Anchor::RA, None);
+            // (o número grande começa 1 ponto antes: o espaço do lado do dígito o afastava da margem)
+            c.text(PAD - 1.0, 26.0, &grouped, Face::Semibold, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
             self.heatmap(c, mode);
             return;
         }
@@ -972,6 +986,35 @@ impl Kind for GitHub {
 
     fn status(&self) -> Status {
         self.status.clone()
+    }
+
+    /// O esqueleto da primeira busca: o número grande e as linhas de texto e, no médio e no
+    /// grande, o quadro de contribuições (e as atividades, no grande).
+    fn skeleton(&self, mode: Mode) -> Vec<Hot> {
+        if self.data.is_some() || !self.status.loading {
+            return Vec::new();
+        }
+        match mode {
+            Mode::P => vec![(PAD, 30.0, PAD + 70.0, 54.0, 6.0), (PAD, P_GRID_Y, SMALL - PAD, SMALL - PAD, 8.0)],
+            Mode::M | Mode::G => {
+                // o número grande, as duas linhas ao lado dele e o mapa de contribuições
+                let mut v = vec![
+                    (PAD, NUM_Y + 3.0, PAD + 52.0, NUM_Y + 27.0, 6.0),
+                    (PAD + 70.0, NUM_Y + 4.0, PAD + 200.0, NUM_Y + 12.0, 4.0),
+                    (PAD + 70.0, NUM_Y + 19.0, PAD + 170.0, NUM_Y + 27.0, 4.0),
+                    (GRID_X, GRID_Y, W - C_PAD, GRID_Y + heat_h(), 8.0),
+                ];
+                if mode == Mode::G {
+                    for i in 0..ROWS {
+                        let y = list_y() + i as f32 * ROW_H;
+                        v.push((PAD, y + 4.0, PAD + ICON_D, y + 4.0 + ICON_D, ICON_D / 2.0));
+                        v.push((PAD + ICON_D + 12.0, y + 7.0, W - PAD - 40.0, y + 17.0, 4.0));
+                        v.push((PAD + ICON_D + 12.0, y + 22.0, PAD + ICON_D + 110.0, y + 30.0, 4.0));
+                    }
+                }
+                v
+            }
+        }
     }
 
     fn retry(&mut self, ctx: &mut Ctx) {

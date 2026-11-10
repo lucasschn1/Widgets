@@ -285,6 +285,86 @@ fn color(c: Rgba) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r: c.0 as f32 / 255.0, g: c.1 as f32 / 255.0, b: c.2 as f32 / 255.0, a: c.3 as f32 / 255.0 }
 }
 
+/// Quanto o canto "contínuo" se estende além do arco (0: o canto redondo comum; 0,6: o do
+/// iOS e do macOS).
+pub const CORNER_SMOOTHING: f32 = 0.6;
+/// raios menores que isto (em pixels) ficam com o canto redondo comum: a diferença não aparece
+const SMOOTH_MIN_PX: f32 = 6.0;
+
+/// As medidas de um canto contínuo de raio `r` (pixels), sem passar de `budget` (metade do lado
+/// menor): `p` é até onde ele vai ao longo de cada lado; a curva de entrada vai de `p` até
+/// `p - a - b - c` (já `d` para dentro), o arco de raio `r` cobre o meio e a de saída é o espelho
+/// da de entrada. (As contas são as do "corner smoothing" do Figma.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Corner {
+    p: f32,
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+}
+
+fn corner(r: f32, budget: f32) -> Corner {
+    let p = ((1.0 + CORNER_SMOOTHING) * r).min(budget);
+    // sem espaço para tudo, o canto suaviza menos (no limite, vira o redondo comum)
+    let sm = CORNER_SMOOTHING.min((budget / r - 1.0).max(0.0));
+    let arc = 90.0 * (1.0 - sm);
+    let arc_side = (arc / 2.0f32).to_radians().sin() * r * std::f32::consts::SQRT_2;
+    let alpha = (90.0 - arc) / 2.0;
+    let p34 = r * (alpha / 2.0f32).to_radians().tan();
+    let beta = (45.0 * sm).to_radians();
+    let c = p34 * beta.cos();
+    let d = c * beta.tan();
+    let b = (p - arc_side - c - d) / 3.0;
+    Corner { p, a: 2.0 * b, b, c, d }
+}
+
+/// Retângulo arredondado com cantos contínuos, como os do macOS: a curvatura cresce aos poucos,
+/// sem a "quina" onde a reta encontra o arco do canto redondo comum. Em pixels.
+fn round_rect_geometry(g: &Gfx, rect: D2D_RECT_F, r: f32) -> ID2D1Geometry {
+    let budget = ((rect.right - rect.left).min(rect.bottom - rect.top) / 2.0).max(0.0);
+    let r = r.clamp(0.0, budget);
+    unsafe {
+        if r < SMOOTH_MIN_PX {
+            return g.d2d.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect, radiusX: r, radiusY: r }).expect("geom").cast().unwrap();
+        }
+        let k = corner(r, budget);
+        let path = g.d2d.CreatePathGeometry().expect("path");
+        let sink = path.Open().expect("sink");
+        // cada canto, no sentido horário: o ponto do canto, o sentido do lado que chega nele e o
+        // do lado que sai dele (um ponto é `e` antes do canto no lado que chega e `f` adiante
+        // no que sai)
+        let corners = [
+            ((rect.right, rect.top), (1.0, 0.0), (0.0, 1.0)),
+            ((rect.right, rect.bottom), (0.0, 1.0), (-1.0, 0.0)),
+            ((rect.left, rect.bottom), (-1.0, 0.0), (0.0, -1.0)),
+            ((rect.left, rect.top), (0.0, -1.0), (1.0, 0.0)),
+        ];
+        for (i, &((kx, ky), (ux, uy), (vx, vy))) in corners.iter().enumerate() {
+            let at = |e: f32, f: f32| v2(kx - ux * e + vx * f, ky - uy * e + vy * f);
+            let start = at(k.p, 0.0);
+            if i == 0 {
+                sink.BeginFigure(start, D2D1_FIGURE_BEGIN_FILLED);
+            } else {
+                sink.AddLine(start);
+            }
+            let mid = k.p - k.a - k.b - k.c;
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: at(k.p - k.a, 0.0), point2: at(k.p - k.a - k.b, 0.0), point3: at(mid, k.d) });
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: at(k.d, mid),
+                size: D2D_SIZE_F { width: r, height: r },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: D2D1_ARC_SIZE_SMALL,
+            });
+            sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: at(0.0, k.p - k.a - k.b), point2: at(0.0, k.p - k.a), point3: at(0.0, k.p) });
+        }
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        let _ = sink.Close();
+        path.cast().unwrap()
+    }
+}
+
 fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
@@ -344,8 +424,14 @@ impl Canvas {
     }
 
     pub fn fill_round_rect_with(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, f: Fill) {
-        let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * self.s, radiusY: r * self.s };
-        unsafe { self.rt.FillRoundedRectangle(&rr, &self.brush_of(f)) }
+        let geom = self.round_geom(x0, y0, x1, y1, r);
+        unsafe { self.rt.FillGeometry(&geom, &self.brush_of(f), None) }
+    }
+
+    /// O contorno de um retângulo arredondado (cantos contínuos), em unidades lógicas.
+    fn round_geom(&self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> ID2D1Geometry {
+        let rect = self.rect_px(x0, y0, x1, y1);
+        with(|g| round_rect_geometry(g, rect, r * self.s))
     }
 
     pub fn fill_circle_with(&mut self, cx: f32, cy: f32, r: f32, f: Fill) {
@@ -411,19 +497,15 @@ impl Canvas {
     }
 
     pub fn fill_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgba) {
-        let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * self.s, radiusY: r * self.s };
-        unsafe { self.rt.FillRoundedRectangle(&rr, &self.brush(c)) }
+        let geom = self.round_geom(x0, y0, x1, y1, r);
+        unsafe { self.rt.FillGeometry(&geom, &self.brush(c), None) }
     }
 
     pub fn stroke_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgba, width: f32) {
         // o traço fica centrado na borda: recua meia espessura para ficar todo por dentro
         let hw = width / 2.0;
-        let rr = D2D1_ROUNDED_RECT {
-            rect: self.rect_px(x0 + hw, y0 + hw, x1 - hw, y1 - hw),
-            radiusX: (r - hw).max(0.0) * self.s,
-            radiusY: (r - hw).max(0.0) * self.s,
-        };
-        unsafe { self.rt.DrawRoundedRectangle(&rr, &self.brush(c), width * self.s, None) }
+        let geom = self.round_geom(x0 + hw, y0 + hw, x1 - hw, y1 - hw, (r - hw).max(0.0));
+        unsafe { self.rt.DrawGeometry(&geom, &self.brush(c), width * self.s, None) }
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
@@ -517,8 +599,7 @@ impl Canvas {
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(0.0, gy0 * s), endPoint: v2(0.0, gy1 * s) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
-            let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
-            self.rt.FillRoundedRectangle(&rr, &brush);
+            self.rt.FillGeometry(&self.round_geom(x0, y0, x1, y1, r), &brush, None);
         }
     }
 
@@ -530,8 +611,7 @@ impl Canvas {
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(gx0 * s, 0.0), endPoint: v2(gx1 * s, 0.0) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
-            let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
-            self.rt.FillRoundedRectangle(&rr, &brush);
+            self.rt.FillGeometry(&self.round_geom(x0, y0, x1, y1, r), &brush, None);
         }
     }
 
@@ -550,15 +630,10 @@ impl Canvas {
                 self.rt.CreateRadialGradientBrush(&props, None, &coll).expect("radial")
             };
             if veil > 0.0 {
-                let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
-                self.rt.FillRoundedRectangle(&rr, &brush(c.with_a((c.3 as f32 * veil) as u8)));
+                self.rt.FillGeometry(&self.round_geom(x0, y0, x1, y1, r), &brush(c.with_a((c.3 as f32 * veil) as u8)), None);
             }
-            let rr = D2D1_ROUNDED_RECT {
-                rect: self.rect_px(x0 + hw, y0 + hw, x1 - hw, y1 - hw),
-                radiusX: (r - hw).max(0.0) * s,
-                radiusY: (r - hw).max(0.0) * s,
-            };
-            self.rt.DrawRoundedRectangle(&rr, &brush(c), width * s, None);
+            let geom = self.round_geom(x0 + hw, y0 + hw, x1 - hw, y1 - hw, (r - hw).max(0.0));
+            self.rt.DrawGeometry(&geom, &brush(c), width * s, None);
         }
     }
 
@@ -608,12 +683,8 @@ impl Canvas {
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(0.0, y0 * s), endPoint: v2(0.0, y1 * s) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
-            let rr = D2D1_ROUNDED_RECT {
-                rect: self.rect_px(x0 + hw, y0 + hw, x1 - hw, y1 - hw),
-                radiusX: (r - hw).max(0.0) * s,
-                radiusY: (r - hw).max(0.0) * s,
-            };
-            self.rt.DrawRoundedRectangle(&rr, &brush, width * s, None);
+            let geom = self.round_geom(x0 + hw, y0 + hw, x1 - hw, y1 - hw, (r - hw).max(0.0));
+            self.rt.DrawGeometry(&geom, &brush, width * s, None);
         }
     }
 
@@ -643,12 +714,21 @@ impl Canvas {
         unsafe { self.rt.PopAxisAlignedClip() }
     }
 
+    /// Daqui até `reset_transform`, tudo sai `k` vezes maior (ou menor), em volta de (cx, cy).
+    pub fn scale_about(&mut self, cx: f32, cy: f32, k: f32) {
+        let (px, py) = (cx * self.s, cy * self.s);
+        let m = windows_numerics::Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: px * (1.0 - k), M32: py * (1.0 - k) };
+        unsafe { self.rt.SetTransform(&m) }
+    }
+
+    pub fn reset_transform(&mut self) {
+        unsafe { self.rt.SetTransform(&windows_numerics::Matrix3x2::identity()) }
+    }
+
     /// Daqui até `pop_clip`, só aparece o que estiver dentro do retângulo arredondado.
     pub fn push_round_clip(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
-        let s = self.s;
-        with(|g| unsafe {
-            let rr = D2D1_ROUNDED_RECT { rect: self.rect_px(x0, y0, x1, y1), radiusX: r * s, radiusY: r * s };
-            let geom = g.d2d.CreateRoundedRectangleGeometry(&rr).expect("geom");
+        let geom = self.round_geom(x0, y0, x1, y1, r);
+        unsafe {
             let layer = self.rt.CreateLayer(None).expect("layer");
             let params = D2D1_LAYER_PARAMETERS {
                 contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
@@ -662,7 +742,7 @@ impl Canvas {
             self.rt.PushLayer(&params, &layer);
             // devolve a referência guardada no ManuallyDrop
             let _ = std::mem::ManuallyDrop::into_inner(params.geometricMask);
-        });
+        }
         self.layers += 1;
     }
 
@@ -1157,6 +1237,74 @@ mod embedded_font_tests {
 #[cfg(test)]
 mod glow_tests {
     use super::*;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Os cantos contínuos: começam a curvar antes do redondo comum (1,6 vezes o raio), passam
+    /// pelo mesmo ponto na diagonal e, sem espaço, viram o redondo comum.
+    #[test]
+    fn corners_are_continuous_like_the_mac() {
+        let k = corner(40.0, 100.0);
+        assert!((k.p - 64.0).abs() < 1e-3, "{k:?}");
+        assert!(k.a > 0.0 && k.b > 0.0 && k.c > 0.0 && k.d > 0.0, "{k:?}");
+        let k = corner(10.0, 10.0);
+        assert!((k.p - 10.0).abs() < 1e-4 && k.c.abs() < 1e-4 && k.d.abs() < 1e-4, "{k:?}");
+        com();
+        let mut c = Canvas::new(200, 200, 1.0);
+        c.fill_round_rect(0.0, 0.0, 200.0, 200.0, 40.0, Rgba(255, 255, 255, 255));
+        let img = c.finish();
+        let alpha = |x: u32, y: u32| img.px[((y * img.w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(100, 100), 255);
+        // a 38 px da quina, o redondo comum já seria reto (quase opaco); o contínuo ainda curva
+        assert!(alpha(38, 0) < 200, "{}", alpha(38, 0));
+        // depois de 1,6 raio, reto
+        assert_eq!(alpha(70, 0), 255);
+        // no meio do canto, o mesmo ponto do redondo comum (40 - 40/√2 ≈ 11,7 px da quina)
+        assert_eq!(alpha(9, 9), 0);
+        assert_eq!(alpha(15, 15), 255);
+        // raios pequenos: o redondo comum (barras de 2 px de raio)
+        let mut c = Canvas::new(40, 10, 1.0);
+        c.fill_round_rect(0.0, 0.0, 40.0, 4.0, 2.0, Rgba(255, 255, 255, 255));
+        assert_eq!(c.finish().px[((1 * 40 + 20) * 4 + 3) as usize], 255);
+    }
+
+    /// Todos os dígitos têm a mesma largura (números "tabulares"), na Outfit e na fonte do
+    /// Windows: um número mudando (o relógio, a porcentagem, o tempo restante) não faz o resto
+    /// do texto tremer.
+    #[test]
+    fn digits_have_the_same_width() {
+        com();
+        let c = Canvas::new(10, 10, 1.0);
+        for face in [Face::Custom("Outfit", 300), Face::Custom("Outfit", 600), Face::Regular, Face::Light] {
+            let widths: Vec<f32> = (0..10).map(|d| c.text_width(&d.to_string(), face, 30.0)).collect();
+            assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.01), "{face:?}: {widths:?}");
+            assert!((c.text_width("11:11", face, 30.0) - c.text_width("00:00", face, 30.0)).abs() < 0.01, "{face:?}");
+        }
+    }
+
+    /// A escala em volta de um ponto (o cartão afundando ao apertar): o centro fica, as bordas
+    /// entram.
+    #[test]
+    fn scale_about_a_point() {
+        com();
+        let mut c = Canvas::new(100, 100, 1.0);
+        c.scale_about(50.0, 50.0, 0.9);
+        c.fill_round_rect(0.0, 0.0, 100.0, 100.0, 0.0, Rgba(255, 255, 255, 255));
+        c.reset_transform();
+        c.fill_round_rect(0.0, 98.0, 2.0, 100.0, 0.0, Rgba(255, 255, 255, 255));
+        let img = c.finish();
+        let alpha = |x: u32, y: u32| img.px[((y * img.w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(50, 50), 255);
+        assert_eq!(alpha(2, 50), 0, "a borda entrou 5 px");
+        assert_eq!(alpha(7, 50), 255);
+        // depois de reset_transform, de volta ao normal
+        assert_eq!(alpha(0, 99), 255);
+    }
 
     #[test]
     fn the_glow_is_brighter_near_the_mouse_and_fades_away() {

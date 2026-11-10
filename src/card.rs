@@ -79,6 +79,17 @@ pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
 const GLOW_RADIUS: f32 = 150.0;
 const GLOW_FRAME_MS: u64 = 33;
 
+/// Apertando uma área grande do widget (um anel, a capa, o relógio), o cartão inteiro afunda até
+/// este tamanho e volta com mola ao soltar, como no macOS; botões pequenos só escurecem.
+pub const PRESS_SCALE: f32 = 0.97;
+/// a área apertada precisa ocupar pelo menos isto do cartão para ele afundar inteiro
+const PRESS_WHOLE: f32 = 0.2;
+
+/// O esqueleto pulsando enquanto o widget busca os dados pela primeira vez: o ciclo e a
+/// opacidade dos blocos, do mais fraco ao mais forte.
+const SKELETON_MS: f32 = 1400.0;
+const SKELETON_ALPHA: (f32, f32) = (0.07, 0.16);
+
 pub struct Card {
     pub kind: Box<dyn Kind>,
     pub hwnd: HWND,
@@ -124,6 +135,8 @@ pub struct Card {
     /// e se ele andou desde o último quadro
     glow: Option<(f32, f32)>,
     glow_moved: bool,
+    /// a área apertada é grande: o cartão inteiro afunda
+    press_whole: bool,
 }
 
 impl Card {
@@ -162,6 +175,46 @@ impl Card {
             last_frame: Instant::now(),
             glow: None,
             glow_moved: false,
+            press_whole: false,
+        }
+    }
+
+    /// Começou a apertar uma área clicável (a que está sob o mouse).
+    pub fn press_down(&mut self) {
+        let l = self.layout(self.mode);
+        self.press_whole = self.hot.is_some_and(|((x0, y0, x1, y1, _), _)| (x1 - x0) * (y1 - y0) >= PRESS_WHOLE * l.w * l.h);
+        self.pressing = true;
+        self.press_anim = Some((Instant::now(), true));
+    }
+
+    /// Soltou: o realce (ou o cartão inteiro) volta com mola.
+    pub fn press_up(&mut self) {
+        self.pressing = false;
+        self.press_anim = Some((Instant::now(), false));
+    }
+
+    /// O tamanho do cartão agora (1: normal; menor apertando uma área grande; um tico maior na
+    /// volta da mola).
+    pub fn press_scale(&self) -> f32 {
+        if !self.press_whole {
+            return 1.0;
+        }
+        let depth = 1.0 - PRESS_SCALE;
+        match self.press_anim {
+            Some((at, true)) => 1.0 - depth * ease_out_quick(at.elapsed().as_secs_f32() * 1000.0 / 90.0),
+            Some((at, false)) => 1.0 - depth * (1.0 - ease_spring(at.elapsed().as_secs_f32() * 1000.0 / 240.0)),
+            None => 1.0,
+        }
+    }
+
+    /// O esqueleto: os blocos do widget pulsando, no lugar do texto que ainda não chegou.
+    fn draw_skeleton(&self, c: &mut Canvas, blocks: &[Hot]) {
+        let t = self.loading_since.elapsed().as_secs_f32() * 1000.0 / SKELETON_MS;
+        let wave = 0.5 - 0.5 * (t * std::f32::consts::TAU).cos();
+        let (lo, hi) = SKELETON_ALPHA;
+        let col = WHITE.alpha(lo + (hi - lo) * wave);
+        for &(x0, y0, x1, y1, r) in blocks {
+            c.fill_round_rect(MARGIN + x0, MARGIN + y0, MARGIN + x1, MARGIN + y1, r, col);
         }
     }
 
@@ -397,6 +450,12 @@ impl Card {
         let mut c = Canvas::new(w, h, self.s);
         // sem sombra, como os widgets do macOS: em volta do vidro, a margem fica transparente (e
         // os cliques ali passam para a área de trabalho)
+        // apertando uma área grande, o cartão inteiro afunda (e volta com mola)
+        let k = self.press_scale();
+        if k != 1.0 && sh.animations {
+            let lay = self.layout(self.mode);
+            c.scale_about(MARGIN + lay.w / 2.0, MARGIN + lay.h / 2.0, k);
+        }
         // o tremor do trovão leva o vidro e a camada animada juntos
         let (dx, dy) = if sh.animations && self.anim.is_none() { self.kind.shake() } else { (0.0, 0.0) };
         c.image(glass, MARGIN + dx, MARGIN + dy);
@@ -404,6 +463,7 @@ impl Card {
             self.kind.overlay(&mut c, self.mode, MARGIN + dx, MARGIN + dy);
         }
         self.decorate(&mut c, sh);
+        c.reset_transform();
         let img = c.finish();
         win::blit(self.hwnd, &img, move_win.then_some(self.pos), self.opacity(sh));
         self.last_frame = Instant::now();
@@ -468,7 +528,12 @@ impl Card {
             c.fill_circle(m + STALE_XY.0, m + STALE_XY.1, 3.5, STALE_DOT);
         }
         if self.status.loading {
-            self.draw_loading(c);
+            let blocks = self.kind.skeleton(self.mode);
+            if blocks.is_empty() {
+                self.draw_loading(c);
+            } else {
+                self.draw_skeleton(c, &blocks);
+            }
         }
         if self.hover > 0.0 || sh.editing {
             self.draw_badge(c, sh);
@@ -655,9 +720,9 @@ impl Card {
     fn anim_step(&mut self, sh: &Shared) -> bool {
         let a = self.anim.as_ref().unwrap();
         let t = if a.dur.is_zero() { 1.0 } else { (a.start.elapsed().as_secs_f32() / a.dur.as_secs_f32()).min(1.0) };
-        // desenhada quadro a quadro, o cartão cresce com uma mola (passa um pouco e volta), no
-        // mesmo ritmo dos vizinhos que saem da frente
-        let e = if a.morph { ease_spring(t) } else { ease_in_out(t) };
+        // o cartão cresce com uma mola (passa um pouco e volta), no mesmo ritmo dos vizinhos que
+        // saem da frente (que também deslizam com mola)
+        let e = ease_spring(t);
         let w = (a.old.w as f32 + (a.new.w as f32 - a.old.w as f32) * e).round().max(1.0) as u32;
         let h = (a.old.h as f32 + (a.new.h as f32 - a.old.h as f32) * e).round().max(1.0) as u32;
         let content = if a.morph {
@@ -786,5 +851,36 @@ impl Card {
         self.refresh(sh);
         self.present(sh, true);
         save
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card() -> Card {
+        Card::new(Box::new(crate::widgets::battery::Battery::sample()), HWND::default(), Mode::M, 1.0)
+    }
+
+    /// Apertando uma área grande (o anel), o cartão inteiro afunda e volta com mola, passando um
+    /// tico do tamanho; apertando um botão pequeno, só o realce dele muda.
+    #[test]
+    fn pressing_a_big_area_sinks_the_whole_card_and_springs_back() {
+        let mut c = card();
+        c.hot = Some(((10.0, 10.0, 40.0, 40.0, 8.0), HoverStyle::Surface));
+        c.press_down();
+        c.press_anim = Some((Instant::now() - Duration::from_millis(200), true));
+        assert_eq!(c.press_scale(), 1.0, "botão pequeno");
+        c.hot = Some(((0.0, 0.0, 140.0, 140.0, 70.0), HoverStyle::Quiet));
+        c.press_down();
+        assert!(c.pressing);
+        c.press_anim = Some((Instant::now() - Duration::from_millis(200), true));
+        assert!((c.press_scale() - PRESS_SCALE).abs() < 1e-3, "{}", c.press_scale());
+        c.press_up();
+        assert!(!c.pressing);
+        c.press_anim = Some((Instant::now() - Duration::from_millis(192), false));
+        assert!(c.press_scale() > 1.0, "a mola passa do tamanho: {}", c.press_scale());
+        c.press_anim = Some((Instant::now() - Duration::from_secs(1), false));
+        assert!((c.press_scale() - 1.0).abs() < 1e-4);
     }
 }

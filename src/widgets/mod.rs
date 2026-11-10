@@ -35,6 +35,9 @@ pub const SMALL: f32 = 154.0;
 pub const WIDE: f32 = 2.0 * SMALL + crate::theme::WIDGET_GAP;
 pub const MEDIUM_H: f32 = SMALL;
 pub const LARGE_H: f32 = 448.0;
+/// A margem de dentro do cartão, a mesma em todos os widgets e tamanhos (como os 16 pt dos
+/// widgets do macOS): o texto e os gráficos começam e terminam a esta distância da borda.
+pub const CARD_PAD: f32 = 16.0;
 /// cantos de cada tamanho
 pub const SMALL_RADIUS: f32 = 24.0;
 pub const MEDIUM_RADIUS: f32 = 26.0;
@@ -408,6 +411,12 @@ pub trait Kind {
     }
     fn status(&self) -> Status {
         Status::default()
+    }
+    /// Enquanto busca os dados pela primeira vez (ainda sem nada para mostrar): os blocos que
+    /// ficam no lugar do texto, pulsando ("esqueleto"), em unidades do cartão. Vazio: o widget
+    /// tem o que mostrar (e o "carregando" é o brilho correndo no topo).
+    fn skeleton(&self, _mode: Mode) -> Vec<Hot> {
+        Vec::new()
     }
     /// Texto vindo de uma pergunta ou das configurações (ex.: "city", "user"); `extra` é a
     /// cidade escolhida na lista de sugestões.
