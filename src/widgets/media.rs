@@ -1562,6 +1562,11 @@ impl Kind for Media {
 
     /// Roda do mouse: o volume do app que está tocando (ou o do Windows, se não achar o app).
     /// O aviso de volume aparece em cima, menos no grande, que já tem o volume no pé.
+    fn uses_wheel(&self, _x: f32, y: f32, mode: Mode) -> bool {
+        // numa pilha, o volume pela roda só em cima da barra de volume do grande
+        mode == Mode::G && (G_VOL_Y - 12.0..=G_VOL_Y + 12.0).contains(&y) && self.volume().is_some()
+    }
+
     fn wheel(&mut self, _x: f32, _y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
         match self.volume() {
             Some(v) => {

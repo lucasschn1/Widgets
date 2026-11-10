@@ -32,6 +32,7 @@ mod drawing;
 mod events;
 mod gfx;
 mod imgops;
+mod morph;
 mod overlay;
 mod panel;
 mod popup;

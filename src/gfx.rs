@@ -252,6 +252,95 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// O canto esquerdo e a linha de base de um texto (em pixels) com o ponto `anchor` em (x, y).
+fn text_origin(x: f32, y: f32, anchor: Anchor, width: f32, baseline: f32, ink_top: f32, ink_bottom: f32) -> (f32, f32) {
+    let (h, v) = anchor.parts();
+    let left = match h {
+        'm' => x - width / 2.0,
+        'r' => x - width,
+        _ => x,
+    };
+    let base = match v {
+        'a' => y + baseline,
+        'm' => y - (ink_top + ink_bottom) / 2.0,
+        _ => y,
+    };
+    (left, base)
+}
+
+// ---------- gravação (a troca de tamanho) ----------
+
+/// Um desenho gravado, em unidades lógicas (o que cada função da `Canvas` recebeu).
+#[derive(Clone)]
+pub enum Op {
+    RRect { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, fill: Fill },
+    StrokeRRect { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgba, width: f32 },
+    GradV { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, stops: Vec<(f32, Rgba)>, g0: f32, g1: f32 },
+    GradH { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, stops: Vec<(f32, Rgba)>, g0: f32, g1: f32 },
+    StrokeV { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, top: Rgba, bottom: Rgba, width: f32 },
+    Glow { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, cx: f32, cy: f32, radius: f32, c: Rgba, width: f32, veil: f32 },
+    Circle { cx: f32, cy: f32, r: f32, fill: Fill },
+    StrokeCircle { cx: f32, cy: f32, r: f32, c: Rgba, width: f32 },
+    Crescent { cx: f32, cy: f32, r: f32, cx2: f32, cy2: f32, r2: f32, fill: Fill },
+    Radial { cx: f32, cy: f32, rx: f32, ry: f32, stops: Vec<(f32, Rgba)> },
+    /// linha (com espessura) ou polígono preenchido (sem)
+    Path { pts: Vec<(f32, f32)>, fill: Fill, width: Option<f32>, closed: bool },
+    Arc { cx: f32, cy: f32, r: f32, start: f32, end: f32, c: Rgba, width: f32 },
+    Segments { segs: Vec<(f32, f32, f32, f32)>, c: Rgba, width: f32 },
+    HLine { x0: f32, x1: f32, y: f32, c: Rgba },
+    VLine { x: f32, y0: f32, y1: f32, c: Rgba },
+    /// no retângulo (x, y, w, h); `sharp`: redimensionada com filtro de qualidade
+    Image { img: Image, x: f32, y: f32, w: f32, h: f32, opacity: f32, sharp: bool },
+    /// já cortado com "…", com o canto esquerdo e a linha de base
+    Text { left: f32, base: f32, text: String, face: Face, size: f32, c: Rgba },
+}
+
+/// Um recorte arredondado: (x0, y0, x1, y1, raio).
+pub type Clip = (f32, f32, f32, f32, f32);
+
+/// Um desenho gravado com o recorte e a opacidade em que foi feito (as camadas abertas na
+/// hora: cada desenho fica com as dele, sem depender da ordem).
+#[derive(Clone)]
+pub struct Rec {
+    pub op: Op,
+    pub clip: Option<Clip>,
+    pub alpha: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Layer {
+    Clip(f32, f32, f32, f32, f32),
+    Rect(f32, f32, f32, f32),
+    Alpha(f32),
+}
+
+#[derive(Default)]
+struct Recorder {
+    ops: Vec<Rec>,
+    layers: Vec<Layer>,
+}
+
+impl Recorder {
+    fn push(&mut self, op: Op) {
+        let (mut clip, mut alpha): (Option<Clip>, f32) = (None, 1.0);
+        for l in &self.layers {
+            let (b, r) = match *l {
+                Layer::Alpha(a) => {
+                    alpha *= a;
+                    continue;
+                }
+                Layer::Clip(x0, y0, x1, y1, r) => ((x0, y0, x1, y1), Some(r)),
+                Layer::Rect(x0, y0, x1, y1) => ((x0, y0, x1, y1), None),
+            };
+            clip = Some(match clip {
+                None => (b.0, b.1, b.2, b.3, r.unwrap_or(0.0)),
+                Some(a) => (a.0.max(b.0), a.1.max(b.1), a.2.min(b.2), a.3.min(b.3), r.unwrap_or(a.4)),
+            });
+        }
+        self.ops.push(Rec { op, clip, alpha });
+    }
+}
+
 /// Corta o texto com "…" até caber em `max_px` (como o Python fazia).
 fn fit_text(g: &Gfx, text: &str, face: Face, px: f32, max_px: Option<f32>) -> String {
     let Some(max_px) = max_px else { return text.to_string() };
@@ -275,7 +364,7 @@ fn fit_text(g: &Gfx, text: &str, face: Face, px: f32, max_px: Option<f32>) -> St
 }
 
 /// Como pintar uma forma: cor sólida ou degradê vertical (de `top` em y0 a `bottom` em y1).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Fill {
     Solid(Rgba),
     VGrad(f32, f32, Rgba, Rgba),
@@ -379,6 +468,9 @@ pub struct Canvas {
     /// tamanho do texto escolhido pelo usuário (acessibilidade), multiplica as fontes
     pub text_scale: f32,
     layers: u32,
+    /// gravando: o que seria desenhado vai para cá, e nada é desenhado (a troca de tamanho
+    /// liga o que cada tamanho desenha e anda de um para o outro)
+    rec: Option<Recorder>,
 }
 
 impl Canvas {
@@ -403,7 +495,7 @@ impl Canvas {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            Canvas { rt, bmp, w, h, s, text_scale: 1.0, layers: 0 }
+            Canvas { rt, bmp, w, h, s, text_scale: 1.0, layers: 0, rec: None }
         })
     }
 
@@ -424,6 +516,9 @@ impl Canvas {
     }
 
     pub fn fill_round_rect_with(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, f: Fill) {
+        if self.recording(|| Op::RRect { x0, y0, x1, y1, r, fill: f }) {
+            return;
+        }
         let geom = self.round_geom(x0, y0, x1, y1, r);
         unsafe { self.rt.FillGeometry(&geom, &self.brush_of(f), None) }
     }
@@ -435,6 +530,9 @@ impl Canvas {
     }
 
     pub fn fill_circle_with(&mut self, cx: f32, cy: f32, r: f32, f: Fill) {
+        if self.recording(|| Op::Circle { cx, cy, r, fill: f }) {
+            return;
+        }
         let s = self.s;
         let e = D2D1_ELLIPSE { point: v2(cx * s, cy * s), radiusX: r * s, radiusY: r * s };
         unsafe { self.rt.FillEllipse(&e, &self.brush_of(f)) }
@@ -442,6 +540,9 @@ impl Canvas {
 
     /// Lua crescente: o círculo (cx, cy, r) sem o círculo (cx2, cy2, r2).
     pub fn crescent(&mut self, cx: f32, cy: f32, r: f32, cx2: f32, cy2: f32, r2: f32, f: Fill) {
+        if self.recording(|| Op::Crescent { cx, cy, r, cx2, cy2, r2, fill: f }) {
+            return;
+        }
         let s = self.s;
         with(|g| unsafe {
             let a = g.d2d.CreateEllipseGeometry(&D2D1_ELLIPSE { point: v2(cx * s, cy * s), radiusX: r * s, radiusY: r * s }).expect("ellipse");
@@ -455,6 +556,9 @@ impl Canvas {
     }
 
     pub fn polygon_with(&mut self, pts: &[(f32, f32)], f: Fill) {
+        if self.recording(|| Op::Path { pts: pts.to_vec(), fill: f, width: None, closed: true }) {
+            return;
+        }
         if pts.len() < 3 {
             return;
         }
@@ -474,6 +578,9 @@ impl Canvas {
 
     /// Linha com pontas redondas pintada com `f`; `closed` fecha o contorno.
     pub fn line_with(&mut self, pts: &[(f32, f32)], f: Fill, width: f32, closed: bool) {
+        if self.recording(|| Op::Path { pts: pts.to_vec(), fill: f, width: Some(width), closed }) {
+            return;
+        }
         if pts.len() < 2 {
             return;
         }
@@ -497,11 +604,17 @@ impl Canvas {
     }
 
     pub fn fill_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgba) {
+        if self.recording(|| Op::RRect { x0, y0, x1, y1, r, fill: Fill::Solid(c) }) {
+            return;
+        }
         let geom = self.round_geom(x0, y0, x1, y1, r);
         unsafe { self.rt.FillGeometry(&geom, &self.brush(c), None) }
     }
 
     pub fn stroke_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgba, width: f32) {
+        if self.recording(|| Op::StrokeRRect { x0, y0, x1, y1, r, c, width }) {
+            return;
+        }
         // o traço fica centrado na borda: recua meia espessura para ficar todo por dentro
         let hw = width / 2.0;
         let geom = self.round_geom(x0 + hw, y0 + hw, x1 - hw, y1 - hw, (r - hw).max(0.0));
@@ -509,12 +622,18 @@ impl Canvas {
     }
 
     pub fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, c: Rgba) {
+        if self.recording(|| Op::Circle { cx, cy, r, fill: Fill::Solid(c) }) {
+            return;
+        }
         let s = self.s;
         let e = D2D1_ELLIPSE { point: v2(cx * s, cy * s), radiusX: r * s, radiusY: r * s };
         unsafe { self.rt.FillEllipse(&e, &self.brush(c)) }
     }
 
     pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, c: Rgba, width: f32) {
+        if self.recording(|| Op::StrokeCircle { cx, cy, r, c, width }) {
+            return;
+        }
         let s = self.s;
         let e = D2D1_ELLIPSE { point: v2(cx * s, cy * s), radiusX: r * s, radiusY: r * s };
         unsafe { self.rt.DrawEllipse(&e, &self.brush(c), width * s, None) }
@@ -522,6 +641,9 @@ impl Canvas {
 
     /// Linha (ou poligonal) com pontas e junções arredondadas.
     pub fn line(&mut self, pts: &[(f32, f32)], c: Rgba, width: f32) {
+        if self.recording(|| Op::Path { pts: pts.to_vec(), fill: Fill::Solid(c), width: Some(width), closed: false }) {
+            return;
+        }
         if pts.len() < 2 {
             return;
         }
@@ -541,6 +663,9 @@ impl Canvas {
 
     /// Polígono preenchido.
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: Rgba) {
+        if self.recording(|| Op::Path { pts: pts.to_vec(), fill: Fill::Solid(c), width: None, closed: true }) {
+            return;
+        }
         if pts.len() < 3 {
             return;
         }
@@ -560,6 +685,9 @@ impl Canvas {
 
     /// Arco de círculo de `start` a `end` graus (0 = 3 horas, sentido horário), com pontas redondas.
     pub fn arc(&mut self, cx: f32, cy: f32, r: f32, start: f32, end: f32, c: Rgba, width: f32) {
+        if self.recording(|| Op::Arc { cx, cy, r, start, end, c, width }) {
+            return;
+        }
         let sweep = end - start;
         if sweep.abs() < 0.01 {
             return;
@@ -593,6 +721,9 @@ impl Canvas {
 
     /// Retângulo (arredondado) com degradê vertical de `top` a `bottom`, entre as alturas y0 e y1.
     pub fn gradient_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, stops: &[(f32, Rgba)], gy0: f32, gy1: f32) {
+        if self.recording(|| Op::GradV { x0, y0, x1, y1, r, stops: stops.to_vec(), g0: gy0, g1: gy1 }) {
+            return;
+        }
         let s = self.s;
         unsafe {
             let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(p, c)| D2D1_GRADIENT_STOP { position: p, color: color(c) }).collect();
@@ -605,6 +736,9 @@ impl Canvas {
 
     /// Retângulo (arredondado) com degradê horizontal; as posições das cores vão de gx0 a gx1.
     pub fn gradient_h(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, stops: &[(f32, Rgba)], gx0: f32, gx1: f32) {
+        if self.recording(|| Op::GradH { x0, y0, x1, y1, r, stops: stops.to_vec(), g0: gx0, g1: gx1 }) {
+            return;
+        }
         let s = self.s;
         unsafe {
             let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(p, c)| D2D1_GRADIENT_STOP { position: p, color: color(c) }).collect();
@@ -620,6 +754,9 @@ impl Canvas {
     /// do mouse na borda do vidro; um traço só, liso (sem as emendas de traços curtos).
     #[allow(clippy::too_many_arguments)]
     pub fn glow_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, cx: f32, cy: f32, radius: f32, c: Rgba, width: f32, veil: f32) {
+        if self.recording(|| Op::Glow { x0, y0, x1, y1, r, cx, cy, radius, c, width, veil }) {
+            return;
+        }
         let s = self.s;
         let hw = width / 2.0;
         unsafe {
@@ -640,6 +777,9 @@ impl Canvas {
     /// Elipse (cx, cy, rx, ry) com degradê radial do centro para fora: `stops` de 0 (centro) a 1
     /// (borda). Luzes suaves: o sol no céu, faixas de neblina, flocos macios.
     pub fn fill_radial(&mut self, cx: f32, cy: f32, rx: f32, ry: f32, stops: &[(f32, Rgba)]) {
+        if self.recording(|| Op::Radial { cx, cy, rx, ry, stops: stops.to_vec() }) {
+            return;
+        }
         if rx <= 0.0 || ry <= 0.0 {
             return;
         }
@@ -657,6 +797,9 @@ impl Canvas {
     /// Muitos traços retos (x0, y0, x1, y1) da mesma cor e espessura, de uma vez só (a chuva:
     /// centenas de gotas por quadro custariam um desenho cada).
     pub fn segments(&mut self, segs: &[(f32, f32, f32, f32)], c: Rgba, width: f32) {
+        if self.recording(|| Op::Segments { segs: segs.to_vec(), c, width }) {
+            return;
+        }
         if segs.is_empty() {
             return;
         }
@@ -676,6 +819,9 @@ impl Canvas {
 
     /// Contorno arredondado com degradê vertical (a borda clara do vidro).
     pub fn gradient_stroke_round_rect(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32, top: Rgba, bottom: Rgba, width: f32) {
+        if self.recording(|| Op::StrokeV { x0, y0, x1, y1, r, top, bottom, width }) {
+            return;
+        }
         let s = self.s;
         let hw = width / 2.0;
         unsafe {
@@ -690,6 +836,9 @@ impl Canvas {
 
     /// Linha horizontal fina, alinhada ao pixel (divisórias): espessura de 1 pixel lógico.
     pub fn hline_px(&mut self, x0: f32, x1: f32, y: f32, c: Rgba) {
+        if self.recording(|| Op::HLine { x0, x1, y, c }) {
+            return;
+        }
         let t = self.s.round().max(1.0);
         let py = (y * self.s).round();
         let r = D2D_RECT_F { left: x0 * self.s, top: py, right: x1 * self.s, bottom: py + t };
@@ -698,6 +847,9 @@ impl Canvas {
 
     /// Linha vertical fina, alinhada ao pixel.
     pub fn vline_px(&mut self, x: f32, y0: f32, y1: f32, c: Rgba) {
+        if self.recording(|| Op::VLine { x, y0, y1, c }) {
+            return;
+        }
         let t = self.s.round().max(1.0);
         let px = (x * self.s).round();
         let r = D2D_RECT_F { left: px, top: y0 * self.s, right: px + t, bottom: y1 * self.s };
@@ -706,11 +858,21 @@ impl Canvas {
 
     /// Recorte retangular (área rolável): até `pop_rect_clip`, só aparece o que estiver dentro.
     pub fn push_rect_clip(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
+        if let Some(r) = self.rec.as_mut() {
+            r.layers.push(Layer::Rect(x0, y0, x1, y1));
+            return;
+        }
         let r = self.rect_px(x0, y0, x1, y1);
         unsafe { self.rt.PushAxisAlignedClip(&r, D2D1_ANTIALIAS_MODE_ALIASED) }
     }
 
     pub fn pop_rect_clip(&mut self) {
+        if let Some(r) = self.rec.as_mut() {
+            if let Some(i) = r.layers.iter().rposition(|l| matches!(l, Layer::Rect(..))) {
+                r.layers.remove(i);
+            }
+            return;
+        }
         unsafe { self.rt.PopAxisAlignedClip() }
     }
 
@@ -727,6 +889,10 @@ impl Canvas {
 
     /// Daqui até `pop_clip`, só aparece o que estiver dentro do retângulo arredondado.
     pub fn push_round_clip(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
+        if let Some(rec) = self.rec.as_mut() {
+            rec.layers.push(Layer::Clip(x0, y0, x1, y1, r));
+            return;
+        }
         let geom = self.round_geom(x0, y0, x1, y1, r);
         unsafe {
             let layer = self.rt.CreateLayer(None).expect("layer");
@@ -748,6 +914,10 @@ impl Canvas {
 
     /// Daqui até `pop_clip`, tudo é desenhado com a opacidade `alpha` (0 a 1), como uma camada só.
     pub fn push_opacity(&mut self, alpha: f32) {
+        if let Some(r) = self.rec.as_mut() {
+            r.layers.push(Layer::Alpha(alpha.clamp(0.0, 1.0)));
+            return;
+        }
         unsafe {
             let layer = self.rt.CreateLayer(None).expect("layer");
             let params = D2D1_LAYER_PARAMETERS {
@@ -765,6 +935,12 @@ impl Canvas {
     }
 
     pub fn pop_clip(&mut self) {
+        if let Some(r) = self.rec.as_mut() {
+            if let Some(i) = r.layers.iter().rposition(|l| !matches!(l, Layer::Rect(..))) {
+                r.layers.remove(i);
+            }
+            return;
+        }
         if self.layers > 0 {
             unsafe { self.rt.PopLayer() };
             self.layers -= 1;
@@ -774,6 +950,10 @@ impl Canvas {
     /// Cola uma imagem (pixels) com o canto em (x, y) lógicos, no tamanho dela.
     pub fn image(&mut self, img: &Image, x: f32, y: f32) {
         let (px, py) = ((x * self.s).round(), (y * self.s).round());
+        let s = self.s;
+        if self.recording(|| Op::Image { img: img.clone(), x: px / s, y: py / s, w: img.w as f32 / s, h: img.h as f32 / s, opacity: 1.0, sharp: false }) {
+            return;
+        }
         self.image_px(img, px, py, img.w as f32, img.h as f32, 1.0);
     }
 
@@ -782,6 +962,9 @@ impl Canvas {
     /// pixel a pixel. Esticar na hora (`image_px`) usa interpolação bilinear, que serrilha as
     /// bordas quando reduz muito (um ícone de 64 px desenhado com 33).
     pub fn image_sharp(&mut self, img: &Image, x: f32, y: f32, w: f32, h: f32, opacity: f32) {
+        if self.recording(|| Op::Image { img: img.clone(), x, y, w, h, opacity, sharp: true }) {
+            return;
+        }
         let s = self.s;
         let (px, py) = ((x * s).round(), (y * s).round());
         let (pw, ph) = (((x + w) * s).round() - px, ((y + h) * s).round() - py);
@@ -798,6 +981,10 @@ impl Canvas {
 
     /// Cola uma imagem num retângulo em pixels (esticando, com suavização).
     pub fn image_px(&mut self, img: &Image, x: f32, y: f32, w: f32, h: f32, opacity: f32) {
+        let sc = self.s;
+        if self.recording(|| Op::Image { img: img.clone(), x: x / sc, y: y / sc, w: w / sc, h: h / sc, opacity, sharp: false }) {
+            return;
+        }
         if img.w == 0 || img.h == 0 {
             return;
         }
@@ -877,28 +1064,103 @@ impl Canvas {
         }
         let px = self.font_px(size, face);
         let s = self.s;
+        if self.rec.is_some() {
+            let (text, left, base, width) = with(|g| {
+                let text = fit_text(g, text, face, px, max_w.map(|m| m * s));
+                let (_, width, baseline, ink_top, ink_bottom) = g.measure(&text, face, px);
+                let (left, base) = text_origin(x * s, y * s, anchor, width, baseline, ink_top, ink_bottom);
+                (text, left / s, base / s, width / s)
+            });
+            self.recording(|| Op::Text { left, base, text, face, size, c });
+            return width;
+        }
         with(|g| {
             let text = fit_text(g, text, face, px, max_w.map(|m| m * s));
             let (layout, width, baseline, ink_top, ink_bottom) = g.measure(&text, face, px);
-            let (h, v) = anchor.parts();
-            let mut left = x * s;
-            match h {
-                'm' => left -= width / 2.0,
-                'r' => left -= width,
-                _ => {}
-            }
-            // posição da linha de base, depois arredondada para o pixel (texto nítido)
-            let base = match v {
-                'a' => y * s + baseline,
-                'm' => y * s - (ink_top + ink_bottom) / 2.0,
-                _ => y * s,
-            };
+            let (left, base) = text_origin(x * s, y * s, anchor, width, baseline, ink_top, ink_bottom);
+            // (a linha de base arredondada para o pixel: texto nítido)
             let top = base.round() - baseline;
             unsafe {
                 self.rt.DrawTextLayout(v2(left.round(), top), &layout, &self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
             width / s
         })
+    }
+
+    /// Um texto já posicionado: o canto esquerdo e a linha de base (de uma gravação).
+    fn text_at(&mut self, left: f32, base: f32, text: &str, face: Face, size: f32, c: Rgba) {
+        if text.is_empty() || size <= 0.5 {
+            return;
+        }
+        let px = self.font_px(size, face);
+        let s = self.s;
+        with(|g| {
+            let (layout, _, baseline, _, _) = g.measure(text, face, px);
+            let top = (base * s).round() - baseline;
+            unsafe {
+                self.rt.DrawTextLayout(v2((left * s).round(), top), &layout, &self.brush(c), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+        })
+    }
+
+    /// Uma tela que só grava: os desenhos viram uma lista (com o recorte e a opacidade de cada
+    /// um), sem pintar nada. As medidas de texto funcionam como numa tela comum.
+    pub fn recorder(s: f32, text_scale: f32) -> Canvas {
+        let mut c = Canvas::new(1, 1, s);
+        c.text_scale = text_scale;
+        c.rec = Some(Recorder::default());
+        c
+    }
+
+    /// O que foi gravado.
+    pub fn take_recording(mut self) -> Vec<Rec> {
+        let ops = self.rec.take().map(|r| r.ops).unwrap_or_default();
+        let _ = self.finish();
+        ops
+    }
+
+    /// Grava `op` se esta tela está gravando (e aí não desenha nada).
+    fn recording(&mut self, op: impl FnOnce() -> Op) -> bool {
+        match self.rec.as_mut() {
+            Some(r) => {
+                r.push(op());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Desenha uma operação gravada.
+    pub fn play(&mut self, op: &Op) {
+        match op {
+            &Op::RRect { x0, y0, x1, y1, r, fill } => self.fill_round_rect_with(x0, y0, x1, y1, r, fill),
+            &Op::StrokeRRect { x0, y0, x1, y1, r, c, width } => self.stroke_round_rect(x0, y0, x1, y1, r, c, width),
+            Op::GradV { x0, y0, x1, y1, r, stops, g0, g1 } => self.gradient_round_rect(*x0, *y0, *x1, *y1, *r, stops, *g0, *g1),
+            Op::GradH { x0, y0, x1, y1, r, stops, g0, g1 } => self.gradient_h(*x0, *y0, *x1, *y1, *r, stops, *g0, *g1),
+            &Op::StrokeV { x0, y0, x1, y1, r, top, bottom, width } => self.gradient_stroke_round_rect(x0, y0, x1, y1, r, top, bottom, width),
+            &Op::Glow { x0, y0, x1, y1, r, cx, cy, radius, c, width, veil } => self.glow_round_rect(x0, y0, x1, y1, r, cx, cy, radius, c, width, veil),
+            &Op::Circle { cx, cy, r, fill } => self.fill_circle_with(cx, cy, r, fill),
+            &Op::StrokeCircle { cx, cy, r, c, width } => self.stroke_circle(cx, cy, r, c, width),
+            &Op::Crescent { cx, cy, r, cx2, cy2, r2, fill } => self.crescent(cx, cy, r, cx2, cy2, r2, fill),
+            Op::Radial { cx, cy, rx, ry, stops } => self.fill_radial(*cx, *cy, *rx, *ry, stops),
+            Op::Path { pts, fill, width, closed } => match width {
+                Some(w) => self.line_with(pts, *fill, *w, *closed),
+                None => self.polygon_with(pts, *fill),
+            },
+            &Op::Arc { cx, cy, r, start, end, c, width } => self.arc(cx, cy, r, start, end, c, width),
+            Op::Segments { segs, c, width } => self.segments(segs, *c, *width),
+            &Op::HLine { x0, x1, y, c } => self.hline_px(x0, x1, y, c),
+            &Op::VLine { x, y0, y1, c } => self.vline_px(x, y0, y1, c),
+            Op::Image { img, x, y, w, h, opacity, sharp } => {
+                if *sharp {
+                    self.image_sharp(img, *x, *y, *w, *h, *opacity);
+                } else {
+                    let s = self.s;
+                    self.image_px(img, x * s, y * s, w * s, h * s, *opacity);
+                }
+            }
+            Op::Text { left, base, text, face, size, c } => self.text_at(*left, *base, text, *face, *size, *c),
+        }
     }
 
     /// Termina o desenho e devolve os pixels.

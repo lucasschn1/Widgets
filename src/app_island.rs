@@ -589,7 +589,7 @@ impl App {
         self.sh.cfg.obj_mut(KEY).insert("ilha".into(), json!(false));
         self.sh.save();
         if let Some(j) = self.media_index() {
-            events::show(self.cards[j].hwnd, !self.sh.focus);
+            events::show(self.cards[j].hwnd, !self.sh.focus && !self.cards[j].stacked);
             self.cards[j].refresh(&self.sh);
             self.cards[j].present(&self.sh, true);
             self.send_to_back(j);

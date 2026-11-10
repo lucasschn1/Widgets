@@ -42,10 +42,13 @@ pub struct ResizeAnim {
     pub save: bool,
     /// na metade direita da tela, a borda direita fica parada
     right: bool,
-    /// o tamanho de antes e se o widget desenha cada quadro da troca (`Kind::draw_between`);
-    /// senão, a imagem de um tamanho vai dando lugar à do outro
+    /// o tamanho de antes e se o widget desenha cada quadro da troca (`Kind::draw_between`)
     from: Mode,
     morph: bool,
+    /// senão, o que ele desenha em cada tamanho, gravado: as peças iguais andam de um para o
+    /// outro (`morph::draw`); sem as duas (sem animações, ou abrindo os detalhes no mesmo
+    /// tamanho), a imagem de um tamanho vai dando lugar à do outro
+    recs: Option<Box<(crate::morph::Recording, crate::morph::Recording)>>,
 }
 
 /// Quanto dura a troca de tamanho desenhada quadro a quadro: mais que a de sempre, para dar tempo
@@ -84,6 +87,15 @@ const GLOW_FRAME_MS: u64 = 33;
 pub const PRESS_SCALE: f32 = 0.97;
 /// a área apertada precisa ocupar pelo menos isto do cartão para ele afundar inteiro
 const PRESS_WHOLE: f32 = 0.2;
+
+/// Numa pilha, a troca de widget: o de cima encolhe um pouco e some, e o novo cresce até o
+/// tamanho com mola enquanto aparece. A duração e quanto eles encolhem.
+pub const SWAP_MS: f32 = 380.0;
+const SWAP_SHRINK: f32 = 0.06;
+/// As bolinhas da pilha, como no macOS: fora do cartão, do lado direito, sem fundo. Aparecem ao
+/// trocar de widget, ficam este tempo e somem neste outro.
+const DOTS_SHOW_MS: f32 = 1000.0;
+const DOTS_FADE_MS: f32 = 300.0;
 
 /// O esqueleto pulsando enquanto o widget busca os dados pela primeira vez: o ciclo e a
 /// opacidade dos blocos, do mais fraco ao mais forte.
@@ -137,6 +149,16 @@ pub struct Card {
     glow_moved: bool,
     /// a área apertada é grande: o cartão inteiro afunda
     press_whole: bool,
+    /// numa pilha, embaixo de outro: a janela fica escondida e nada é redesenhado
+    pub stacked: bool,
+    /// numa pilha: a troca de widget em andamento (desde quando, true = este entra)
+    pub swap: Option<(Instant, bool)>,
+    /// numa pilha: a posição deste widget e quantos são (as bolinhas ao lado do cartão)
+    pub dots: Option<(usize, usize)>,
+    /// quando as bolinhas apareceram (ao trocar de widget); somem sozinhas logo depois
+    pub dots_at: Option<Instant>,
+    /// arrastando outro widget por cima deste: soltar empilha os dois
+    pub drop_hint: bool,
 }
 
 impl Card {
@@ -176,6 +198,78 @@ impl Card {
             glow: None,
             glow_moved: false,
             press_whole: false,
+            stacked: false,
+            swap: None,
+            dots: None,
+            dots_at: None,
+            drop_hint: false,
+        }
+    }
+
+    /// Muda de tamanho na hora, sem animar (numa pilha, para ficar do tamanho do de cima). O
+    /// desenho guardado é do tamanho de antes e vai fora: com ele, o próximo `refresh` achava que
+    /// o widget tinha mudado de altura sozinho (como ao abrir os detalhes de um anel), animava a
+    /// altura e empurrava os vizinhos.
+    pub fn set_mode_now(&mut self, mode: Mode) {
+        if mode == self.mode {
+            return;
+        }
+        self.mode = mode;
+        self.content = None;
+        self.composed = None;
+        self.stale = true;
+    }
+
+    /// A troca de widget numa pilha: quanto já foi (0 a 1) e se este entra; None: parado.
+    fn swap_progress(&self) -> Option<(f32, bool)> {
+        self.swap.map(|(at, entering)| ((at.elapsed().as_secs_f32() * 1000.0 / SWAP_MS).min(1.0), entering))
+    }
+
+    /// A troca na pilha terminou (o App esconde o que saiu).
+    pub fn swap_done(&self) -> bool {
+        self.swap_progress().is_some_and(|(t, _)| t >= 1.0)
+    }
+
+    /// O tamanho e a opacidade da troca na pilha agora (1, 1: parado).
+    fn swap_look(&self) -> (f32, f32) {
+        match self.swap_progress() {
+            Some((t, true)) => (1.0 - SWAP_SHRINK * (1.0 - ease_spring(t)), ease_in_out((t / 0.6).min(1.0))),
+            Some((t, false)) => (1.0 - SWAP_SHRINK * ease_in_out(t), 1.0 - ease_in_out((t / 0.7).min(1.0))),
+            None => (1.0, 1.0),
+        }
+    }
+
+    /// Quanto as bolinhas da pilha aparecem agora (0 a 1): inteiras logo depois da troca,
+    /// sumindo em seguida.
+    fn dots_alpha(&self) -> f32 {
+        let Some(at) = self.dots_at else { return 0.0 };
+        let ms = at.elapsed().as_secs_f32() * 1000.0;
+        if ms < DOTS_SHOW_MS {
+            1.0
+        } else {
+            1.0 - ease_in_out(((ms - DOTS_SHOW_MS) / DOTS_FADE_MS).min(1.0))
+        }
+    }
+
+    /// As bolinhas da pilha, como no macOS: fora do cartão, na margem transparente do lado
+    /// direito, sem fundo (não cobrem nada do widget); a do widget de cima mais forte. Com uma
+    /// sombra bem leve, para aparecer também em papéis de parede claros.
+    fn draw_dots(&self, c: &mut Canvas) {
+        let Some((at, n)) = self.dots else { return };
+        let a = self.dots_alpha();
+        // (o que está saindo não desenha: as do que entra já estão no mesmo lugar)
+        if a <= 0.0 || n < 2 || matches!(self.swap, Some((_, false))) {
+            return;
+        }
+        let lay = self.layout(self.mode);
+        let (gap, r) = (7.0, 2.6);
+        let x = MARGIN + lay.w + MARGIN / 2.0;
+        let y0 = MARGIN + lay.h / 2.0 - gap * (n - 1) as f32 / 2.0;
+        for k in 0..n {
+            let y = y0 + gap * k as f32;
+            c.fill_circle(x, y + 0.4, r + 0.7, Rgba(0, 0, 0, (45.0 * a) as u8));
+            let col = if k == at { WHITE.alpha(0.95 * a) } else { WHITE.alpha(0.4 * a) };
+            c.fill_circle(x, y, r, col);
         }
     }
 
@@ -364,6 +458,10 @@ impl Card {
     /// Redesenha o cartão com os dados atuais e mostra na tela.
     pub fn refresh(&mut self, sh: &Shared) {
         self.status = self.kind.status();
+        if self.stacked && self.swap.is_none() && self.content.is_some() {
+            self.stale = true;
+            return;
+        }
         // na bateria, com a economia ligada, as animações contínuas param
         self.fps = if sh.saving { 0 } else { self.kind.overlay_fps() };
         if sh.suspended_at(self.card_rect()) && self.content.is_some() {
@@ -408,6 +506,7 @@ impl Card {
             right: false,
             from: self.mode,
             morph: false,
+            recs: None,
         });
         self.hot = None;
         self.composed = None;
@@ -425,18 +524,19 @@ impl Card {
 
     /// Opacidade da janela: os widgets esmaecem quando o mouse não está em cima.
     pub fn opacity(&self, sh: &Shared) -> u8 {
+        let swap = self.swap_look().1;
         let idle = sh.idle_opacity;
         if sh.peeking || sh.editing || self.drag.is_some() || self.temp || idle >= 1.0 {
-            return 255;
+            return (255.0 * swap).round() as u8;
         }
-        (255.0 * (idle + (1.0 - idle) * self.hover)).round() as u8
+        (255.0 * (idle + (1.0 - idle) * self.hover) * swap).round() as u8
     }
 
     /// Mostra o cartão já desenhado sobre o vidro, com a margem e os detalhes por cima.
     /// Barato: não redesenha o conteúdo. Com `move_win`, também leva a janela para `pos`.
     pub fn present(&mut self, sh: &Shared, move_win: bool) {
         let Some(content) = &self.content else { return };
-        if sh.suspended_at(self.card_rect()) && !move_win {
+        if (sh.suspended_at(self.card_rect()) || (self.stacked && self.swap.is_none())) && !move_win {
             return;
         }
         let m = self.margin;
@@ -451,7 +551,7 @@ impl Card {
         // sem sombra, como os widgets do macOS: em volta do vidro, a margem fica transparente (e
         // os cliques ali passam para a área de trabalho)
         // apertando uma área grande, o cartão inteiro afunda (e volta com mola)
-        let k = self.press_scale();
+        let k = self.press_scale() * self.swap_look().0;
         if k != 1.0 && sh.animations {
             let lay = self.layout(self.mode);
             c.scale_about(MARGIN + lay.w / 2.0, MARGIN + lay.h / 2.0, k);
@@ -511,6 +611,12 @@ impl Card {
     fn decorate(&self, c: &mut Canvas, sh: &Shared) {
         let m = MARGIN;
         self.draw_glow(c, sh);
+        // arrastando outro widget por cima: um contorno claro diz "solte para empilhar"
+        if self.drop_hint {
+            let lay = self.layout(self.mode);
+            c.stroke_round_rect(m + 1.0, m + 1.0, m + lay.w - 1.0, m + lay.h - 1.0, lay.radius - 1.0, WHITE.alpha(0.75), 2.5);
+        }
+        self.draw_dots(c);
         if self.drag.is_none() {
             if let Some((area, style, since)) = self.hot_prev {
                 Self::paint_hover(c, area, style, false, m, m, 1.0 - Self::hover_progress(since));
@@ -681,17 +787,19 @@ impl Card {
         let right = self.grows_left(self.card_rect());
         let from = self.mode;
         let morph = sh.animations && self.kind.morphs(from, mode);
+        // os outros widgets também trocam peça a peça: grava o que cada tamanho desenha
+        let recs = (sh.animations && !morph).then(|| {
+            let env = Env { cfg: &sh.cfg, key: self.key() };
+            let rec = |m: Mode| crate::morph::record(self.kind.as_ref(), m, self.s, sh.text_scale, &env);
+            Box::new((rec(from), rec(mode)))
+        });
         let old = self.render(from, sh);
         let r0 = self.radius_px(from);
         self.mode = mode;
         let new = self.render(mode, sh);
         let r1 = self.radius_px(mode);
         let (x, y) = self.pos;
-        let ms = match (sh.animations, morph) {
-            (false, _) => 0,
-            (true, true) => MORPH_MS,
-            (true, false) => ANIM_MS,
-        };
+        let ms = if sh.animations { MORPH_MS } else { 0 };
         self.anim = Some(ResizeAnim {
             old,
             new,
@@ -706,6 +814,7 @@ impl Card {
             right,
             from,
             morph,
+            recs,
         });
         self.hot = None;
         self.content = None;
@@ -731,6 +840,12 @@ impl Card {
             c.text_scale = sh.text_scale;
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw_between(&mut c, a.from, self.mode, t, &env);
+            c.finish()
+        } else if let Some(recs) = &a.recs {
+            // as peças que existem nos dois tamanhos andam de um lugar para o outro
+            let mut c = Canvas::new(w, h, self.s);
+            c.text_scale = sh.text_scale;
+            crate::morph::draw(&mut c, &recs.0, &recs.1, t);
             c.finish()
         } else {
             // os dois estados presos no mesmo canto, um sumindo e o outro aparecendo
@@ -791,7 +906,9 @@ impl Card {
     }
 
     pub fn next_frame(&self) -> Option<Instant> {
-        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() {
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() || (self.swap.is_some() && !self.swap_done())
+            || self.dots_at.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < DOTS_SHOW_MS + DOTS_FADE_MS)
+        {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
         }
         let mut wait = None;
@@ -860,6 +977,64 @@ mod tests {
 
     fn card() -> Card {
         Card::new(Box::new(crate::widgets::battery::Battery::sample()), HWND::default(), Mode::M, 1.0)
+    }
+
+    /// Mudar de tamanho na hora (numa pilha) não deixa o desenho do tamanho de antes: senão o
+    /// cartão animava a altura sozinho ao aparecer.
+    #[test]
+    fn changing_size_at_once_drops_the_old_drawing() {
+        let mut c = card();
+        c.content = Some(Image::new(320, 154));
+        c.set_mode_now(Mode::G);
+        assert_eq!(c.mode, Mode::G);
+        assert!(c.content.is_none() && c.stale && c.anim.is_none());
+        // o mesmo tamanho: nada muda
+        c.content = Some(Image::new(320, 448));
+        c.stale = false;
+        c.set_mode_now(Mode::G);
+        assert!(c.content.is_some() && !c.stale);
+    }
+
+    /// As bolinhas da pilha aparecem ao trocar de widget e somem sozinhas logo depois (como no
+    /// macOS), sem depender do mouse.
+    #[test]
+    fn stack_dots_show_on_a_switch_and_then_fade() {
+        let mut c = card();
+        c.dots = Some((1, 3));
+        assert_eq!(c.dots_alpha(), 0.0);
+        c.set_hover(true);
+        c.hover = 1.0;
+        assert_eq!(c.dots_alpha(), 0.0, "só o mouse em cima não mostra");
+        c.dots_at = Some(Instant::now());
+        assert_eq!(c.dots_alpha(), 1.0);
+        assert!(c.next_frame().is_some(), "redesenha para sumir");
+        c.dots_at = Some(Instant::now() - Duration::from_millis((DOTS_SHOW_MS + DOTS_FADE_MS / 2.0) as u64));
+        let mid = c.dots_alpha();
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        c.dots_at = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(c.dots_alpha(), 0.0);
+        // e ficam na margem transparente, fora do cartão (sem passar da janela)
+        let lay = c.layout(c.mode);
+        let x = MARGIN + lay.w + MARGIN / 2.0;
+        assert!(x - 3.3 > MARGIN + lay.w && x + 3.3 < 2.0 * MARGIN + lay.w);
+    }
+
+    /// Numa pilha: o que entra cresce até o tamanho (com mola) enquanto aparece, o que sai
+    /// encolhe um pouco e some; parado, nada muda.
+    #[test]
+    fn swapping_in_a_stack() {
+        let mut c = card();
+        assert_eq!(c.swap_look(), (1.0, 1.0));
+        c.swap = Some((Instant::now(), true));
+        let (k, a) = c.swap_look();
+        assert!(k < 1.0 && a < 0.1, "{k} {a}");
+        assert!(!c.swap_done() && c.next_frame().is_some());
+        c.swap = Some((Instant::now() - Duration::from_secs(1), true));
+        assert_eq!(c.swap_look(), (1.0, 1.0));
+        assert!(c.swap_done());
+        c.swap = Some((Instant::now() - Duration::from_secs(1), false));
+        let (k, a) = c.swap_look();
+        assert!((k - (1.0 - SWAP_SHRINK)).abs() < 1e-3 && a == 0.0, "{k} {a}");
     }
 
     /// Apertando uma área grande (o anel), o cartão inteiro afunda e volta com mola, passando um
