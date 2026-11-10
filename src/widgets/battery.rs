@@ -132,6 +132,11 @@ fn keeps_left(shown: f64, estimate: f64) -> bool {
     (estimate - shown).abs() <= (estimate * 0.04).max(120.0)
 }
 
+/// Uma leitura que pula pelo menos isto da carga de antes (sem entrar nem sair da tomada) é
+/// estranha, e espera até `DOUBT_READINGS` leituras para ser aceita.
+const JUMP: f32 = 10.0;
+const DOUBT_READINGS: u8 = 2;
+
 /// O consumo médio novo, com a leitura `mw` feita `dt` segundos depois da anterior.
 fn smooth_drain(avg: Option<f32>, mw: f32, dt: f32) -> f32 {
     match avg {
@@ -189,6 +194,8 @@ pub struct Battery {
     shimmering: bool,
     /// os aparelhos já avisados de pouca bateria (de novo só depois de carregar)
     warned: Vec<String>,
+    /// leituras estranhas seguidas que ainda esperam confirmação (ver `steady`)
+    doubt: u8,
 }
 
 impl Battery {
@@ -228,6 +235,7 @@ impl Battery {
             mode_seen: Cell::new(None),
             shimmering: false,
             warned: Vec::new(),
+            doubt: 0,
         }
     }
 
@@ -867,6 +875,24 @@ impl Battery {
 
     // ---------- atualização ----------
 
+    /// A leitura a usar: uma estranha de um instante fica esperando a próxima confirmar. O
+    /// Windows às vezes devolve, por uma leitura, "sem bateria" ou uma carga muito diferente
+    /// (voltando da suspensão, por exemplo); acreditando nela, o anel sumia (ou descia até perto
+    /// de zero) e o tempo restante pulava, até a leitura seguinte, 5 s depois.
+    fn steady(&mut self, new: Option<Power>) -> Option<Power> {
+        let odd = match (&self.power, &new) {
+            (Some(_), None) => true,
+            (Some(o), Some(n)) => o.plugged == n.plugged && (o.percent - n.percent).abs() >= JUMP,
+            _ => false,
+        };
+        if odd && self.doubt < DOUBT_READINGS {
+            self.doubt += 1;
+            return self.power.clone();
+        }
+        self.doubt = 0;
+        new
+    }
+
     /// Os textos de agora: a porcentagem, a linha de baixo do anel e a de cima.
     fn current_texts(&self) -> (String, String, String) {
         (self.percent_text(), self.status_line(), self.header_line())
@@ -1244,7 +1270,8 @@ impl Kind for Battery {
             let now = Instant::now();
             if now >= self.next_power {
                 self.next_power = now + POWER_EVERY;
-                redraw |= self.apply_power(battery::power());
+                let reading = self.steady(battery::power());
+                redraw |= self.apply_power(reading);
                 self.sample_now(ctx);
             }
             if now >= self.next_devices && self.reading.is_none() {
@@ -1513,6 +1540,65 @@ mod tests {
         let path = std::env::temp_dir().join("bateria_aneis.png");
         crate::gfx::save_png(&sheet.finish(), &path).unwrap();
         println!("{}", path.display());
+    }
+
+    /// Uma leitura estranha de um instante ("sem bateria", ou a carga pulando de 65% para 0%)
+    /// não apaga o anel: espera a próxima. Se ela se confirmar, aí vale.
+    #[test]
+    fn odd_readings_wait_for_the_next_one() {
+        let mut b = Battery::sample();
+        let ok = b.power.clone().unwrap();
+        // "sem bateria" por uma leitura: fica a de antes
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(Some(ok.clone())), Some(ok.clone()));
+        // a carga pulando para 0% e voltando: o 0% nunca aparece
+        let mut zero = ok.clone();
+        zero.percent = 0.0;
+        assert_eq!(b.steady(Some(zero.clone())), Some(ok.clone()));
+        assert_eq!(b.steady(Some(ok.clone())), Some(ok.clone()));
+        // mudanças normais passam na hora (1% a menos, ligar na tomada mesmo com salto)
+        let mut less = ok.clone();
+        less.percent -= 1.0;
+        assert_eq!(b.steady(Some(less.clone())), Some(less.clone()));
+        let mut plugged = less.clone();
+        (plugged.plugged, plugged.percent) = (true, 40.0);
+        assert_eq!(b.steady(Some(plugged.clone())), Some(plugged.clone()));
+        // uma mudança de verdade (a bateria saiu): vale depois de se repetir
+        b.power = Some(ok.clone());
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(None), Some(ok.clone()));
+        assert_eq!(b.steady(None), None);
+    }
+
+    /// Passando por leituras estranhas e animações, o anel termina desenhado com a cor da
+    /// carga (o verde da bateria não some).
+    #[test]
+    fn the_ring_keeps_its_color_through_odd_readings() {
+        com();
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let mut b = Battery::sample();
+        let mut p = b.power.clone().unwrap();
+        p.percent = 65.0;
+        let mut zero = p.clone();
+        zero.percent = 0.0;
+        for reading in [Some(p.clone()), None, Some(p.clone()), Some(zero), Some(p.clone()), Some(p.clone())] {
+            let r = b.steady(reading);
+            b.apply_power(r);
+            // a animação de cada mudança terminou
+            b.grow = b.grow.map(|(f, t, at, d)| (f, t, at - Duration::from_secs(5), d));
+            b.roll = None;
+        }
+        assert_eq!(b.shown(), 65.0);
+        let l = Layout::of(Mode::M);
+        let mut c = Canvas::new(l.w as u32, l.h as u32, 1.0);
+        b.draw(&mut c, Mode::M, &env);
+        let img = c.finish();
+        // um ponto no meio do arco (a 30% do caminho): verde
+        let (x, y) = RING_M.at(30.0);
+        let i = ((y.round() as u32 * img.w + x.round() as u32) * 4) as usize;
+        let (bl, g, r) = (img.px[i] as i32, img.px[i + 1] as i32, img.px[i + 2] as i32);
+        assert!(g > 150 && g > r + 40 && g > bl + 20, "o arco não está verde: {:?}", (r, g, bl));
     }
 
     /// Depois que uma animação acaba, mais um quadro é desenhado: o último podia ficar no meio do
