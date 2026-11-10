@@ -271,6 +271,33 @@ fn every_widget_has_its_registry_entries() {
     }
 }
 
+/// Numa pilha, a roda troca de widget, menos onde ele mesmo usa a roda: as horas do Tempo, a
+/// lista do GitHub, o volume do Tocando agora e o anel do Pomodoro. Nenhum widget quebra ao ser
+/// perguntado em qualquer ponto.
+#[test]
+fn widgets_say_where_they_use_the_wheel() {
+    com();
+    for (_, kind, _) in cases() {
+        for &mode in kind.sizes() {
+            let l = Layout::of(mode);
+            for k in 0..=20 {
+                let _ = kind.uses_wheel(l.w * k as f32 / 20.0, l.h * k as f32 / 20.0, mode);
+            }
+        }
+    }
+    let tempo = Tempo::sample("inicio", 0, 0.0, Mode::M);
+    assert!(tempo.uses_wheel(160.0, 110.0, Mode::M), "em cima das horas");
+    assert!(!tempo.uses_wheel(160.0, 30.0, Mode::M), "na temperatura");
+    assert!(!tempo.uses_wheel(77.0, 77.0, Mode::P), "o pequeno não rola");
+    let cfg = empty_cfg();
+    let pomodoro = Pomodoro::new(&cfg);
+    assert!(pomodoro.uses_wheel(77.0, 62.0, Mode::P), "no anel");
+    assert!(!pomodoro.uses_wheel(4.0, 150.0, Mode::P), "no canto");
+    let github = GitHub::sample(&cfg, &json!({}));
+    assert!(!github.uses_wheel(160.0, 60.0, Mode::G) && github.uses_wheel(160.0, 300.0, Mode::G), "só na lista do grande");
+    assert!(!Media::sample().uses_wheel(160.0, 100.0, Mode::M), "o volume pela roda só na barra do grande");
+}
+
 /// Todos os widgets, em todos os estados, trocam de tamanho peça a peça sem quebrar; e o último
 /// quadro da troca é o desenho do tamanho novo (nada a mais, nada faltando).
 #[test]

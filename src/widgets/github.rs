@@ -934,6 +934,11 @@ impl Kind for GitHub {
         None
     }
 
+    fn uses_wheel(&self, _x: f32, y: f32, mode: Mode) -> bool {
+        // a lista de atividades do grande
+        Self::list_geom(mode).is_some_and(|(top, _)| y >= top - 4.0) && self.data.is_some()
+    }
+
     fn wheel(&mut self, _x: f32, _y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
         let (Some((_, visible)), Some(d)) = (Self::list_geom(mode), &self.data) else { return };
         let top = d.rows.len().saturating_sub(visible) as i64;

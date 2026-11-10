@@ -398,6 +398,11 @@ pub trait Kind {
         HoverStyle::Surface
     }
     fn wheel(&mut self, _x: f32, _y: f32, _steps: f32, _mode: Mode, _ctx: &mut Ctx) {}
+    /// A roda do mouse em (x, y) faz algo neste widget (rolar as horas, mudar o volume)? Numa
+    /// pilha, a roda troca de widget, menos onde ele mesmo a usa.
+    fn uses_wheel(&self, _x: f32, _y: f32, _mode: Mode) -> bool {
+        false
+    }
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
         Vec::new()
     }
