@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 
 use super::{Ctx, Env, Hot, HoverStyle, Kind, Layout, MenuItem, Mode, Status, SMALL, WIDE};
 use crate::battery::{self, DevKind, Device, Power};
+use super::odometer::draw_rolling;
 use crate::gfx::{Anchor, Canvas, Face, Fill};
 use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
@@ -1008,81 +1009,6 @@ fn inner_width(g: Ring) -> f32 {
     2.0 * (g.r - g.w / 2.0) * 0.68
 }
 
-/// Os dois textos têm o mesmo formato (os mesmos caracteres, com dígitos nos mesmos lugares)?
-/// Só aí os dígitos rolam: "3 h 20 restantes" → "3 h 05 restantes" sim; "99" → "100" não.
-fn same_shape(a: &str, b: &str) -> bool {
-    let shape = |s: &str| s.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect::<String>();
-    shape(a) == shape(b)
-}
-
-/// Escreve `text` como `Canvas::text`, mas com os dígitos que mudaram desde `before` rolando como
-/// num hodômetro (`t`, de 0 a 1, do caminho): cada dígito é uma coluna de 0 a 9 que sobe quando
-/// ele aumenta e desce quando diminui, passando pelos do meio, como no mockup. Sem `before`, ou
-/// de outro formato, escreve parado. Devolve a largura escrita.
-#[allow(clippy::too_many_arguments)]
-fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&str>, t: f32, face: Face, size: f32, color: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
-    let total = c.text_width(text, face, size);
-    let Some(before) = before.filter(|b| t < 1.0 && b != &text && same_shape(b, text) && max_w.is_none_or(|m| total <= m)) else {
-        return c.text(x, y, text, face, size, color, anchor, max_w);
-    };
-    let (h, v) = anchor.parts();
-    let x0 = match h {
-        'm' => x - total / 2.0,
-        'r' => x - total,
-        _ => x,
-    };
-    // os dígitos que rolam são escritos pela linha de base; os parados, como o resto do texto
-    let (base, left_anchor) = match v {
-        'a' => (y + c.baseline(face, size), Anchor::LA),
-        'm' => (y + size * 0.36, Anchor::LM),
-        _ => (y, Anchor::LS),
-    };
-    // como no mockup: uma coluna com um dígito a cada 1 em, vista por uma janela de 1 em em volta
-    // do dígito (o de antes e o novo aparecem só em parte, no meio do caminho)
-    let step = size;
-    // (dígitos não descem da linha de base: embaixo, a janela termina logo nela, senão o topo
-    // do dígito seguinte aparece embaixo do número no fim do caminho)
-    let (top, bottom) = (base - size * 0.9, base + size * 0.05);
-    let digit_w = (0..10).map(|d| c.text_width(&d.to_string(), face, size)).fold(0.0, f32::max);
-    let rising = digits_of(text) > digits_of(before);
-    for ((i, ch), old) in text.char_indices().zip(before.chars()) {
-        let left = x0 + c.text_width(&text[..i], face, size);
-        let digits = if ch != old { ch.to_digit(10).zip(old.to_digit(10)) } else { None };
-        let Some((to, from)) = digits else {
-            c.text(left, y, ch.encode_utf8(&mut [0; 4]), face, size, color, left_anchor, None);
-            continue;
-        };
-        let cx = left + c.text_width(ch.encode_utf8(&mut [0; 4]), face, size) / 2.0;
-        let at = from as f32 + odometer_steps(from, to, rising) as f32 * t;
-        c.push_round_clip(cx - digit_w / 2.0 - 1.0, top, cx + digit_w / 2.0 + 1.0, bottom, 0.0);
-        let lo = at.floor() as i32;
-        for d in [lo, lo + 1] {
-            c.text(cx, base + (d as f32 - at) * step, &d.rem_euclid(10).to_string(), face, size, color, Anchor::MS, None);
-        }
-        c.pop_clip();
-    }
-    total
-}
-
-/// Só os dígitos de um texto, para saber se o número subiu ou desceu.
-fn digits_of(s: &str) -> String {
-    s.chars().filter(char::is_ascii_digit).collect()
-}
-
-/// Quantas casas um dígito anda de `from` até `to`, como num hodômetro: todos para o mesmo lado
-/// (para cima quando o número sobe, para baixo quando desce), dando a volta no 9/0. (Antes, de
-/// 2 h 59 para 3 h 00 o 9 voltava até o 0 passando por todos, em vez de andar uma casa.)
-fn odometer_steps(from: u32, to: u32, rising: bool) -> i32 {
-    let up = (to as i32 - from as i32).rem_euclid(10);
-    if up == 0 {
-        0
-    } else if rising {
-        up
-    } else {
-        up - 10
-    }
-}
-
 /// O tamanho da porcentagem (`text` e o "%" menor) para caber em `max_w`, até `size`.
 fn fit_size(c: &Canvas, text: &str, size: f32, max_w: f32) -> f32 {
     // (a largura do texto não diminui na mesma proporção da fonte: algumas rodadas até caber)
@@ -1389,8 +1315,6 @@ mod tests {
     /// formato é o mesmo, passando pelos dígitos do meio.
     #[test]
     fn digits_roll_like_an_odometer() {
-        assert!(same_shape("73", "68") && same_shape("3 h 20 restantes", "3 h 05 restantes"));
-        assert!(!same_shape("99", "100") && !same_shape("45 min restantes", "1 h 05 restantes"));
         let b = Battery::sample_rolling(200);
         let roll = b.roll.as_ref().unwrap();
         assert_eq!((roll.percent.as_str(), roll.status.as_str()), ("73", "3 h 20 restantes"));
@@ -1485,15 +1409,10 @@ mod tests {
         assert!(keeps_left(5.0 * 3600.0, 5.0 * 3600.0 + 700.0) && !keeps_left(5.0 * 3600.0, 5.0 * 3600.0 + 800.0));
     }
 
-    /// Os dígitos andam todos para o mesmo lado, dando a volta no 9/0, como num hodômetro.
+    /// Os dígitos passando pela virada (2 h 59 → 3 h 00) desenham em todos os tamanhos (a conta
+    /// de cada dígito fica nos testes de `odometer`).
     #[test]
     fn odometer_digits_wrap_around() {
-        // 2 h 59 → 3 h 00 (subindo): 2→3, 5→0 e 9→0 andam uma, cinco e uma casa para cima
-        assert_eq!((odometer_steps(2, 3, true), odometer_steps(5, 0, true), odometer_steps(9, 0, true)), (1, 5, 1));
-        // 3 h 00 → 2 h 59 (descendo): tudo para baixo
-        assert_eq!((odometer_steps(3, 2, false), odometer_steps(0, 5, false), odometer_steps(0, 9, false)), (-1, -5, -1));
-        assert_eq!(odometer_steps(4, 4, true), 0);
-        assert!(digits_of("3 h 00 restantes") > digits_of("2 h 59 restantes"));
         // desenha passando pela virada, em todos os tamanhos
         com();
         let env_cfg = json!({"bateria": {}, "app": {}});

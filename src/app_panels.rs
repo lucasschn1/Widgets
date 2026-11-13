@@ -536,6 +536,15 @@ impl App {
                     }
                 }
             }
+            "claude_natal" => {
+                let value = value.to_string();
+                self.widget_or_cfg("claude", |w| {
+                    if !w.is_object() {
+                        *w = json!({});
+                    }
+                    w.as_object_mut().unwrap().insert("natal".into(), json!(value));
+                });
+            }
             "longa_a_cada" => {
                 let n: u32 = value.parse().unwrap_or(4);
                 match self.find("pomodoro") {

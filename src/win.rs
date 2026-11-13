@@ -263,6 +263,29 @@ pub fn blit(hwnd: HWND, img: &Image, pos: Option<(i32, i32)>, alpha: u8) {
     }
 }
 
+/// Leva a janela para `pos` (None: fica onde está) com `size` pixels, sem mexer na ordem nem no
+/// foco (a janela da placa de vídeo, que não usa `blit`).
+pub fn place(hwnd: HWND, pos: Option<(i32, i32)>, size: (i32, i32)) {
+    let (x, y) = pos.unwrap_or((0, 0));
+    let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    if pos.is_none() {
+        flags |= SWP_NOMOVE;
+    }
+    unsafe {
+        let _ = SetWindowPos(hwnd, None, x, y, size.0, size.1, flags);
+    }
+}
+
+/// Só `area` (em pixels da janela) recebe cliques; fora dela, eles passam para o que está
+/// embaixo. None: a janela toda.
+pub fn set_hit_area(hwnd: HWND, area: Option<Rect>) {
+    unsafe {
+        let region = area.map(|(x0, y0, x1, y1)| CreateRectRgn(x0, y0, x1, y1));
+        // (a janela fica dona da região e a apaga quando trocar)
+        let _ = SetWindowRgn(hwnd, region, true);
+    }
+}
+
 // ---------- registro e sistema ----------
 
 /// Valor de texto (ou número, convertido) em HKEY_CURRENT_USER; "" se não existir.
@@ -342,9 +365,36 @@ pub fn gb(n: u64) -> f64 {
     n as f64 / 1024f64.powi(3)
 }
 
-pub fn on_battery() -> bool {
+/// A economia de energia do Windows está ligada? (Na tomada ou na bateria: só desconectar o
+/// notebook não conta.)
+pub fn energy_saver() -> bool {
     let mut status = SYSTEM_POWER_STATUS::default();
-    unsafe { GetSystemPowerStatus(&mut status).is_ok() && status.ACLineStatus == 0 }
+    unsafe { GetSystemPowerStatus(&mut status).is_ok() && saver_on(&status) }
+}
+
+/// Deixa (`allow`) ou não o Windows pôr os widgets no "modo de eficiência". Na bateria, ele faz
+/// isso sozinho com programas em segundo plano: a CPU fica mais lenta para eles e os relógios
+/// passam a acordar de 15,6 em 15,6 ms (ou mais), e as animações andam aos trancos. Fora da
+/// economia de energia, os widgets pedem para rodar normal; com ela, voltam a economizar.
+pub fn allow_throttling(allow: bool) -> bool {
+    use windows::Win32::System::Threading::*;
+    let state = throttling_state(allow);
+    unsafe {
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state as *const _ as *const _, std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32).is_ok()
+    }
+}
+
+/// O pedido ao Windows: sempre sobre a velocidade e os relógios; ligados só se `allow`.
+fn throttling_state(allow: bool) -> windows::Win32::System::Threading::PROCESS_POWER_THROTTLING_STATE {
+    use windows::Win32::System::Threading::*;
+    let both = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ControlMask: both, StateMask: if allow { both } else { 0 } }
+}
+
+/// `SystemStatusFlag` é 1 com a economia de energia (ou a "economia de bateria" das versões
+/// antigas) ligada; `ACLineStatus` (na tomada ou não) não entra na conta.
+fn saver_on(status: &SYSTEM_POWER_STATUS) -> bool {
+    status.SystemStatusFlag == 1
 }
 
 /// Jogo, vídeo em tela cheia ou apresentação: os widgets nem aparecem.
@@ -562,6 +612,39 @@ pub fn style_window(hwnd: HWND, caption: Option<crate::theme::Rgba>, frameless: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Só a economia de energia do Windows pausa as animações: o notebook fora da tomada, sem
+    /// ela, anima normalmente.
+    #[test]
+    fn only_energy_saver_counts_not_the_battery() {
+        let status = |ac: u8, flag: u8| SYSTEM_POWER_STATUS { ACLineStatus: ac, SystemStatusFlag: flag, ..Default::default() };
+        assert!(!saver_on(&status(0, 0)), "na bateria, sem a economia");
+        assert!(!saver_on(&status(1, 0)), "na tomada");
+        assert!(saver_on(&status(0, 1)), "na bateria, com a economia");
+        assert!(saver_on(&status(1, 1)), "na tomada, com a economia");
+    }
+
+    /// Fora da economia de energia, os widgets pedem ao Windows para não entrar no modo de
+    /// eficiência (CPU lenta e relógios espaçados deixavam as animações aos trancos na bateria);
+    /// com ela, liberam. (Só neste processo de teste.)
+    #[test]
+    fn asks_windows_not_to_slow_down_the_animations() {
+        use windows::Win32::System::Threading::*;
+        let off = throttling_state(false);
+        assert_eq!(off.StateMask, 0);
+        assert_ne!(off.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0);
+        assert_ne!(off.ControlMask & PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, 0);
+        assert_eq!(throttling_state(true).StateMask, off.ControlMask);
+        let read = || {
+            let mut st = PROCESS_POWER_THROTTLING_STATE { Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION, ..Default::default() };
+            unsafe { GetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &mut st as *mut _ as *mut _, std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32).unwrap() };
+            st
+        };
+        assert!(allow_throttling(false));
+        assert_eq!((read().ControlMask, read().StateMask), (off.ControlMask, 0));
+        assert!(allow_throttling(true));
+        assert_eq!(read().StateMask, off.ControlMask);
+    }
 
     #[test]
     fn clock_does_not_flicker_at_the_turn_of_the_minute() {

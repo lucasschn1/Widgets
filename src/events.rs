@@ -531,6 +531,14 @@ pub fn create_layered(class: PCWSTR, click_through: bool) -> HWND {
     unsafe { CreateWindowExW(ex, class, w!("Widgets"), WS_POPUP, 0, 0, 1, 1, None, None, None, None).expect("CreateWindowExW") }
 }
 
+/// Janela de cartão desenhada pela placa de vídeo (veja `gpu`): sem a cópia em memória que o
+/// Windows guarda das janelas comuns, nem a transparência por pixel das janelas transparentes (o
+/// desenho chega pela DirectComposition).
+pub fn create_composed(class: PCWSTR) -> HWND {
+    let ex = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    unsafe { CreateWindowExW(ex, class, w!("Widgets"), WS_POPUP, 0, 0, 1, 1, None, None, None, None).expect("CreateWindowExW") }
+}
+
 /// Janela pop-up transparente (menu, avisos): recebe cliques e pode ganhar o foco do teclado.
 pub fn create_popup() -> HWND {
     let ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;

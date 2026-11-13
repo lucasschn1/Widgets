@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "widgets"
-version = "3.16.0"
+version = "3.17.0"
 dependencies = [
  "serde_json",
  "ureq",

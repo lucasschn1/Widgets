@@ -12,9 +12,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::clawd::{self, Anim, Crab, Mood};
+use super::odometer;
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Request, Status, SMALL, WIDE};
 use crate::claude_history::{self as history, Tool, Turn, HISTORY_DAYS};
-use crate::claude_usage::{self as usage, Link, Usage, Window, FIVE_HOURS};
+use crate::claude_usage::{self as usage, Link, Notice, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
@@ -58,7 +59,26 @@ struct Activity {
     steps: u32,
     /// a última ferramenta chamada na conversa trabalhando que mudou por último
     tool: Option<Tool>,
+    /// subagentes trabalhando agora, somando todas as conversas
+    helpers: u32,
+    /// na conversa trabalhando: o comando rodando (e desde quando), o último que terminou
+    /// (quando, deu certo), o modo de planejamento e a última compactação
+    running: Option<(String, f64)>,
+    last_run: Option<(f64, bool)>,
+    plan: bool,
+    compacted_at: Option<f64>,
+    /// quanto do contexto ela ocupa (0 a 1), se o Claude Code informou
+    context: Option<f64>,
+    /// o Claude Code parou esperando você (o que ele pede)
+    notice: Option<Notice>,
 }
+
+/// Um comando rodando há tanto tempo é demorado: o Clawd pega a ampulheta e o balão conta o tempo.
+const LONG_RUN: f64 = 20.0;
+/// Por quanto tempo o balão diz que o comando falhou ou passou.
+const FLASH_FOR: Duration = Duration::from_secs(6);
+/// Um aviso de "precisa de você" mais velho que isto já não vale.
+const NOTICE_FOR: f64 = 30.0 * 60.0;
 const USAGE_URL: &str = "https://claude.ai/settings/usage";
 
 /// Os medidores são 3/4 de volta, abertos embaixo: de 135° (embaixo à esquerda) a 405°, pelo alto.
@@ -139,6 +159,14 @@ impl Grow {
     fn value(&self) -> f64 {
         let t = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
         self.from + (self.to - self.from) * ease(t)
+    }
+
+    /// A porcentagem contando junto com o arco (de um inteiro ao outro, no mesmo ritmo): 43,6 é o
+    /// 3 rolando para o 4.
+    fn count(&self) -> f64 {
+        let t = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
+        let (a, b) = ((self.from * 100.0).round(), (self.to * 100.0).round());
+        a + (b - a) * ease(t)
     }
 
     /// Há quantos milissegundos o arco passou de 90%, se ele subiu passando por aí e já passou.
@@ -348,6 +376,45 @@ pub struct Claude {
     /// quadradinhos para quantos, desde quando)
     shifted: Option<bool>,
     slide: Option<(f32, f32, Instant)>,
+    /// o último comando que terminou e a última compactação já vistos (para reagir só aos novos)
+    /// e se o último comando tinha falhado
+    seen_run: Option<f64>,
+    failing: bool,
+    seen_compact: Option<f64>,
+    /// o recado do balão por um tempo (o comando falhou, passou): (texto, cor, até quando)
+    flash: Option<(String, Rgba, Instant)>,
+}
+
+/// O tema de Natal: "sempre", "nunca" ou, o normal, só em dezembro.
+pub fn xmas(cfg: &serde_json::Value) -> bool {
+    match cfg["claude"]["natal"].as_str() {
+        Some("sempre") => true,
+        Some("nunca") => false,
+        _ => win::local_time().month == 12,
+    }
+}
+
+/// Quantas folhas tem a pilha de papéis da conversa ocupando `context` do contexto: a partir
+/// de 60%, uma a cada 10%.
+pub fn pile_for(context: Option<f64>) -> u8 {
+    context.map_or(0, |c| (((c - 0.5) * 10.0).floor().max(0.0) as u8).min(clawd::PILE_MAX))
+}
+
+/// O que dizer no balão quando o Claude Code pede permissão para usar `tool`.
+fn asks_for(tool: Option<&str>) -> String {
+    match tool {
+        Some("Bash" | "PowerShell") => "Precisa de você: rodar um comando?".into(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit") => "Precisa de você: editar um arquivo?".into(),
+        Some("WebFetch" | "WebSearch") => "Precisa de você: acessar a web?".into(),
+        Some(name) => format!("Precisa de você: usar {}?", name.rsplit("__").next().unwrap_or(name)),
+        None => "Precisa de você".into(),
+    }
+}
+
+/// Minutos e segundos ("1:07").
+fn clock(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
 }
 
 impl Claude {
@@ -374,6 +441,10 @@ impl Claude {
             perched: false,
             shifted: None,
             slide: None,
+            seen_run: None,
+            failing: false,
+            seen_compact: None,
+            flash: None,
         };
         c.reload(true);
         c.read_activity();
@@ -436,12 +507,53 @@ impl Claude {
     /// O mesmo exemplo, com o Clawd no meio de uma animação (`t` de 0 a 1).
     #[cfg(test)]
     pub fn with_crab(mut self, anim: clawd::Anim, t: f32) -> Claude {
-        let dressed = self.crab.scene(clawd::View::Side).hat;
+        let dressed = self.crab.sleuthing();
         self.crab = Crab::playing(anim, t);
         if dressed {
             self.crab = std::mem::take(&mut self.crab).dressed();
         }
         self
+    }
+
+    /// Trabalhando com a ferramenta `name` (sobre `input`): o que aparece embaixo do Clawd e no
+    /// balão da barra de tarefas (para as imagens do README).
+    #[cfg(test)]
+    pub fn using_tool(mut self, name: &str, input: &str) -> Claude {
+        self.activity.tool = Some(Tool { name: name.into(), input: input.into() });
+        self
+    }
+
+    /// Com `n` ajudantes (subagentes) trabalhando junto.
+    #[cfg(test)]
+    pub fn with_helpers(mut self, n: u8) -> Claude {
+        self.activity.helpers = n as u32;
+        self.crab.helpers = n;
+        self
+    }
+
+    /// Com a neve do Natal caindo há `secs` segundos.
+    #[cfg(test)]
+    pub fn snowing_for(mut self, secs: f32) -> Claude {
+        self.crab.snow_from(secs);
+        self
+    }
+
+    /// O Clawd sozinho e grande (centro da grade em (cx, cy), num lugar de `unit` pontos), como ele
+    /// está no médio, com a neve se for Natal em `cfg` (para as imagens do README).
+    #[cfg(test)]
+    pub fn draw_crab_alone(&self, c: &mut Canvas, cx: f32, cy: f32, unit: f32, cfg: &serde_json::Value) {
+        self.crab.xmas.set(xmas(cfg));
+        let pose = self.crab_pose(Mode::M);
+        if self.crab.xmas.get() {
+            clawd::draw_snow(c, cx, cy, unit, &pose, self.crab.snow_secs());
+        }
+        clawd::draw(c, cx, cy, unit, &pose);
+    }
+
+    /// Muito tempo sem o Claude Code responder: cochilando.
+    #[cfg(test)]
+    pub fn sample_napping() -> Claude {
+        Claude::sample().idle_for(NAP_AFTER + 60.0)
     }
 
     /// Com o Claude Code trabalhando agora (o Clawd no notebook).
@@ -488,6 +600,7 @@ impl Claude {
             // a última resposta do Claude Code há pouco (já parado: o Clawd sem o caderno)
             updated: now - 5.0 * 60.0,
             sessions: Vec::new(),
+            contexts: Vec::new(),
         };
         Claude {
             view: View { usage: Some(usage), link: Link::Connected },
@@ -512,6 +625,10 @@ impl Claude {
             perched: false,
             shifted: None,
             slide: None,
+            seen_run: None,
+            failing: false,
+            seen_compact: None,
+            flash: None,
         }
     }
 
@@ -653,9 +770,23 @@ impl Claude {
             };
             let still = modified.elapsed().map_or(0.0, |d| d.as_secs_f64());
             let busy = turn.busy.map(|b| b && still < STALE_AFTER);
+            if busy == Some(true) {
+                act.helpers += turn.helpers;
+            }
             if busy == Some(true) && newest.is_none_or(|s| still < s) {
                 newest = Some(still);
                 act.tool = turn.tool.clone();
+                act.running = turn.running.clone();
+                act.last_run = turn.last_run;
+                act.plan = turn.plan;
+                act.compacted_at = turn.compacted_at;
+                act.context = self.view.usage.as_ref().and_then(|u| u.context(&path));
+                // parou esperando você: o aviso é desta conversa e ela não mudou desde então
+                // (os exemplos, com a hora fixa, não leem o aviso de verdade)
+                if self.fixed_now.is_none() {
+                    let changed = now - still;
+                    act.notice = crate::claude_usage::load_notice().filter(|n| n.transcript == path && n.at + 1.5 >= changed && now - n.at < NOTICE_FOR);
+                }
             }
             act.busy = match (act.busy, busy) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
@@ -753,10 +884,18 @@ impl Claude {
             return "limite reiniciou";
         }
         match self.mood() {
-            Mood::Busy if playing(Anim::Think) => "pensando",
-            Mood::Busy if playing(Anim::Investigate) => "investigando",
+            Mood::Busy if self.activity.notice.is_some() => "precisa de você",
+            Mood::Busy if playing(Anim::Oops) => "o comando falhou",
+            Mood::Busy if playing(Anim::Cheer) => "passou!",
+            Mood::Busy if playing(Anim::Tidy) => "arrumando a conversa",
+            Mood::Busy if playing(Anim::Wait) => "esperando o comando",
+            Mood::Busy if playing(Anim::Scout) => "pesquisando na web",
+            Mood::Busy if playing(Anim::Plan) => "planejando",
+            Mood::Busy if playing(Anim::Think) || playing(Anim::Puff) => "pensando",
             Mood::Busy if playing(Anim::Idea) => "teve uma ideia",
             Mood::Busy if playing(Anim::Coffee) => "tomando café",
+            Mood::Busy if playing(Anim::HatOff) => "programando",
+            Mood::Busy if self.crab.sleuthing() || playing(Anim::HatOn) => "investigando",
             Mood::Busy => "programando",
             Mood::Sleepy => "cochilando",
             Mood::Worried => "perto do limite",
@@ -880,7 +1019,9 @@ impl Claude {
     /// porcentagem no meio, o nome embaixo dela e o ícone na abertura de baixo. A partir de 90%
     /// o arco fica vermelho; `since` é há quantos milissegundos ele acabou de passar de 90% (o
     /// laranja vira vermelho e a bolinha cresce e volta); None: já estava assim.
-    fn gauge(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit, v: Option<f64>, since: Option<f32>, icon: bool) {
+    /// `count`: a porcentagem contando junto com o arco (None: parada no número).
+    #[allow(clippy::too_many_arguments)]
+    fn gauge(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit, v: Option<f64>, count: Option<f64>, since: Option<f32>, icon: bool) {
         let (cy, r, w) = (g.cy, g.r, g.w);
         c.arc(cx, cy, r, START, START + SWEEP, TRACK, w);
         if let Some(v) = v {
@@ -907,7 +1048,7 @@ impl Claude {
         let cap = g.num * 0.7;
         let base = cy + (cap - label - 8.0) / 2.0;
         match v {
-            Some(v) => percent(c, cx, base, v, g.num),
+            Some(v) => percent(c, cx, base, count.unwrap_or((v * 100.0).round()), g.num),
             None => {
                 c.text(cx, base, "–", NUM, g.num, FG.alpha(0.4), Anchor::MS, None);
             }
@@ -923,8 +1064,9 @@ impl Claude {
         let g = geom(mode);
         for &(limit, cx) in g.gauges {
             if only.is_none_or(|o| o == limit) {
+                let grow = self.grow[limit.index()].filter(|g| g.elapsed_ms() < GROW_MS);
                 let since = self.grow[limit.index()].and_then(|g| g.since_hot());
-                Self::gauge(c, &g, cx, limit, self.shown(limit, now), since, self.shows_icon(limit, mode));
+                Self::gauge(c, &g, cx, limit, self.shown(limit, now), grow.map(|g| g.count()), since, self.shows_icon(limit, mode));
             }
         }
     }
@@ -1144,7 +1286,7 @@ impl Claude {
             if g.r < 2.0 {
                 continue;
             }
-            faded(c, alpha, |c| Self::gauge(c, &g, cx, limit, self.shown(limit, now), None, false));
+            faded(c, alpha, |c| Self::gauge(c, &g, cx, limit, self.shown(limit, now), None, None, false));
             // o sol e o calendário (só no grande)
             let icon = |m: Mode| self.shows_icon(limit, m) && at(&geom(m)).is_some();
             faded(c, alpha * presence(icon(from), icon(to), p, 0.45, 0.4, 0.3), |c| gauge_icon(c, &g, cx, limit));
@@ -1210,6 +1352,17 @@ pub fn show_names(cfg: &serde_json::Value) -> bool {
     cfg["claude"]["balao_nomes"].as_bool().unwrap_or(true)
 }
 
+/// A ferramenta `name` do Claude Code é de investigar (ler, procurar, pesquisar: true) ou de
+/// programar (editar, rodar comandos: false)? None: nenhum dos dois (organizar as tarefas,
+/// chamar um ajudante, ferramentas de MCP).
+pub fn investigates(name: &str) -> Option<bool> {
+    match name {
+        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "WebFetch" | "WebSearch" => Some(true),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "Bash" | "PowerShell" => Some(false),
+        _ => None,
+    }
+}
+
 /// O que dizer no balão sobre uma ferramenta do Claude Code: a frase e a cor do pontinho.
 fn tool_line(tool: &Tool, names: bool) -> (String, Rgba) {
     let input = tool.input.trim();
@@ -1236,6 +1389,11 @@ fn tool_line(tool: &Tool, names: bool) -> (String, Rgba) {
 }
 
 impl Claude {
+    /// Está nevando em volta dele? (No Natal, com ele no widget: na barra de tarefas, não.)
+    fn snowing(&self) -> bool {
+        self.crab.xmas.get() && !self.perched
+    }
+
     /// O Clawd na barra: sempre com o notebook de lado, sem ninguém com o mouse em cima.
     fn perch_pose(&self) -> clawd::Pose {
         self.crab.pose(self.mood(), None, clawd::View::Side)
@@ -1247,10 +1405,27 @@ impl Claude {
         if self.crab.is_playing(Anim::Done) {
             return Some(("✓ Pronto".into(), RUNNING));
         }
+        let act = &self.activity;
+        if self.mood() == Mood::Busy {
+            if let Some(n) = &act.notice {
+                return Some((asks_for(n.tool()), ALERT));
+            }
+            if let Some((text, color, _)) = &self.flash {
+                return Some((text.clone(), *color));
+            }
+        }
         match self.mood() {
             Mood::Busy if self.crab.is_playing(Anim::Coffee) => Some(("Hora do café".into(), Rgba::rgb(196, 140, 98))),
-            Mood::Busy => Some(match &self.activity.tool {
+            Mood::Busy => Some(match &act.tool {
+                // um comando demorado: o tempo dele
+                Some(tool) if act.running.as_ref().is_some_and(|r| self.now() - r.1 >= LONG_RUN) => {
+                    let (text, color) = tool_line(tool, names);
+                    (format!("{text} · {}", clock(self.now() - act.running.as_ref().unwrap().1)), color)
+                }
+                Some(tool) if matches!(tool.name.as_str(), "Agent" | "Task") && act.helpers > 1 => (format!("{} ajudantes trabalhando", act.helpers), OTHER),
                 Some(tool) => tool_line(tool, names),
+                None if pile_for(act.context) >= 3 => (format!("Conversa quase cheia · {}%", (act.context.unwrap_or(0.0) * 100.0).round()), ALERT),
+                None if act.plan => ("Planejando…".into(), Rgba::rgb(190, 170, 255)),
                 None => ("Pensando…".into(), Rgba::rgb(190, 170, 255)),
             }),
             Mood::Worried => Some(("Perto do limite diário".into(), ALERT)),
@@ -1285,12 +1460,12 @@ impl Default for Claude {
     }
 }
 
-/// A porcentagem no meio do medidor: o número (na fonte dos números grandes dos outros widgets)
-/// centrado em `x` e apoiado na linha de base `y`, e o "%" menor logo depois dele.
-fn percent(c: &mut Canvas, x: f32, y: f32, v: f64, size: f32) {
-    let num = format!("{}", (v * 100.0).round());
-    let nw = c.text_width(&num, NUM, size);
-    c.text(x - nw / 2.0, y, &num, NUM, size, FG, Anchor::LS, None);
+/// A porcentagem no meio do medidor: o número `at` (de 0 a 100; quebrado, contando, com os
+/// dígitos rolando), na fonte dos números grandes dos outros widgets, centrado em `x` e apoiado na
+/// linha de base `y`, e o "%" menor logo depois dele.
+fn percent(c: &mut Canvas, x: f32, y: f32, at: f64, size: f32) {
+    let nw = c.text_width(&format!("{}", at.round()), NUM, size);
+    odometer::draw_counting(c, x - nw / 2.0, y, at, "", NUM, size, FG, Anchor::LS);
     c.text(x + nw / 2.0 + 1.0, y, "%", NUM, size * 0.42, FG.alpha(0.7), Anchor::LS, None);
 }
 
@@ -1361,7 +1536,8 @@ impl Kind for Claude {
         "Uso do Claude"
     }
 
-    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
+    fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
+        self.crab.xmas.set(xmas(env.cfg));
         let now = self.now();
         *self.minute.borrow_mut() = (now / 60.0) as i64;
         match mode {
@@ -1369,6 +1545,20 @@ impl Kind for Claude {
             Mode::M => self.draw_medium(c, now),
             Mode::G => self.draw_large(c, now),
         }
+    }
+
+    /// A neve do Natal caindo em volta do Clawd (na camada animada: desliza sem redesenhar o
+    /// cartão).
+    fn overlay(&self, c: &mut Canvas, mode: Mode, ox: f32, oy: f32) {
+        if !self.snowing() {
+            return;
+        }
+        let (cx, cy, unit) = self.crab_spot(mode);
+        clawd::draw_snow(c, ox + cx, oy + cy, unit, &self.crab_pose(mode), self.crab.snow_secs());
+    }
+
+    fn overlay_fps(&self) -> u32 {
+        if self.snowing() { clawd::SNOW_FPS } else { 0 }
     }
 
     fn perch_from(&self, mode: Mode) -> Option<(f32, f32)> {
@@ -1384,11 +1574,13 @@ impl Kind for Claude {
     }
 
     fn draw_perch(&self, c: &mut Canvas, env: &Env) {
+        self.crab.xmas.set(xmas(env.cfg));
         self.draw_perch_window(c, show_names(env.cfg));
     }
 
     fn perch_key(&self, env: &Env) -> u64 {
         use std::hash::{Hash, Hasher};
+        self.crab.xmas.set(xmas(env.cfg));
         let mut h = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", clawd::cells(&self.perch_pose())).hash(&mut h);
         self.balloon(show_names(env.cfg)).map(|b| b.0).hash(&mut h);
@@ -1521,7 +1713,7 @@ impl Kind for Claude {
         true
     }
 
-    fn tick(&mut self, _ctx: &mut Ctx) -> bool {
+    fn tick(&mut self, ctx: &mut Ctx) -> bool {
         // mais um quadro da animação (e um último, já parado, depois que ela acaba)
         let mut redraw = self.animating();
         for g in &mut self.grow {
@@ -1554,6 +1746,27 @@ impl Kind for Claude {
         self.crab.tired = self.busy_since.is_some_and(|t| t.elapsed() >= clawd::COFFEE_AFTER);
         self.crab.pace = if self.activity.busy.is_some() { clawd::pace_for(self.activity.steps as f32) } else { clawd::PACE };
         self.crab.music = self.has_data();
+        // o que mais o Claude Code está fazendo: precisando de você, na web, planejando, num
+        // comando demorado, com ajudantes; e a conversa enchendo
+        let act = &self.activity;
+        self.crab.calling = busy && act.notice.is_some();
+        self.crab.web = act.tool.as_ref().is_some_and(|t| matches!(t.name.as_str(), "WebFetch" | "WebSearch"));
+        self.crab.planning = act.plan;
+        self.crab.running = act.running.as_ref().is_some_and(|r| self.now() - r.1 >= LONG_RUN);
+        self.crab.helpers = act.helpers.min(255) as u8;
+        self.crab.pile = pile_for(act.context);
+        self.crab.xmas.set(xmas(ctx.cfg));
+        // lendo e procurando, ele investiga (de Sherlock); editando e rodando comandos, programa
+        // (respondendo em texto, continua no que estava)
+        if self.activity.busy.is_none() {
+            self.crab.investigating = None;
+        } else if self.activity.plan {
+            // planejando, ele investiga (com a prancheta)
+            self.crab.investigating = Some(true);
+        } else if let Some(investigating) = self.activity.tool.as_ref().and_then(|t| investigates(&t.name)) {
+            self.crab.investigating = Some(investigating);
+        }
+        redraw |= self.react();
         redraw |= self.crab.tick(mood);
         // no médio, anda para o lado quando o notebook (ou a plaquinha) aparece ou sai
         let want = self.wants_shift();
@@ -1576,6 +1789,50 @@ impl Kind for Claude {
 
     fn status(&self) -> Status {
         Status { loading: false, error: None, updated: self.view.usage.as_ref().map(|u| u.updated) }
+    }
+}
+
+impl Claude {
+    /// Reage ao que acabou de acontecer na conversa: um comando que falhou (a garra na testa),
+    /// o que passou depois de falhar (comemora) e a compactação (arruma a pilha de papéis). O
+    /// que já tinha acontecido antes de o widget abrir não conta. Devolve true se mudou algo.
+    fn react(&mut self) -> bool {
+        let mut changed = false;
+        if self.flash.as_ref().is_some_and(|f| Instant::now() >= f.2) {
+            self.flash = None;
+            changed = true;
+        }
+        if let Some((at, ok)) = self.activity.last_run {
+            match self.seen_run {
+                Some(seen) if at > seen => {
+                    let (anim, text, color) = if !ok {
+                        (Some(Anim::Oops), "O comando falhou", ALERT)
+                    } else if self.failing {
+                        (Some(Anim::Cheer), "Passou!", RUNNING)
+                    } else {
+                        (None, "", RUNNING)
+                    };
+                    if let Some(anim) = anim {
+                        self.crab.play(anim);
+                        self.flash = Some((text.into(), color, Instant::now() + FLASH_FOR));
+                        changed = true;
+                    }
+                    self.failing = !ok;
+                }
+                None => self.failing = !ok,
+                _ => {}
+            }
+            self.seen_run = Some(at.max(self.seen_run.unwrap_or(at)));
+        }
+        if let Some(at) = self.activity.compacted_at {
+            if self.seen_compact.is_some_and(|seen| at > seen) {
+                self.crab.play(Anim::Tidy);
+                self.flash = Some(("Conversa compactada".into(), Rgba::rgb(190, 170, 255), Instant::now() + FLASH_FOR));
+                changed = true;
+            }
+            self.seen_compact = Some(at);
+        }
+        changed
     }
 }
 
@@ -1719,7 +1976,7 @@ mod tests {
                                     continue;
                                 }
                                 let r = [x0 + x as f32 * c, y0 + y as f32 * c, x0 + (x + cw) as f32 * c, y0 + (y + ch) as f32 * c];
-                                let at = || format!("{name}, {mode:?}, {mood:?}, a {}%: {r:?}", s * 100.0);
+                                let at = || format!("{name}, {mode:?}, {mood:?}, {anim:?}, a {}%: {r:?} ({x}, {y})", s * 100.0);
                                 assert!(r[0] >= MARGIN - 0.01 && r[1] >= MARGIN - 0.01 && r[2] <= l.w - MARGIN + 0.01 && r[3] <= l.h - MARGIN + 0.01, "sai do cartão ({})", at());
                                 for &(gx, gy) in &rings {
                                     assert!(ring_clearance(r, gx, gy, g.r, g.w) >= PAD - 0.05, "encosta no anel ({})", at());
@@ -1795,11 +2052,12 @@ mod tests {
             let p = Claude::sample().crab_pose(m);
             p.front.is_none() && p.side.is_none()
         }));
-        // de Sherlock, de chapéu nos três tamanhos (o cachimbo só de lado)
+        // investigando, de Sherlock nos três tamanhos: chapéu, cachimbo e lupa, sem o notebook
         let w = Claude::sample_sherlock();
         for mode in Mode::ALL {
             let p = w.crab_pose(mode);
-            assert!(p.hat.is_some() && p.pipe.is_some() == (mode != Mode::P), "{mode:?}");
+            assert!(p.hat.is_some() && p.pipe.is_some() && p.mag.is_some(), "{mode:?}");
+            assert!(p.front.is_none() && p.side.is_none(), "{mode:?}: de Sherlock com o notebook");
         }
     }
 
@@ -2205,6 +2463,164 @@ mod tests {
         assert_eq!(w.with_crab(Anim::Coffee, 0.5).balloon(true).unwrap().0, "Hora do café");
         assert_eq!(Claude::sample().with_crab(Anim::Done, 0.5).balloon(true).unwrap().0, "✓ Pronto");
         assert!(Claude::sample().balloon(true).is_none());
+    }
+
+    /// O balão e o Clawd acompanham o resto do que o Claude Code faz: chamando você, o comando
+    /// que falha (e o que passa depois), o comando demorado, os ajudantes, a conversa enchendo e
+    /// a compactação. O que já tinha acontecido antes de o widget abrir não conta.
+    #[test]
+    fn reacts_to_what_happens_in_the_conversation() {
+        let tick = |w: &mut Claude| {
+            w.due = Instant::now() + Duration::from_secs(3600);
+            let mut req = Vec::new();
+            let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+            w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
+        };
+        let mut w = Claude::sample_busy();
+        w.activity.busy = Some(true);
+        let now = w.now();
+        // um comando que já tinha falhado antes: sem reação
+        w.activity.last_run = Some((now - 100.0, false));
+        tick(&mut w);
+        assert!(w.flash.is_none() && !w.crab.is_playing(Anim::Oops));
+        // passou depois de falhar: comemora; falhou: a garra na testa
+        w.activity.last_run = Some((now - 50.0, true));
+        tick(&mut w);
+        assert!(w.crab.is_playing(Anim::Cheer));
+        assert_eq!(w.balloon(true).unwrap().0, "Passou!");
+        w.activity.last_run = Some((now - 10.0, false));
+        tick(&mut w);
+        assert!(w.crab.is_playing(Anim::Oops));
+        assert_eq!(w.balloon(true).unwrap().0, "O comando falhou");
+        assert_eq!(w.doing(), "o comando falhou");
+        // um que passa sem ter falhado antes não faz festa
+        w.activity.last_run = Some((now - 5.0, true));
+        tick(&mut w);
+        assert!(w.crab.is_playing(Anim::Cheer), "passou depois de falhar");
+        w.flash = None;
+        w.crab = Crab::new();
+        w.activity.last_run = Some((now - 4.0, true));
+        tick(&mut w);
+        assert!(!w.crab.is_playing(Anim::Cheer));
+        // precisa de você: o balão pede, e o Clawd chama
+        w.activity.notice = Some(Notice { transcript: "x".into(), at: now, message: "Claude needs your permission to use Bash".into() });
+        tick(&mut w);
+        assert!(w.crab.calling);
+        assert_eq!(w.balloon(true).unwrap(), ("Precisa de você: rodar um comando?".to_string(), ALERT));
+        assert_eq!(w.doing(), "precisa de você");
+        w.activity.notice = None;
+        tick(&mut w);
+        assert!(!w.crab.calling);
+        // um comando demorado: a ampulheta e o tempo no balão
+        w.activity.tool = Some(Tool { name: "Bash".into(), input: "cargo test --release".into() });
+        w.activity.running = Some(("cargo test --release".into(), now - 75.0));
+        w.flash = None;
+        tick(&mut w);
+        assert!(w.crab.running);
+        assert_eq!(w.balloon(true).unwrap().0, "Rodando cargo test · 1:15");
+        w.activity.running = Some(("ls".into(), now - 3.0));
+        tick(&mut w);
+        assert!(!w.crab.running);
+        // os ajudantes e a conversa enchendo
+        w.activity.tool = Some(Tool { name: "Agent".into(), input: String::new() });
+        w.activity.helpers = 3;
+        tick(&mut w);
+        assert_eq!((w.crab.helpers, w.balloon(true).unwrap().0.as_str()), (3, "3 ajudantes trabalhando"));
+        w.activity.tool = None;
+        w.activity.context = Some(0.88);
+        tick(&mut w);
+        assert_eq!(w.crab.pile, 3);
+        assert_eq!(w.balloon(true).unwrap().0, "Conversa quase cheia · 88%");
+        assert_eq!((pile_for(None), pile_for(Some(0.55)), pile_for(Some(0.62)), pile_for(Some(0.99))), (0, 0, 1, clawd::PILE_MAX));
+        // compactou: arruma a pilha (a de antes de abrir não conta)
+        w.activity.compacted_at = Some(now - 30.0);
+        tick(&mut w);
+        assert!(!w.crab.is_playing(Anim::Tidy));
+        w.activity.compacted_at = Some(now - 1.0);
+        tick(&mut w);
+        assert!(w.crab.is_playing(Anim::Tidy));
+        assert_eq!(w.balloon(true).unwrap().0, "Conversa compactada");
+        // planejando: investiga (com a prancheta)
+        w.activity.plan = true;
+        w.activity.tool = Some(Tool { name: "Edit".into(), input: "a".into() });
+        tick(&mut w);
+        assert!(w.crab.planning && w.crab.investigating == Some(true));
+    }
+
+    /// A porcentagem conta junto com o arco, de inteiro em inteiro, e para no número novo.
+    #[test]
+    fn percentage_counts_with_the_arc() {
+        let g = |ms: u64| Grow { from: 0.2, to: 0.92, start: Instant::now() - Duration::from_millis(ms) };
+        assert_eq!(g(0).count().round(), 20.0);
+        let mid = g((GROW_MS / 3.0) as u64).count();
+        assert!(mid > 20.0 && mid < 92.0, "{mid}");
+        assert_eq!(g(10_000).count(), 92.0);
+    }
+
+    /// O tema de Natal: em dezembro (o normal), sempre ou nunca.
+    #[test]
+    fn christmas_option() {
+        let december = win::local_time().month == 12;
+        assert_eq!(xmas(&serde_json::json!({})), december);
+        assert!(xmas(&serde_json::json!({"claude": {"natal": "sempre"}})));
+        assert!(!xmas(&serde_json::json!({"claude": {"natal": "nunca"}})));
+        // desenhando, o Clawd segue a opção na hora
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let w = Claude::sample();
+        let c = serde_json::json!({"claude": {"natal": "sempre"}});
+        let mut canvas = Canvas::new(400, 200, 1.0);
+        Kind::draw(&w, &mut canvas, Mode::M, &Env { cfg: &c, key: "claude" });
+        assert!(w.crab_pose(Mode::M).xmas);
+        // a neve cai na camada animada, a 30 quadros por segundo (na barra de tarefas, não)
+        let mut w = w;
+        assert_eq!(Kind::overlay_fps(&w), clawd::SNOW_FPS);
+        for mode in [Mode::P, Mode::M, Mode::G] {
+            Kind::overlay(&w, &mut canvas, mode, 0.0, 0.0);
+        }
+        Kind::set_perched(&mut w, true);
+        assert_eq!(Kind::overlay_fps(&w), 0);
+        // fora do Natal, nada de neve
+        let w = Claude::sample();
+        Kind::draw(&w, &mut canvas, Mode::M, &Env { cfg: &serde_json::json!({"claude": {"natal": "nunca"}}), key: "claude" });
+        assert_eq!(Kind::overlay_fps(&w), 0);
+    }
+
+    /// Lendo e procurando, o Clawd investiga (de Sherlock); editando e rodando comandos, programa;
+    /// respondendo em texto ou com outras ferramentas, continua no que estava. Sem as conversas,
+    /// não dá para saber (vale o sorteio).
+    #[test]
+    fn reading_and_searching_is_investigating() {
+        for (name, want) in [("Read", Some(true)), ("Grep", Some(true)), ("Glob", Some(true)), ("WebSearch", Some(true)), ("Edit", Some(false)), ("Write", Some(false)), ("Bash", Some(false)), ("TodoWrite", None), ("Agent", None), ("mcp__x__y", None)] {
+            assert_eq!(investigates(name), want, "{name}");
+        }
+        let tick = |w: &mut Claude| {
+            // (sem reler as conversas: a atividade é a do teste)
+            w.due = Instant::now() + Duration::from_secs(3600);
+            let mut req = Vec::new();
+            let (mut c, mut cache) = (cfg(), serde_json::json!({}));
+            w.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "claude", out: &mut req });
+        };
+        let mut w = Claude::sample_busy();
+        w.activity.busy = Some(true);
+        w.activity.tool = Some(Tool { name: "Grep".into(), input: "crab".into() });
+        tick(&mut w);
+        assert_eq!(w.crab.investigating, Some(true));
+        w.activity.tool = None;
+        tick(&mut w);
+        assert_eq!(w.crab.investigating, Some(true), "respondendo em texto, continua investigando");
+        w.activity.tool = Some(Tool { name: "Edit".into(), input: "clawd.rs".into() });
+        tick(&mut w);
+        assert_eq!(w.crab.investigating, Some(false));
+        w.activity.busy = None;
+        tick(&mut w);
+        assert_eq!(w.crab.investigating, None);
+        // o que está escrito embaixo dele acompanha
+        assert_eq!(Claude::sample_sherlock().doing(), "investigando");
+        assert_eq!(Claude::sample_sherlock().with_crab(Anim::Puff, 0.5).doing(), "pensando");
+        assert_eq!(Claude::sample_busy().with_crab(Anim::HatOn, 0.5).doing(), "investigando");
+        assert_eq!(Claude::sample_sherlock().with_crab(Anim::HatOff, 0.5).doing(), "programando");
     }
 
     #[test]

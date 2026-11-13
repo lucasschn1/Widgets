@@ -18,13 +18,15 @@ use crate::popup::{GlassBar, GlassMenu, Part, Place};
 mod panels;
 use panels::{EditWhat, Panel};
 #[path = "app_screens.rs"]
-mod screens;
+pub(crate) mod screens;
 #[path = "app_island.rs"]
 pub(crate) mod island;
 #[path = "app_perch.rs"]
 mod perch;
 #[path = "app_stack.rs"]
 mod stack;
+#[path = "app_entrance.rs"]
+mod entrances;
 use crate::prompt;
 use crate::updates;
 use crate::shared::Shared;
@@ -35,7 +37,9 @@ use crate::win::{self, Rect, Z};
 
 const BACKDROP_EVERY: Duration = Duration::from_secs(5);
 const FULLSCREEN_EVERY: Duration = Duration::from_secs(2);
-const POWER_EVERY: Duration = Duration::from_secs(30);
+/// de quanto em quanto tempo confere a economia de energia do Windows (ligar e desligar aparece
+/// logo nos widgets)
+const POWER_EVERY: Duration = Duration::from_secs(5);
 const ALERTS_EVERY: Duration = Duration::from_secs(10);
 const WATCH_EVERY: Duration = Duration::from_millis(120);
 
@@ -108,6 +112,8 @@ pub struct App {
     next_backdrop: Instant,
     next_fullscreen: Instant,
     next_power: Instant,
+    /// o que já foi pedido ao Windows sobre o modo de eficiência (true: pode economizar)
+    throttle: Option<bool>,
     next_alerts: Instant,
     next_watch: Instant,
     peek_seen: Instant,
@@ -192,6 +198,7 @@ impl App {
             next_backdrop: Instant::now() + BACKDROP_EVERY,
             next_fullscreen: Instant::now() + FULLSCREEN_EVERY,
             next_power: Instant::now(),
+            throttle: None,
             next_alerts: Instant::now() + ALERTS_EVERY,
             next_watch: Instant::now(),
             peek_seen: Instant::now(),
@@ -252,6 +259,8 @@ impl App {
         if app.sh.cfg["claude"].bool_of("na_barra").unwrap_or(false) && app.find("claude").is_some() {
             app.open_perch(false);
         }
+        // e entram um depois do outro, na ordem de leitura
+        app.play_entrances(|_| true);
         app.sh.save();
         if !app.sh.cfg["app"].bool_of("dicas_vistas").unwrap_or(false) {
             app.welcome_at = Some(Instant::now() + Duration::from_millis(1500));
@@ -317,7 +326,9 @@ impl App {
             .or_else(|| wcfg.bool_of("compact").map(|c| if c { Mode::P } else { Mode::G }))
             .filter(|m| kind.sizes().contains(m))
             .unwrap_or(kind.default_mode());
-        let hwnd = events::create_layered(CARD_CLASS, false);
+        // pela placa de vídeo (a opção), se der neste PC; senão, a janela transparente de sempre
+        let gpu = config::setting_bool(&self.sh.cfg, "placa_de_video") && crate::gpu::available();
+        let hwnd = if gpu { events::create_composed(CARD_CLASS) } else { events::create_layered(CARD_CLASS, false) };
         let saved = match (wcfg.i64_of("x"), wcfg.i64_of("y")) {
             (Some(x), Some(y)) => Some((x as i32, y as i32)),
             _ => None,
@@ -328,9 +339,12 @@ impl App {
         });
         let s = win::scale_at(anchor.0 + 150, anchor.1 + 100);
         let mut card = Card::new(kind, hwnd, mode, s);
+        if gpu {
+            card.out = crate::output::Output::gpu(hwnd);
+        }
         card.pos = match saved {
             Some(p) if self.keep_saved_pos || card.visible_on_screen(p) => p,
-            _ => self.default_pos(&card),
+            _ => self.clear_spot(&card, self.default_pos(&card)),
         };
         // está num monitor com outra escala?
         let (x0, y0, x1, y1) = card.card_rect();
@@ -342,6 +356,8 @@ impl App {
         self.cards.push(card);
         let i = self.cards.len() - 1;
         self.with_kind(i, |k, ctx| k.start(ctx));
+        // aparece entrando (invisível até a vez dele; ao abrir o app, a ordem é acertada depois)
+        self.cards[i].enter(0.0, &self.sh);
         self.cards[i].refresh(&self.sh);
         self.cards[i].present(&self.sh, true);
         events::show(hwnd, !self.sh.focus);
@@ -550,6 +566,22 @@ impl App {
             return (x, y);
         }
         self.new_column_pos(card)
+    }
+
+    /// `pos` para o cartão, se ali ele não encosta em nenhum outro; senão, o primeiro lugar livre
+    /// do monitor (a partir da direita).
+    fn clear_spot(&self, card: &Card, pos: (i32, i32)) -> (i32, i32) {
+        let others: Vec<Rect> = self.cards.iter().filter(|c| !c.stacked && !c.temp).map(|c| c.card_rect()).collect();
+        let r = card.card_rect_at(pos, None);
+        let gap = (WIDGET_GAP * card.s).round() as i32 - 1;
+        let roomy = (r.0 - gap, r.1 - gap, r.2 + gap, r.3 + gap);
+        let work = win::area_for(r);
+        if !others.iter().any(|o| screens::hits(roomy, *o)) && screens::inside(r, work) {
+            return pos;
+        }
+        let (w, h) = card.card_size();
+        let free = screens::free_spot(w, h, work, &others, true, card.s);
+        (free.0 - card.margin, free.1 - card.margin)
     }
 
     /// No alto de uma coluna nova, à esquerda de todos os widgets.
@@ -1505,6 +1537,8 @@ impl App {
         }
         self.sh.focus = false;
         self.tray.set_tip(tray::TIP);
+        // voltam entrando (já invisíveis antes de as janelas aparecerem)
+        self.play_entrances(|_| true);
         for i in 0..self.cards.len() {
             if self.island.is_some() && self.cards[i].key() == "midia" {
                 continue; // está como ilha
@@ -1552,28 +1586,27 @@ impl App {
         }
     }
 
-    /// Empilha os widgets em colunas a partir da direita da tela, com o espaço padrão.
+    /// Arruma os widgets de cada monitor em colunas a partir da direita da tela, sem nenhum
+    /// encostar em outro nem na ilha do Tocando agora (veja `arrange`).
     pub fn arrange(&mut self) {
-        let mut order: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].content.is_some() && !self.cards[i].temp && !self.cards[i].stacked).collect();
-        if order.is_empty() {
-            return;
-        }
-        order.sort_by_key(|&i| (-self.cards[i].card_rect().2, self.cards[i].card_rect().1));
-        let (_, top, right, bottom) = win::area_for(self.cards[order[0]].card_rect());
-        let s = self.cards[order[0]].s;
-        let (edge, gap) = ((EDGE_GAP * s) as i32, (WIDGET_GAP * s) as i32);
-        let (mut y, mut column_w, mut right) = (top + edge, 0, right - edge);
-        for i in order {
-            let (w, h) = self.cards[i].card_size();
-            if column_w > 0 && y + h > bottom - edge {
-                right -= column_w + gap; // não cabe: próxima coluna
-                y = top + edge;
-                column_w = 0;
+        let laid: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].content.is_some() && !self.cards[i].temp && !self.cards[i].stacked).collect();
+        // cada monitor com os widgets dele (e a escala dele)
+        let mut monitors: Vec<(Rect, Vec<usize>)> = Vec::new();
+        for i in laid {
+            let work = win::area_for(self.cards[i].card_rect());
+            match monitors.iter_mut().find(|m| m.0 == work) {
+                Some(m) => m.1.push(i),
+                None => monitors.push((work, vec![i])),
             }
-            let m = self.cards[i].margin;
-            self.cards[i].slide_to((right - w - m, y - m), ANIM_MS, &self.sh);
-            y += h + gap;
-            column_w = column_w.max(w);
+        }
+        let fixed: Vec<Rect> = self.island_keep_clear().into_iter().collect();
+        for (work, cards) in monitors {
+            let s = self.cards[cards[0]].s;
+            let items: Vec<crate::arrange::Item> = cards.iter().map(|&i| crate::arrange::Item { id: i, size: self.cards[i].card_size(), at: self.cards[i].card_rect() }).collect();
+            for (i, r) in crate::arrange::plan(&items, work, s, &fixed) {
+                let m = self.cards[i].margin;
+                self.cards[i].slide_to((r.0 - m, r.1 - m), ANIM_MS, &self.sh);
+            }
         }
     }
 
@@ -1636,7 +1669,9 @@ impl App {
     fn check_fullscreen(&mut self) {
         let busy = win::fullscreen_screens();
         if busy != self.sh.paused {
-            self.sh.paused = busy;
+            let was = std::mem::replace(&mut self.sh.paused, busy);
+            // os do monitor que saiu da tela cheia entram de novo
+            self.enter_unpaused(&was);
             self.wake_all(); // os que voltaram a aparecer se redesenham (os pausados esperam)
         }
     }
@@ -1975,7 +2010,13 @@ impl App {
         }
         if now >= self.next_power {
             self.next_power = now + POWER_EVERY;
-            self.sh.saving = win::on_battery() && config::setting_bool(&self.sh.cfg, "economia_bateria");
+            let saving = win::energy_saver() && config::setting_bool(&self.sh.cfg, "economia_bateria");
+            // fora da economia, nada de "modo de eficiência" do Windows (deixava as animações aos
+            // trancos na bateria); na economia, ele pode
+            if self.throttle != Some(saving) && win::allow_throttling(saving) {
+                self.throttle = Some(saving);
+            }
+            self.sh.saving = saving;
         }
         if now >= self.next_alerts {
             self.next_alerts = now + ALERTS_EVERY;

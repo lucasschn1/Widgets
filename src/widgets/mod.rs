@@ -9,6 +9,7 @@ pub mod claude;
 pub mod clawd;
 pub mod github;
 pub mod media;
+pub mod odometer;
 pub mod pomodoro;
 pub mod sky;
 pub mod system;

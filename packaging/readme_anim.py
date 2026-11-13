@@ -7,6 +7,8 @@ Lê %TEMP%/widgets-readme/<nome>/frames.txt (arquivo e duração em ms por linha
 - docs/images/musica.gif: o Tocando agora trocando de música (GIF, para tocar em qualquer lugar)
 - docs/images/ilha.webp: o Tocando agora virando a ilha flutuante e voltando
 - docs/images/tamanhos.webp: o Tempo mudando de tamanho
+- docs/images/clawd.gif: o Clawd fazendo cada coisa (Sherlock, binóculo, prancheta, Natal...)
+- docs/images/clawd-barra.gif: o Clawd em cima da barra de tarefas, com o balão
 Precisa do Pillow (pip install pillow).
 """
 
@@ -72,6 +74,9 @@ def save_delta_gif(frames, durations, path):
 def main():
     cover, cover_ms = load("capa")
     save_delta_gif(cover, cover_ms, ROOT / "docs" / "images" / "capa.gif")
+    for name, out in [("clawd", "clawd.gif"), ("barra", "clawd-barra.gif")]:
+        frames, ms = load(name)
+        save_delta_gif(frames, ms, ROOT / "docs" / "images" / out)
     music, music_ms = load("musica")
     # (uma paleta para o GIF todo: com o fundo escuro, uma por quadro deixava o arquivo com o dobro)
     save_delta_gif(music, music_ms, ROOT / "docs" / "images" / "musica.gif")

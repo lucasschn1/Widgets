@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HWND;
 
+use crate::entrance::{Entrance, Look};
 use crate::gfx::{Canvas, Image};
+use crate::output::{Frame, Output};
 use crate::shared::Shared;
 use crate::theme::*;
 use crate::widgets::{Env, Hot, HoverStyle, Kind, Layout, Mode, Status};
@@ -159,6 +161,10 @@ pub struct Card {
     pub dots_at: Option<Instant>,
     /// arrastando outro widget por cima deste: soltar empilha os dois
     pub drop_hint: bool,
+    /// aparecendo (ao abrir o app, ao sair do modo foco...): sobe, cresce e clareia
+    entrance: Option<Entrance>,
+    /// como o quadro chega à tela: pela janela transparente ou pela placa de vídeo
+    pub out: Output,
 }
 
 impl Card {
@@ -203,7 +209,24 @@ impl Card {
             dots: None,
             dots_at: None,
             drop_hint: false,
+            entrance: None,
+            out: Output::Layered,
         }
+    }
+
+    /// Entra daqui a `delay_ms` milissegundos (até lá, invisível); sem as animações do Windows,
+    /// aparece de uma vez.
+    pub fn enter(&mut self, delay_ms: f32, sh: &Shared) {
+        self.entrance = sh.animations.then(|| Entrance::after(delay_ms));
+    }
+
+    /// Como ele aparece agora na entrada (parado no lugar fora dela).
+    fn entrance_look(&self) -> Look {
+        self.entrance.map_or(Look::STILL, |e| e.look())
+    }
+
+    fn entering(&self) -> bool {
+        self.entrance.is_some_and(|e| !e.done())
     }
 
     /// Muda de tamanho na hora, sem animar (numa pilha, para ficar do tamanho do de cima). O
@@ -462,7 +485,7 @@ impl Card {
             self.stale = true;
             return;
         }
-        // na bateria, com a economia ligada, as animações contínuas param
+        // com a economia de energia do Windows ligada (e a opção ligada), as animações contínuas param
         self.fps = if sh.saving { 0 } else { self.kind.overlay_fps() };
         if sh.suspended_at(self.card_rect()) && self.content.is_some() {
             self.stale = true; // redesenha quando voltar a aparecer
@@ -525,6 +548,7 @@ impl Card {
     /// Opacidade da janela: os widgets esmaecem quando o mouse não está em cima.
     pub fn opacity(&self, sh: &Shared) -> u8 {
         let swap = self.swap_look().1;
+        let swap = swap * self.entrance_look().alpha;
         let idle = sh.idle_opacity;
         if sh.peeking || sh.editing || self.drag.is_some() || self.temp || idle >= 1.0 {
             return (255.0 * swap).round() as u8;
@@ -547,26 +571,44 @@ impl Card {
         }
         let glass = &self.composed.as_ref().unwrap().3;
         let (w, h) = (glass.w + 2 * m as u32, glass.h + 2 * m as u32);
-        let mut c = Canvas::new(w, h, self.s);
+        let frame = Frame { w, h, s: self.s, pos: move_win.then_some(self.pos), alpha: self.opacity(sh), hit: self.hit_area(sh, (w, h)) };
+        let mut out = std::mem::replace(&mut self.out, Output::Layered);
+        out.show(self.hwnd, frame, |c| self.paint(c, sh));
+        self.out = out;
+        self.last_frame = Instant::now();
+    }
+
+    /// O quadro do cartão: o vidro com o conteúdo, a camada animada e os detalhes por cima.
+    fn paint(&self, c: &mut Canvas, sh: &Shared) {
+        let Some((_, _, _, glass)) = &self.composed else { return };
         // sem sombra, como os widgets do macOS: em volta do vidro, a margem fica transparente (e
         // os cliques ali passam para a área de trabalho)
-        // apertando uma área grande, o cartão inteiro afunda (e volta com mola)
-        let k = self.press_scale() * self.swap_look().0;
+        // apertando uma área grande, o cartão inteiro afunda (e volta com mola); entrando, cresce
+        let look = self.entrance_look();
+        let k = self.press_scale() * self.swap_look().0 * look.scale;
         if k != 1.0 && sh.animations {
             let lay = self.layout(self.mode);
             c.scale_about(MARGIN + lay.w / 2.0, MARGIN + lay.h / 2.0, k);
         }
         // o tremor do trovão leva o vidro e a camada animada juntos
         let (dx, dy) = if sh.animations && self.anim.is_none() { self.kind.shake() } else { (0.0, 0.0) };
+        let dy = dy + look.lift;
         c.image(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
-            self.kind.overlay(&mut c, self.mode, MARGIN + dx, MARGIN + dy);
+            self.kind.overlay(c, self.mode, MARGIN + dx, MARGIN + dy);
         }
-        self.decorate(&mut c, sh);
+        self.decorate(c, sh);
         c.reset_transform();
-        let img = c.finish();
-        win::blit(self.hwnd, &img, move_win.then_some(self.pos), self.opacity(sh));
-        self.last_frame = Instant::now();
+    }
+
+    /// A área da janela (`size` pixels) que recebe cliques: só o cartão, parado; a janela toda
+    /// enquanto algo passa da borda dele (entrando, apertado, trocando na pilha, com as bolinhas
+    /// da pilha ou os botões do modo edição). (Na janela transparente, os pixels transparentes já
+    /// deixam os cliques passar e isto não é usado.)
+    fn hit_area(&self, sh: &Shared, size: (u32, u32)) -> Option<win::Rect> {
+        let beyond = sh.editing || self.entering() || self.press_anim.is_some() || self.swap.is_some() || self.dots_alpha() > 0.0 || self.drop_hint || self.anim.is_some();
+        let m = self.margin;
+        (!beyond).then_some((m, m, size.0 as i32 - m, size.1 as i32 - m))
     }
 
     /// O destaque de quem está sob o mouse (área em unidades do cartão, canto do cartão em (ox, oy)),
@@ -866,7 +908,8 @@ impl Card {
         let glass = sh.backdrop.glass(&content, radius, x + m, y + m, sh.tint);
         let mut img = Image::new(w + 2 * m as u32, h + 2 * m as u32);
         img.over(&glass, m, m);
-        win::blit(self.hwnd, &img, Some((x, y)), self.opacity(sh));
+        let frame = Frame { w: img.w, h: img.h, s: self.s, pos: Some((x, y)), alpha: self.opacity(sh), hit: None };
+        self.out.show_image(self.hwnd, frame, &img);
         if t >= 1.0 {
             self.pos = a.to;
             return true;
@@ -906,7 +949,7 @@ impl Card {
     }
 
     pub fn next_frame(&self) -> Option<Instant> {
-        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() || (self.swap.is_some() && !self.swap_done())
+        if self.anim.is_some() || self.slide.is_some() || self.hover != self.hover_target || self.press_animating() || self.hover_fading() || (self.swap.is_some() && !self.swap_done()) || self.entering()
             || self.dots_at.is_some_and(|t| t.elapsed().as_secs_f32() * 1000.0 < DOTS_SHOW_MS + DOTS_FADE_MS)
         {
             return Some(self.last_frame + Duration::from_millis(FRAME_MS));
@@ -948,6 +991,9 @@ impl Card {
             return (false, slid);
         }
         self.glow_moved = false;
+        if self.entrance.is_some_and(|e| e.done()) {
+            self.entrance = None;
+        }
         if self.hover != self.hover_target {
             let step = if sh.animations { FRAME_MS as f32 / BADGE_FADE_MS as f32 } else { 1.0 };
             self.hover = if self.hover < self.hover_target {
@@ -977,6 +1023,29 @@ mod tests {
 
     fn card() -> Card {
         Card::new(Box::new(crate::widgets::battery::Battery::sample()), HWND::default(), Mode::M, 1.0)
+    }
+
+    /// Entrando, o cartão começa invisível, pede quadros até assentar e depois fica como sempre;
+    /// sem as animações do Windows, aparece de uma vez.
+    #[test]
+    fn enters_and_then_stays_still() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut sh = Shared::new(serde_json::json!({}), serde_json::json!({}), 1.0);
+        sh.animations = true;
+        sh.idle_opacity = 1.0;
+        let mut c = card();
+        c.enter(10_000.0, &sh);
+        assert_eq!(c.opacity(&sh), 0, "esperando a vez, invisível");
+        assert!(c.next_frame().is_some(), "entrando, sem quadros");
+        c.entrance = Some(Entrance::finished());
+        assert_eq!(c.opacity(&sh), 255);
+        c.frame(&sh);
+        assert!(c.entrance.is_none() && c.next_frame().is_none(), "terminou e continua animando");
+        sh.animations = false;
+        c.enter(0.0, &sh);
+        assert!(c.entrance.is_none() && c.opacity(&sh) == 255);
     }
 
     /// Mudar de tamanho na hora (numa pilha) não deixa o desenho do tamanho de antes: senão o

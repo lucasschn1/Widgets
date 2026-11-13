@@ -104,19 +104,25 @@ versão 3.11).
 Pouco. Os widgets só se redesenham quando algo muda (o relógio, uma música nova, um número do
 sistema), e um jogo ou vídeo em tela cheia pausa os widgets daquele monitor.
 
-Medido na versão 3.12 num notebook com Ryzen 7 7730U (8 núcleos, 16 threads), com cinco widgets
-na tela (Tempo, Sistema, Tocando agora, GitHub e Uso do Claude):
+Medido na versão 3.17 num notebook com Ryzen 7 7730U (8 núcleos, 16 threads), com seis widgets
+abertos (Tempo, Tocando agora, Uso do Claude e uma pilha com Sistema, GitHub e Bateria), no pior
+caso: o Claude Code trabalhando (o Clawd animando o tempo todo) e o tema de Natal ligado (a neve
+caindo). Um minuto em cada jeito de desenhar (veja
+[Desenhar pela CPU ou pela placa de vídeo](#desenhar-pela-cpu-ou-pela-placa-de-vídeo)):
 
-| Situação | CPU de um núcleo | CPU do processador inteiro |
-|---|---|---|
-| Parado, sem música tocando | ~4% | 0,25% |
-| Com música tocando | ~6,5% | 0,4% |
-| Com o Claude Code trabalhando (o Clawd programa no notebook) | ~10% | 0,6% |
+| Desenho | CPU de um núcleo | CPU do processador inteiro | Memória |
+|---|---|---|---|
+| Pela CPU (o padrão) | ~14% | 0,9% | ~55 MB |
+| Pela placa de vídeo | ~8% | 0,5% | ~85 MB |
 
-A memória fica em torno de **40 MB** (de 33 a 41 MB nas medições, na coluna Memória do
-Gerenciador de Tarefas). Em processadores com menos núcleos, a porcentagem do processador
-inteiro sobe um pouco, mas o trabalho é o mesmo. Para conferir na sua máquina, abra o
-Gerenciador de Tarefas e procure por **Widgets**.
+Nas situações mais calmas, a versão 3.12 media, desenhando pela CPU: parado e sem música, ~4% de
+um núcleo (0,25% do processador inteiro); com música tocando, ~6,5% (0,4%). Elas não foram
+medidas de novo.
+
+A memória é a memória privada do processo, que fica perto da coluna Memória do Gerenciador de
+Tarefas. Em processadores com menos núcleos, a porcentagem do processador inteiro sobe um pouco,
+mas o trabalho é o mesmo. Para conferir na sua máquina, abra o Gerenciador de Tarefas e procure
+por **Widgets**.
 
 ## Por que dá para confiar
 
@@ -222,21 +228,37 @@ quando ele reinicia; o grande mostra os dias da semana em que você mais usa, e 
 no ritmo de agora, a sessão acaba antes de reiniciar. O Clawd, o caranguejo do Claude Code,
 acompanha: enquanto o Claude Code trabalha, programa num notebook (no pequeno, de frente, no colo;
 no médio e no grande, de lado, com o código aparecendo na tela), pensa, tem ideias e, depois de um
-bom tempo, toma um café; de vez em quando, trabalha a tarefa inteira de Sherlock Holmes, de chapéu
-de detetive e lupa. Parado, às vezes põe o fone e fica ouvindo música; quando o Claude Code fica
-quieto por muito tempo, cochila de gorro. Perto do limite, sua; quando a sessão chega ao limite,
+bom tempo, toma um café. Quando o Claude Code está lendo e procurando no código, ele guarda o
+notebook e vira Sherlock Holmes: de chapéu de detetive e cachimbo, examina tudo com a lupa e segue
+pegadas pelo chão; pesquisando na web, olha longe com um binóculo; no modo de planejamento, escreve
+numa prancheta; quando o Claude Code volta a editar, tira o chapéu e volta ao notebook. O desenho
+acompanha o resto também: num comando demorado, ele segura uma ampulheta; um comando que falha
+faz ele levar a garra à testa, com um ✗, e o que passa depois disso, comemorar; cada subagente
+aparece como um Clawd pequenininho trabalhando junto; e, com a conversa enchendo, uma pilha de
+papéis cresce do lado dele, que ele arruma quando a conversa é compactada. Quando o Claude Code
+para esperando você (pedindo permissão para um comando, por exemplo), ele acena com um "!" até
+você responder. Parado, às vezes põe o fone e fica ouvindo música; quando o Claude Code fica
+quieto por muito tempo, cochila de gorro. Em dezembro, ganha gorro de Papai Noel e neve
+(nas configurações do widget, o tema de Natal pode ficar sempre ligado ou desligado). Perto do limite, sua; quando a sessão chega ao limite,
 finca a plaquinha "VOLTO LOGO" do lado e fica lendo até ela reiniciar, e aí comemora com confete.
 Embaixo dele, no médio, aparece o que está fazendo. Ao mudar de tamanho, os medidores andam até o
 lugar novo e o Clawd pula junto.
 
 Um clique no Clawd e ele pula para cima da barra de tarefas, ao lado do relógio, onde continua
 trabalhando por cima das janelas, com um balão dizendo o que o Claude Code faz agora ("Editando
-claude.rs", "Rodando cargo test"). Outro clique e ele volta. Para compartilhar a tela, as
+claude.rs", "Rodando cargo test · 1:12", "Precisa de você: rodar um comando?"). Outro clique e
+ele volta. Para compartilhar a tela, as
 configurações do widget têm a opção de mostrar só a ação, sem os nomes de arquivos e comandos.
+
+<p align="center">
+  <img src="docs/images/clawd-barra.gif" width="550" alt="O Clawd em cima da barra de tarefas, ao lado do relógio, programando, com o balão Editando clawd.rs">
+</p>
 
 Os números vêm do próprio Claude Code: ao clicar em **Conectar**, o widget vira a linha de status
 dele (só se ainda não houver outra; uma cópia das configurações do Claude Code fica em
-`settings.json.antes-do-widgets`). Funciona nos planos Pro e Max, a partir da primeira resposta
+`settings.json.antes-do-widgets`) e ganha um aviso (`hooks.Notification`) de quando o Claude Code
+precisa de você; quem conectou numa versão anterior ganha o aviso sozinho. Desconectar tira os
+dois, sem mexer em outros avisos que você tenha. Funciona nos planos Pro e Max, a partir da primeira resposta
 de cada conversa. Quem já usava o app encontra este widget na Galeria de widgets.
 
 <p align="center">
@@ -244,7 +266,7 @@ de cada conversa. Quem já usava o app encontra este widget na Galeria de widget
 </p>
 
 <p align="center">
-  <img src="docs/images/claude-clawd.png" width="620" alt="O Clawd no médio: tomando café, de Sherlock com a lupa, ouvindo música de fone e, no limite, lendo do lado da plaquinha VOLTO LOGO">
+  <img src="docs/images/clawd.gif" width="460" alt="O Clawd programando no notebook, de Sherlock com a lupa, de binóculo pesquisando na web, com a prancheta planejando, com a ampulheta esperando um comando, com ajudantes, ouvindo música, de gorro de Papai Noel na neve e cochilando">
 </p>
 
 ### Bateria
@@ -269,7 +291,9 @@ Clique no botão que aparece no canto, ou dê dois cliques no widget. O pequeno 
 médio tem a largura de dois pequenos lado a lado e o grande tem espaço para as listas. Na troca,
 o que aparece nos dois tamanhos anda até o lugar novo, e os vizinhos se ajeitam sozinhos. Para
 mover, é só arrastar: eles se encaixam uns nos outros e nas bordas da tela (segure `Alt` para
-soltar livre).
+soltar livre). **Organizar widgets** (no clique direito ou em Configurações → Geral) arruma cada
+monitor em colunas a partir da direita, como no iPhone: dois pequenos dividem a linha, nenhum
+encosta em outro nem na ilha do Tocando agora, e ninguém sai da tela.
 
 **Pilhas.** Solte um widget no meio de outro e os dois viram uma pilha, como no iPhone: ocupam o
 lugar de um só e a roda do mouse troca entre eles (ao trocar, bolinhas ao lado do cartão dizem
@@ -301,6 +325,26 @@ Na primeira vez, umas boas-vindas rápidas ajudam a escolher os widgets e a cida
 <p align="center">
   <img src="docs/images/boas-vindas.png" width="600" alt="Boas-vindas">
 </p>
+
+### Desenhar pela CPU ou pela placa de vídeo
+
+Os widgets chegam à tela de dois jeitos. A escolha fica em Configurações → Geral → **Desenhar
+pela placa de vídeo** e vale ao abrir o app de novo.
+
+- **Pela CPU (o padrão):** cada quadro é montado em memória e copiado inteiro para uma janela
+  transparente do Windows. Funciona em qualquer PC, e os cliques na margem transparente em volta
+  de cada cartão passam para a área de trabalho.
+- **Pela placa de vídeo (experimental):** o quadro é desenhado direto na placa de vídeo e
+  mostrado pela DirectComposition do Windows, sem a cópia da janela inteira. As animações
+  contínuas (o Clawd, a neve do Natal, a chuva do Tempo) gastam menos CPU: na medição de
+  [Quanto pesa no PC](#quanto-pesa-no-pc), cerca de 40% menos, em troca de uns 30 MB a mais de
+  memória. Com o cartão parado, os cliques valem no retângulo dele (os cantinhos arredondados
+  também). Se a placa de vídeo for reiniciada (o PC dormiu, o driver atualizou), os widgets se
+  refazem sozinhos.
+
+Na dúvida, ligue a placa de vídeo se o Clawd ou o Tempo vivem animando, principalmente na
+bateria; deixe pela CPU num PC antigo, ou se algum cartão aparecer preto, sumir ou ficar fora do
+lugar (e conte para a gente numa issue).
 
 ### Com mais de um monitor
 

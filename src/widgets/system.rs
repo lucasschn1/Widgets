@@ -6,6 +6,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::odometer::draw_counting;
 use super::{Ctx, Env, Hot, Kind, MenuItem, Mode, Status, LARGE_H, SMALL, WIDE};
 use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
@@ -209,6 +210,16 @@ impl System {
         s
     }
 
+    /// Os anéis indo de outros números aos do exemplo há `ms` milissegundos: as porcentagens
+    /// contando, com os dígitos rolando.
+    #[cfg(test)]
+    pub fn sample_counting(ms: u64) -> System {
+        let mut s = System::sample();
+        s.from = [0.17, 0.75, 0.47];
+        s.ring_since = Instant::now() - Duration::from_millis(ms);
+        s
+    }
+
     /// Exemplo virado (pequeno ou médio) mostrando os apps de um recurso (imagens do README).
     #[cfg(test)]
     pub fn sample_flipped(which: Option<usize>, mode: Mode) -> System {
@@ -286,6 +297,14 @@ impl System {
             out[i] = self.from[i] + (self.target[i] - self.from[i]) * t;
         }
         out
+    }
+
+    /// A porcentagem de `i` contando junto com o anel (de um inteiro ao outro, no mesmo ritmo):
+    /// 43,6 é o 3 rolando para o 4; parada, o número de agora.
+    fn counted(&self, i: usize) -> f64 {
+        let t = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS) as f64;
+        let (a, b) = ((self.from[i] as f64 * 100.0).round(), (self.target[i] as f64 * 100.0).round());
+        a + (b - a) * t
     }
 
     /// A lista de apps está na tela, mas a primeira leitura ainda não chegou.
@@ -472,19 +491,19 @@ impl System {
         let sel = self.current(mode);
         for i in 0..3 {
             let (x0, y0, x1, _) = Self::metric_rect(mode, i);
-            let pct = format!("{}%", (self.target[i] * 100.0).round());
+            let pct = self.counted(i);
             let dim = sel.is_some_and(|s| s != i) && mode != Mode::G;
             let text = if dim { MUTED } else { FG };
             if mode == Mode::P {
                 let cx = (x0 + x1) / 2.0;
                 let _ = text;
-                c.text(cx, y0 + 8.0, &pct, Face::Semibold, 13.5, color(i), Anchor::MM, None);
+                draw_counting(c, cx, y0 + 8.0, pct, "%", Face::Semibold, 13.5, color(i), Anchor::MM);
                 let label = if i == 1 { "RAM" } else { NAMES[i] };
                 c.text(cx, y0 + 23.0, label, Face::Regular, 10.0, MUTED, Anchor::MM, None);
             } else {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
-                let pw = c.text(x1 - 6.0, y + 7.0, &pct, Face::Semibold, 13.5, text, Anchor::RM, None);
+                let pw = draw_counting(c, x1 - 6.0, y + 7.0, pct, "%", Face::Semibold, 13.5, text, Anchor::RM);
                 // quanto está em uso agora, antes da porcentagem
                 let aw = c.text(x1 - 6.0 - pw - 7.0, y + 7.5, &self.amounts[i], Face::Regular, 11.0, MUTED, Anchor::RM, None);
                 let name_w = (x1 - 6.0 - pw - 7.0 - aw - 6.0) - (x0 + 13.0);
@@ -742,6 +761,17 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As porcentagens contam junto com os anéis, de um inteiro ao outro, e param no número.
+    #[test]
+    fn percentages_count_with_the_rings() {
+        let s = System::sample_counting(0);
+        assert_eq!(s.counted(0).round(), 17.0, "começa no número de antes");
+        let mid = System::sample_counting((RING_MS / 3.0) as u64).counted(0);
+        assert!(mid > 17.0 && mid < 24.0, "no meio do caminho: {mid}");
+        assert_eq!(System::sample_counting(5000).counted(0), 24.0, "para no número");
+        assert_eq!(System::sample().counted(1), 68.0);
+    }
 
     #[test]
     fn app_icons_are_resized_sharply() {

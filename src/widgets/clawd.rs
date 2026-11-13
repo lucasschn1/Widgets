@@ -12,10 +12,13 @@
 //!   ouvindo música;
 //! - dormindo (sem números, ou muito tempo sem o Claude Code): sentado, de gorro, cochila com os
 //!   "z"; acorda devagar quando o Claude Code volta, ou num susto com o mouse;
-//! - trabalhando: no notebook (de frente, no colo, no pequeno; de lado, com o código na tela, no
+//! - programando: no notebook (de frente, no colo, no pequeno; de lado, com o código na tela, no
 //!   médio, no grande e na barra de tarefas), digita, pensa, tem ideias e, depois de um bom tempo,
-//!   toma um café; de vez em quando, a tarefa inteira de Sherlock Holmes (chapéu de detetive,
-//!   lupa e, de lado, cachimbo); no fim, fecha o notebook, se espreguiça e mostra um ✓;
+//!   toma um café;
+//! - investigando (o Claude Code lendo e procurando no código): guarda o notebook e vira Sherlock
+//!   Holmes (chapéu de detetive, cachimbo e lupa): examina com a lupa (o olho aumentado nela),
+//!   segue pegadas no chão e pensa fumando o cachimbo; volta ao notebook quando o Claude Code
+//!   volta a editar. No fim de qualquer tarefa, se espreguiça e mostra um ✓;
 //! - perto do limite: corado, suando e tremendo;
 //! - no limite: finca a plaquinha "VOLTO LOGO" do lado e fica lendo até o limite reiniciar;
 //!   aí recolhe a placa e comemora com confete.
@@ -107,6 +110,21 @@ const PHONE_LIGHT: Rgba = Rgba::rgb(74, 130, 214);
 const PHONE_PAD: Rgba = Rgba::rgb(242, 242, 246);
 const NOTE: Rgba = Rgba::rgb(255, 209, 102);
 
+const CROSS: Rgba = Rgba::rgb(255, 99, 99);
+const SAND: Rgba = Rgba::rgb(242, 196, 110);
+const PAGE_EDGE: Rgba = Rgba::rgb(196, 186, 166);
+const PENCIL: Rgba = Rgba::rgb(255, 209, 102);
+const ERASER: Rgba = Rgba::rgb(242, 132, 164);
+const BOARD: Rgba = Rgba::rgb(176, 122, 74);
+const CLIP: Rgba = Rgba::rgb(139, 143, 156);
+
+const SANTA: Rgba = Rgba::rgb(214, 48, 49);
+const SANTA_LIGHT: Rgba = Rgba::rgb(240, 92, 84);
+const SANTA_DARK: Rgba = Rgba::rgb(160, 30, 36);
+const FUR: Rgba = Rgba::rgb(246, 244, 240);
+const FUR_SHADE: Rgba = Rgba::rgb(206, 208, 222);
+const SNOW: Rgba = Rgba::rgb(246, 248, 255);
+
 fn glow() -> Rgba {
     Rgba::rgb(255, 196, 170).alpha(0.5)
 }
@@ -182,6 +200,40 @@ const NOTE1: [&str; 1] = ["#"];
 /// o livro aberto, visto por trás (ele lê olhando para baixo, os olhos espiando por cima)
 const READ_ART: [&str; 7] = [".PPPP.PPPP.", "CCCCCSCCCCC", "C.g.CSCCCCC", "CgggCSCCCCC", "C.g.CSCCCCC", "CCCCCSCCCCC", "DDDDDSDDDDD"];
 
+/// o ✗ de quando um comando falha
+const CROSS_MARK: [&str; 5] = ["#...#", ".#.#.", "..#..", ".#.#.", "#...#"];
+/// o binóculo, na frente dos olhos
+const BINOC_ART: [&str; 4] = [".KKKK.....KKKK.", "KGGWGKKKKKGGWGK", "KGGGGK...KGGGGK", ".KKKK.....KKKK."];
+/// um ajudante (subagente): um Clawd pequenininho
+const HELPER_ART: [&str; 4] = [".LLL.", "LEBEB", "BBBBS", "S.S.S"];
+/// o gorro de Papai Noel, das colunas 3 a 26: a copa redonda, com luz à esquerda e sombra à
+/// direita, deitando para a direita até o pompom; e a barra de pelo grossa, um pouco mais larga
+/// que a cabeça, cobrindo o alto dela. l luz, r vermelho, d sombra, W pelo, g sombra do pelo
+/// (baixo: pulando, mais alto encostaria no nome do anel do pequeno)
+const SANTA_ART: [&str; 5] = [
+    ".......llrrrrrdd.....WW.",
+    ".....llrrrrrrrrrrdddWWWg",
+    "...lrrrrrrrrrrrrrrdd.gg.",
+    "WWWWWWWWWWWWWWWWWWWWW...",
+    "gWWWgWWWWgWWWWWgWWWWg...",
+];
+/// a neve do Natal: quantos flocos, quantos quadros por segundo (na camada animada do cartão) e
+/// a faixa onde cai, em quadradinhos (das colunas `SNOW_LEFT` a `SNOW_LEFT + SNOW_WIDE`, das
+/// linhas `SNOW_TOP` a `SNOW_TOP + SNOW_FALL`)
+const FLAKES: i32 = 15;
+pub const SNOW_FPS: u32 = 30;
+const SNOW_LEFT: f32 = -2.0;
+const SNOW_WIDE: i32 = 31;
+const SNOW_TOP: f32 = -5.0;
+const SNOW_FALL: f32 = 20.0;
+/// os ajudantes: em cima do notebook de lado, ou no chão à direita (um em cima do outro)
+const HELPERS_LAPTOP: [(i32, i32); 2] = [(28, -2), (32, -2)];
+const HELPERS_GROUND: [(i32, i32); 2] = [(23, 11), (23, 7)];
+/// quantos ajudantes aparecem (mais que isso, o balão conta)
+pub const HELPERS_SHOWN: u8 = 2;
+/// a pilha de papéis da conversa enchendo: até tantas folhas, no chão à esquerda
+pub const PILE_MAX: u8 = 4;
+
 /// os "z": desenho, canto de cima, quando nasce e quando some (fração do ciclo)
 const ZS: [(&[&str], i32, i32, f32, f32); 3] = [(&Z1, 21, -1, 0.0, 0.45), (&Z2, 22, -4, 0.28, 0.72), (&Z3, 22, -8, 0.55, 0.98)];
 /// os pontinhos de quem pensa: (coluna, linha, tamanho)
@@ -193,10 +245,20 @@ pub const CODE_TOTAL: i32 = 37;
 /// as teclas que cada garra aperta no notebook de frente
 const KEYS_LEFT: [i32; 6] = [8, 10, 7, 12, 9, 11];
 const KEYS_RIGHT: [i32; 6] = [17, 15, 18, 14, 16, 19];
-/// a lupa investigando: perto do rosto (de frente) ou passando pelo código na tela (de lado),
-/// com a cor da linha aumentada dentro da lente
-const MAG_FRONT: [(i32, i32); 4] = [(20, -2), (19, -1), (20, -1), (19, -2)];
-const MAG_SIDE: [(i32, i32, usize); 6] = [(26, 2, 0), (27, 2, 1), (26, 3, 2), (27, 3, 3), (26, 4, 4), (27, 4, 0)];
+/// a lupa (o canto de cima de `MAG_ART`): segura do lado, na frente do olho direito e baixa,
+/// examinando o chão; e os caminhos de um lugar ao outro, um quadradinho por quadro
+const MAG_REST: (i32, i32) = (21, 0);
+const MAG_EYE: (i32, i32) = (14, 0);
+const MAG_LOW: (i32, i32) = (19, 4);
+const MAG_UP: [(i32, i32); 8] = [(21, 0), (20, 0), (19, 0), (18, 0), (17, 0), (16, 0), (15, 0), (14, 0)];
+const MAG_DOWN: [(i32, i32); 6] = [(14, 0), (15, 1), (16, 2), (17, 3), (18, 4), (19, 4)];
+const MAG_BACK: [(i32, i32); 4] = [(19, 4), (20, 3), (21, 2), (21, 1)];
+/// as pegadas no chão, seguidas com a lupa: (coluna, linha), de frente e de lado
+const PRINTS_FRONT: [(i32, i32); 2] = [(23, 14), (27, 14)];
+const PRINTS_SIDE: [(i32, i32); 3] = [(25, 14), (29, 14), (33, 14)];
+const PRINT: Rgba = Rgba::rgb(170, 122, 86);
+/// uma pegada: três dedinhos em cima e o meio embaixo
+const PRINT_ART: [&str; 2] = ["#.#", ".#."];
 
 /// Quantas vezes por segundo confere o quadro enquanto anima; só redesenha quando o desenho
 /// muda, então conferir mais vezes deixa os movimentos no tempo certo sem custar desenhos.
@@ -211,8 +273,12 @@ const KEYS_PER_SEC: f32 = 6.0;
 /// Trabalhando há tanto tempo, ele pode parar para um café; e não toma outro antes de tanto.
 pub const COFFEE_AFTER: Duration = Duration::from_secs(20 * 60);
 const COFFEE_EVERY: Duration = Duration::from_secs(12 * 60);
-/// Uma tarefa em cada tantas é de Sherlock Holmes.
+/// Sem saber o que o Claude Code está fazendo (sem as conversas), uma tarefa em cada tantas é de
+/// investigar.
 const SHERLOCK_ONE_IN: u64 = 4;
+/// Investigando ou programando, fica pelo menos tanto tempo antes de trocar (o Claude Code
+/// alterna leituras e edições a todo instante).
+const SWITCH_AFTER: Duration = Duration::from_secs(8);
 
 /// Como o Clawd está: muda as animações que ele faz.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -220,7 +286,7 @@ pub enum Mood {
     Normal,
     /// sem números para mostrar (não conectado ou esperando o Claude Code): dorme
     Sleepy,
-    /// o Claude Code está trabalhando agora: fica no notebook
+    /// o Claude Code está trabalhando agora: no notebook ou, investigando, de Sherlock
     Busy,
     /// o diário perto do limite: sua e treme
     Worried,
@@ -265,10 +331,16 @@ pub enum Anim {
     Idea,
     /// toma um café: caneca do lado, olhos ^ ^, um gole
     Coffee,
-    /// de Sherlock: põe o chapéu de detetive no começo da tarefa
+    /// vai investigar: fecha e guarda o notebook, põe o chapéu de detetive, pega a lupa
     HatOn,
-    /// de Sherlock: no lugar de pensar, investiga com a lupa
+    /// volta a programar: guarda a lupa, tira o chapéu e abre o notebook
+    HatOff,
+    /// de Sherlock: examina com a lupa (o olho aumentado nela) e depois o chão
     Investigate,
+    /// de Sherlock: segue as pegadas no chão com a lupa
+    Trail,
+    /// de Sherlock: pensa fumando o cachimbo
+    Puff,
     /// o Claude Code terminou: fecha o notebook, se espreguiça e mostra um ✓
     Done,
     /// chegou ao limite: leva um susto, anda de lado, finca a placa e abre o livro
@@ -281,10 +353,24 @@ pub enum Anim {
     Laugh,
     /// cochila lendo e acorda
     Nod,
+    /// o Claude Code precisa de você: acena com um "!" em cima
+    Call,
+    /// um comando falhou: a garra na testa, suando, com um ✗
+    Oops,
+    /// o comando passou depois de falhar: comemora
+    Cheer,
+    /// um comando demorado: olha a ampulheta, batendo o pé
+    Wait,
+    /// pesquisando na web: olha longe com o binóculo
+    Scout,
+    /// planejando: escreve numa prancheta
+    Plan,
+    /// a conversa foi compactada: arruma a pilha de papéis
+    Tidy,
 }
 
 #[cfg(test)]
-pub const ANIMS: [Anim; 25] = [
+pub const ANIMS: [Anim; 35] = [
     Anim::Blink,
     Anim::Look,
     Anim::Scuttle,
@@ -303,13 +389,23 @@ pub const ANIMS: [Anim; 25] = [
     Anim::Idea,
     Anim::Coffee,
     Anim::HatOn,
+    Anim::HatOff,
     Anim::Investigate,
+    Anim::Trail,
+    Anim::Puff,
     Anim::Done,
     Anim::SignUp,
     Anim::SignDown,
     Anim::Read,
     Anim::Laugh,
     Anim::Nod,
+    Anim::Call,
+    Anim::Oops,
+    Anim::Cheer,
+    Anim::Wait,
+    Anim::Scout,
+    Anim::Plan,
+    Anim::Tidy,
 ];
 
 /// Os trechos (em ms) das animações de várias partes.
@@ -321,6 +417,11 @@ const DONE_SIDE: [f32; 3] = [1100.0, 900.0, 1100.0];
 const SIGN_UP: [f32; 7] = [500.0, 700.0, 90.0, 90.0, 90.0, 800.0, 300.0];
 const SIGN_DOWN: [f32; 6] = [600.0, 90.0, 90.0, 90.0, 700.0, 700.0];
 const NOD: [f32; 3] = [900.0, 1300.0, 450.0];
+/// fecha o notebook, guarda, põe o chapéu (descendo) e pega a lupa; e o caminho de volta
+const HAT_ON: [f32; 4] = [350.0, 250.0, 600.0, 400.0];
+const HAT_OFF: [f32; 4] = [350.0, 550.0, 250.0, 250.0];
+/// terminou investigando: abaixa a lupa, se espreguiça e mostra o ✓ (os mesmos 3,1 s)
+const DONE_SLEUTH: [f32; 3] = [800.0, 900.0, 1400.0];
 /// a parte do pulo em que ele agacha antes de subir
 const CROUCH: f32 = 0.1;
 
@@ -332,11 +433,11 @@ impl Anim {
     /// Duração, em segundos, digitando `pace` segundos por vez.
     pub fn secs(self, pace: f32) -> f32 {
         match self {
-            Anim::Blink => 0.2,
+            Anim::Blink => 0.24,
             Anim::Look => 1.8,
             Anim::Scuttle => 1.7,
             Anim::Hop => 0.9,
-            Anim::Wave => 1.1,
+            Anim::Wave => 1.3,
             Anim::Love => 2.2,
             Anim::Music => total(&MUSIC),
             Anim::Party => 3.2,
@@ -349,8 +450,11 @@ impl Anim {
             Anim::Think => 1.5,
             Anim::Idea => 1.5,
             Anim::Coffee => 3.4,
-            Anim::HatOn => 0.3,
-            Anim::Investigate => 2.8,
+            Anim::HatOn => total(&HAT_ON),
+            Anim::HatOff => total(&HAT_OFF),
+            Anim::Investigate => 3.2,
+            Anim::Trail => 3.6,
+            Anim::Puff => 2.6,
             // (de frente e de lado, os mesmos 3,1 s)
             Anim::Done => total(&DONE_FRONT),
             Anim::SignUp => total(&SIGN_UP),
@@ -358,6 +462,13 @@ impl Anim {
             Anim::Read => 3.2,
             Anim::Laugh => 1.1,
             Anim::Nod => total(&NOD),
+            Anim::Call => 1.6,
+            Anim::Oops => 2.0,
+            Anim::Cheer => 1.6,
+            Anim::Wait => 3.0,
+            Anim::Scout => 3.2,
+            Anim::Plan => 3.4,
+            Anim::Tidy => 2.0,
         }
     }
 }
@@ -391,7 +502,7 @@ pub enum Eyes {
     /// apertados: > <
     Squeeze,
     Wide,
-    /// de detetive: o esquerdo bem aberto, o direito apertado
+    /// de detetive: o esquerdo bem aberto, o direito apertado (ou atrás da lupa, aumentado)
     Sherlock(i32, i32),
     /// fechados em traço, curtindo, com as bochechas coradas
     Chill,
@@ -450,7 +561,11 @@ impl Legs {
 pub enum Claw {
     #[default]
     Rest,
+    /// no meio do caminho entre parada e levantada
+    Mid,
     Up,
+    /// levantada e um quadradinho para fora (acenando, balança entre esta e `Up`)
+    Out,
     High,
     /// caída no chão (dormindo)
     Limp,
@@ -462,11 +577,14 @@ pub enum Claw {
     SideKeyDown,
     /// para baixo (pegando ou guardando a placa)
     Down,
-    /// segurando a caneca do lado, e na frente da boca
+    /// segurando a caneca do lado, no meio do caminho e na frente da boca
     CupSide,
+    CupMid,
     CupFront,
     /// segurando o livro
     Book,
+    /// na testa, cobrindo o olho (um comando falhou)
+    Palm,
     /// fora do desenho (a da lupa vai junto com ela)
     Hidden,
 }
@@ -478,7 +596,9 @@ impl Claw {
         const FLAT: [&str; 2] = ["LBB", "BBK"];
         Some(match self {
             Claw::Rest => (&REST, 1, 6),
+            Claw::Mid => (&REST, 1, 4),
             Claw::Up => (&UP, 1, 2),
+            Claw::Out => (&UP, 0, 2),
             Claw::High => (&UP, 1, 0),
             Claw::Limp => (&[".BBB", "KKKK"], 0, 11),
             Claw::Key => (&FLAT, 5, 11),
@@ -487,6 +607,8 @@ impl Claw {
             Claw::SideKeyDown => (&["LBB", "KKK"], 1, 12),
             Claw::Down => (&REST, 1, 9),
             Claw::CupSide => (&FLAT, 3, 6),
+            Claw::Palm => (&FLAT, 6, 2),
+            Claw::CupMid => (&FLAT, 5, 5),
             Claw::CupFront => (&FLAT, 8, 6),
             Claw::Book => (&FLAT, 6, 8),
             Claw::Hidden => return None,
@@ -521,6 +643,24 @@ pub struct Sign {
     pub x: i32,
 }
 
+/// Onde está a caneca do café.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Cup {
+    Side,
+    Mid,
+    Sip,
+}
+
+/// O que aparece aumentado na lupa.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Lens {
+    Glass,
+    /// o olho direito, olhando para um lado (-1, 0, 1)
+    Eye(i32),
+    /// uma pegada
+    Print,
+}
+
 /// Um quadro do Clawd.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Pose {
@@ -542,12 +682,14 @@ pub struct Pose {
     pub sign: Option<Sign>,
     /// o livro aberto: (quanto mais alto, a página virando: 0 parada, 1 a 3 passando)
     pub book: Option<(i32, u8)>,
-    /// a caneca: (na boca, o vapor subindo)
-    pub cup: Option<(bool, Option<f32>)>,
+    /// a caneca: (onde: do lado, no meio do caminho ou na boca; o vapor subindo)
+    pub cup: Option<(Cup, Option<f32>)>,
     /// o chapéu de detetive (e quanto acima da cabeça)
     pub hat: Option<i32>,
-    /// a lupa: (coluna, linha, a cor da linha de código aumentada dentro dela)
-    pub mag: Option<(i32, i32, Option<usize>)>,
+    /// a lupa: (coluna, linha, o que aparece aumentado nela)
+    pub mag: Option<(i32, i32, Lens)>,
+    /// as pegadas no chão, de quem investiga (`PRINTS_FRONT` ou `PRINTS_SIDE`)
+    pub prints: Option<&'static [(i32, i32)]>,
     /// o cachimbo (com a fumaça subindo)
     pub pipe: Option<Option<f32>>,
     /// o fone (e quanto acima da cabeça) e as notas subindo
@@ -567,6 +709,22 @@ pub struct Pose {
     pub bulb: Option<(bool, bool)>,
     /// pontinhos de quem está pensando (0 a 3)
     pub dots: u8,
+    /// o ✗ vermelho (um comando falhou)
+    pub cross: bool,
+    /// a ampulheta, segura do lado: quanto da areia já caiu (0 a 1)
+    pub hourglass: Option<f32>,
+    /// o binóculo nos olhos (e para que lado ele olha: -1, 0, 1)
+    pub binoculars: Option<i32>,
+    /// a prancheta: as letras já escritas
+    pub clipboard: Option<i32>,
+    /// os ajudantes (subagentes) e onde ficam
+    pub helpers: Option<(u8, &'static [(i32, i32)])>,
+    /// a pilha de papéis da conversa enchendo (0 a `PILE_MAX` folhas)
+    pub pile: u8,
+    /// o tema de Natal: o gorro de Papai Noel (a neve cai na camada animada, `draw_snow`)
+    pub xmas: bool,
+    /// há quanto tempo (ms) a animação de agora começou (a neve caindo, os ajudantes mexendo)
+    pub ms: Option<f32>,
 }
 
 /// De pé, olhando para a frente.
@@ -627,77 +785,349 @@ fn typing(view: View, u: f32, n: i32, a: i32, b: i32) -> Pose {
     }
 }
 
-/// A ideia: a lâmpada aparece apagada, pisca e acende de vez; ele levanta as garras.
-fn idea(view: View, code: i32, u: f32) -> Pose {
+/// A ideia, partindo de `base` (no notebook ou de Sherlock): a lâmpada aparece apagada, pisca e
+/// acende de vez; ele levanta as garras (de Sherlock, só a que não segura a lupa).
+fn idea(base: Pose, u: f32) -> Pose {
     let lit = (0.25..0.32).contains(&u) || u >= 0.42;
-    let up = (0.42..0.8).contains(&u);
-    let mut p = work_base(view, code);
-    p.eyes = if up { Eyes::Happy } else if lit { Eyes::Open(0, 0) } else { Eyes::Open(1, -1) };
+    let claw = match u {
+        u if (0.38..0.42).contains(&u) || (0.8..0.85).contains(&u) => Some(Claw::Mid),
+        u if (0.42..0.8).contains(&u) => Some(Claw::Up),
+        _ => None,
+    };
+    let mut p = base;
+    p.eyes = if claw == Some(Claw::Up) { Eyes::Happy } else if lit { Eyes::Open(0, 0) } else { Eyes::Open(1, -1) };
     if u > 0.08 {
         p.bulb = Some((lit, lit && (u * 10.0) as i32 % 2 == 0));
     }
-    if up {
-        p.claws = [Claw::Up; 2];
+    if let Some(c) = claw {
+        p.claws[0] = c;
+        if p.mag.is_none() {
+            p.claws[1] = c;
+        }
     }
     p
 }
 
-/// O café: pega a caneca e a segura do lado (olhos ^ ^), dá um gole e solta o "ahh".
+/// O café: pega a caneca e a segura do lado (olhos ^ ^), leva à boca (passando pelo meio do
+/// caminho), dá um gole e solta o "ahh".
 fn coffee(view: View, code: i32, u: f32, ms: f32) -> Pose {
     let mut p = work_base(view, code);
     let steam = Some((ms / 1500.0).fract());
-    match u {
-        u if u < 0.12 => {
-            p.eyes = Eyes::Open(-1, 0);
-            p.cup = Some((false, None));
-            p.claws[0] = Claw::CupSide;
+    let (eyes, cup, claw) = match u {
+        u if u < 0.12 => (Eyes::Open(-1, 0), (Cup::Side, None), Claw::CupSide),
+        u if u < 0.4 => (Eyes::Happy, (Cup::Side, steam), Claw::CupSide),
+        u if u < 0.44 => (Eyes::Open(-1, 0), (Cup::Mid, steam), Claw::CupMid),
+        u if u < 0.7 => {
+            p.blush = Some(false);
+            (Eyes::Happy, (Cup::Sip, steam), Claw::CupFront)
         }
-        u if u < 0.42 => {
-            p.eyes = Eyes::Happy;
-            p.cup = Some((false, steam));
-            p.claws[0] = Claw::CupSide;
+        u if u < 0.74 => (Eyes::Happy, (Cup::Mid, steam), Claw::CupMid),
+        _ => {
+            p.mouth = Some(Mouth::Smile);
+            (Eyes::Happy, (Cup::Side, steam), Claw::CupSide)
+        }
+    };
+    p.eyes = eyes;
+    p.cup = Some(cup);
+    p.claws[0] = claw;
+    p
+}
+
+/// O ponto de `path` a `u` (0 a 1) do caminho.
+fn along(path: &[(i32, i32)], u: f32) -> (i32, i32) {
+    path[((u.max(0.0) * path.len() as f32) as usize).min(path.len() - 1)]
+}
+
+/// De Sherlock, parado: a lupa segura do lado com a garra direita (o chapéu e o cachimbo vêm
+/// com a fantasia, em `pose`).
+fn sleuth_base() -> Pose {
+    Pose { mag: Some((MAG_REST.0, MAG_REST.1, Lens::Glass)), claws: [Claw::Rest, Claw::Hidden], ..stand() }
+}
+
+/// Examinando com a lupa: ela sobe até o olho direito (que aparece aumentado nela, olhando para
+/// os lados), desce até o chão (uma pegada na lente) e volta; no fim, uns pontinhos ("hmm...").
+fn investigate(u: f32) -> Pose {
+    let mut p = sleuth_base();
+    let (x, y, lens, eyes) = match u {
+        u if u < 0.18 => {
+            let (x, y) = along(&MAG_UP, u / 0.18);
+            (x, y, Lens::Glass, Eyes::Open(1, 0))
+        }
+        u if u < 0.55 => {
+            // o olho aumentado vai de um lado ao outro; a lupa balança um pouco junto
+            let k = ((u - 0.18) / 0.37 * 7.0) as usize;
+            let look = [0, -1, -1, 0, 1, 1, 0][k.min(6)];
+            (MAG_EYE.0 - (k % 2) as i32, MAG_EYE.1, Lens::Eye(look), Eyes::Sherlock(look, 0))
         }
         u if u < 0.7 => {
-            p.eyes = Eyes::Happy;
-            p.blush = Some(false);
-            p.cup = Some((true, steam));
-            p.claws[0] = Claw::CupFront;
+            let (x, y) = along(&MAG_DOWN, (u - 0.55) / 0.15);
+            (x, y, Lens::Glass, Eyes::Open(1, 1))
+        }
+        u if u < 0.8 => (MAG_LOW.0, MAG_LOW.1, Lens::Print, Eyes::Sherlock(1, 1)),
+        u if u < 0.88 => {
+            let (x, y) = along(&MAG_BACK, (u - 0.8) / 0.08);
+            (x, y, Lens::Glass, Eyes::Open(1, 0))
+        }
+        _ => (MAG_REST.0, MAG_REST.1, Lens::Glass, Eyes::Open(0, -1)),
+    };
+    p.mag = Some((x, y, lens));
+    p.eyes = eyes;
+    if u > 0.88 {
+        p.dots = (((u - 0.88) * 30.0) as u8).min(3);
+    }
+    p
+}
+
+/// Seguindo as pegadas: abaixa a lupa, anda de lado até elas olhando o chão, para em cima da
+/// última examinando e volta.
+fn trail(view: View, u: f32) -> Pose {
+    let far = if view == View::Side { 6 } else { 3 };
+    let mut p = sleuth_base();
+    p.prints = Some(if view == View::Side { &PRINTS_SIDE } else { &PRINTS_FRONT });
+    let walk = |p: &mut Pose, dx: i32, st: i32| {
+        p.dx = dx;
+        p.legs = if st % 2 == 1 { Legs::StepA } else { Legs::StepB };
+    };
+    match u {
+        u if u < 0.1 => {
+            let (x, y) = along(&[(21, 0), (21, 1), (20, 2), (20, 3), (19, 4)], u / 0.1);
+            p.mag = Some((x, y, Lens::Glass));
+            p.eyes = Eyes::Open(1, 1);
+        }
+        // anda até as pegadas, um passo por quadro
+        u if u < 0.45 => {
+            let st = ((u - 0.1) / 0.35 * (far * 2) as f32) as i32;
+            walk(&mut p, (st + 1) / 2, st);
+            p.mag = Some((MAG_LOW.0, MAG_LOW.1, Lens::Print));
+            p.eyes = Eyes::Sherlock(1, 1);
+        }
+        // examina a última
+        u if u < 0.65 => {
+            p.dx = far;
+            let bob = ((u - 0.45) / 0.2 * 4.0) as i32 % 2;
+            p.mag = Some((MAG_LOW.0 + bob, MAG_LOW.1, Lens::Print));
+            p.eyes = Eyes::Sherlock(1, 1);
+            if u > 0.57 {
+                p.dots = (((u - 0.57) * 40.0) as u8).min(3);
+            }
+        }
+        // volta, de lupa um pouco mais alta
+        u if u < 0.92 => {
+            let st = ((u - 0.65) / 0.27 * (far * 2) as f32) as i32;
+            walk(&mut p, far - (st + 1) / 2, st);
+            p.mag = Some((MAG_LOW.0, MAG_LOW.1 - 2, Lens::Glass));
+            p.eyes = Eyes::Open(-1, 0);
         }
         _ => {
-            p.eyes = Eyes::Happy;
-            p.mouth = Some(Mouth::Smile);
-            p.cup = Some((false, steam));
-            p.claws[0] = Claw::CupSide;
+            let (x, y) = along(&[(20, 1), (21, 0)], (u - 0.92) / 0.04);
+            p.mag = Some((x, y, Lens::Glass));
+            p.eyes = Eyes::Open(0, 0);
         }
     }
     p
 }
 
-/// Investigando com a lupa: perto do rosto (de frente) ou passando pelo código na tela (de
-/// lado), com um olho apertado; no fim, uns pontinhos ("hmm...").
-fn investigate(view: View, u: f32) -> Pose {
-    let mut p = work_base(view, 20);
-    p.mag = Some(match view {
-        View::Front => {
-            let (x, y) = MAG_FRONT[((u * MAG_FRONT.len() as f32) as usize).min(MAG_FRONT.len() - 1)];
-            (x, y, None)
-        }
-        View::Side => {
-            let (x, y, c) = MAG_SIDE[((u * MAG_SIDE.len() as f32) as usize).min(MAG_SIDE.len() - 1)];
-            (x, y, Some(c))
-        }
-    });
-    p.eyes = Eyes::Sherlock(1, 0);
-    p.claws[1] = Claw::Hidden;
-    if u > 0.86 {
-        p.dots = (((u - 0.86) * 25.0) as u8).min(3);
+/// Pensando fumando o cachimbo: olha para cima, puxa a fumaça (os olhos meio fechados), a garra
+/// livre no queixo, e solta em baforadas; no fim, uns pontinhos.
+fn puff(u: f32, ms: f32) -> Pose {
+    let mut p = sleuth_base();
+    p.pipe = Some(Some((ms / 1100.0).fract()));
+    p.eyes = match u {
+        u if u < 0.15 => Eyes::Open(-1, -1),
+        u if u < 0.45 => Eyes::Half,
+        u if u < 0.5 => Eyes::Blink,
+        _ => Eyes::Open(-1, -1),
+    };
+    if (0.1..0.85).contains(&u) {
+        p.claws[0] = if u < 0.14 || u > 0.81 { Claw::Mid } else { Claw::Up };
+    }
+    if u > 0.7 {
+        p.dots = (((u - 0.7) * 20.0) as u8).min(3);
     }
     p
 }
 
-/// Terminou: fecha o notebook (de lado, primeiro o ✓ na tela), se espreguiça e mostra o ✓.
-fn done(view: View, ms: f32) -> Pose {
+/// Chamando você: um "!" em cima e a garra da esquerda balançando depressa, de olhos arregalados
+/// (sem largar o notebook nem a lupa).
+fn call(base: Pose, ms: f32) -> Pose {
+    let mut p = base;
+    let beat = (ms / 120.0) as i32 % 2 == 0;
+    p.claws[0] = if beat { Claw::Up } else { Claw::Out };
+    p.bang = (ms / 400.0) as i32 % 4 != 3;
+    if matches!(p.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
+        p.eyes = if (ms / 400.0) as i32 % 2 == 0 { Eyes::Wide } else { Eyes::Open(0, 0) };
+    }
+    p.glow = false;
+    p
+}
+
+/// Um comando falhou: leva a garra à testa (apertando os olhos), com um ✗ em cima, e fica
+/// suando, de boca torta.
+fn oops(base: Pose, u: f32) -> Pose {
+    let mut p = base;
+    p.cross = u < 0.85;
+    p.claws[0] = match u {
+        u if u < 0.08 || (0.6..0.68).contains(&u) => Claw::Mid,
+        u if u < 0.6 => Claw::Palm,
+        _ => p.claws[0],
+    };
+    p.eyes = if u < 0.6 { Eyes::Squeeze } else { Eyes::Open(0, 1) };
+    p.mouth = Some(Mouth::Wavy);
+    p.sweat = Some(u);
+    p
+}
+
+/// O comando passou depois de falhar: levanta as garras (as livres), dá dois pulinhos e sorri.
+fn cheer(base: Pose, u: f32, ms: f32) -> Pose {
+    let mut p = base;
+    let wave = if (ms / 140.0) as i32 % 2 == 0 { Claw::Up } else { Claw::Out };
+    let claw = if u < 0.08 || u > 0.92 { Claw::Mid } else { wave };
+    p.claws[0] = claw;
+    if p.mag.is_none() {
+        p.claws[1] = claw;
+    }
+    p.dy = if (0.15..0.3).contains(&u) || (0.45..0.6).contains(&u) { -1 } else { 0 };
+    p.eyes = Eyes::Happy;
+    p.mouth = Some(Mouth::Grin);
+    p.check = (0.1..0.9).contains(&u);
+    p
+}
+
+/// Esperando um comando demorado: segura a ampulheta do lado, olhando a areia cair, batendo o pé.
+fn wait(base: Pose, u: f32, ms: f32) -> Pose {
+    let mut p = base;
+    p.claws[0] = if u < 0.06 || u > 0.94 { Claw::Mid } else { Claw::Up };
+    if u >= 0.06 && u <= 0.94 {
+        p.hourglass = Some(((u - 0.06) / 0.88).clamp(0.0, 1.0));
+    }
+    p.eyes = if (0.45..0.5).contains(&u) { Eyes::Blink } else { Eyes::Open(-1, 0) };
+    p.legs = if (ms / 300.0) as i32 % 2 == 0 { Legs::Tap } else { Legs::Stand };
+    p.glow = false;
+    p
+}
+
+/// Pesquisando na web: guarda a lupa e olha longe com o binóculo, para um lado e para o outro;
+/// no fim, uns pontinhos.
+fn scout(u: f32) -> Pose {
+    let mut p = sleuth_base();
+    p.mag = None;
+    let pan = match u {
+        u if u < 0.1 || u > 0.92 => None,
+        u => Some([0, -1, -1, 0, 1, 1, 0][(((u - 0.1) / 0.82) * 7.0) as usize % 7]),
+    };
+    p.binoculars = pan;
+    p.claws = if pan.is_some() { [Claw::Up; 2] } else { [Claw::Mid; 2] };
+    if u > 0.84 {
+        p.dots = (((u - 0.84) * 30.0) as u8).min(3);
+    }
+    p
+}
+
+/// Planejando: guarda a lupa e escreve numa prancheta, olhando para ela; no fim, confere.
+fn plan(u: f32) -> Pose {
+    let mut p = sleuth_base();
+    p.mag = None;
+    p.claws = [Claw::Book, Claw::Hidden];
+    p.clipboard = Some(((u / 0.85).min(1.0) * 15.0) as i32);
+    p.eyes = if u < 0.85 { Eyes::Open(-1, 1) } else { Eyes::Open(0, 0) };
+    p
+}
+
+/// Arrumando a pilha de papéis (a conversa foi compactada): as folhas saem uma a uma, com as
+/// garras se revezando; no fim, sorri.
+fn tidy(pile: u8, u: f32) -> Pose {
+    let start = pile.max(2) as f32;
+    let left = (start * (1.0 - u / 0.8)).ceil().max(0.0) as u8;
+    let mut p = stand();
+    p.pile = left;
+    if u < 0.8 {
+        let k = (u * 12.0) as usize % 2;
+        p.claws[k] = Claw::Down;
+        p.eyes = Eyes::Open(-1, 1);
+    } else {
+        p.eyes = Eyes::Happy;
+        p.mouth = Some(Mouth::Smile);
+    }
+    p
+}
+
+/// Indo investigar: fecha o notebook, guarda (as garras sobem para o chapéu), o chapéu desce até
+/// a cabeça e ele pega a lupa, piscando um olho.
+fn hat_on(view: View, code: i32, ms: f32) -> Pose {
+    let (i, u) = seg(ms, &HAT_ON);
+    match i {
+        0 => {
+            let mut p = work_base(view, code);
+            p.front = p.front.map(|f| Front { open: false, ..f });
+            p.side = p.side.map(|s| Side { open: false, key: None, ..s });
+            p.eyes = Eyes::Open(1, 1);
+            p.glow = false;
+            p.claws = [Claw::Rest; 2];
+            p
+        }
+        1 => Pose { eyes: Eyes::Open(0, -1), claws: [if u < 0.5 { Claw::Mid } else { Claw::Up }; 2], ..stand() },
+        2 => {
+            // (mais alto que um quadradinho, no pequeno, encostaria no nome do anel)
+            let hdy = if u < 0.5 { -1 } else { 0 };
+            Pose { eyes: Eyes::Open(0, -1), claws: [if hdy < 0 { Claw::High } else { Claw::Up }; 2], hat: Some(hdy), ..stand() }
+        }
+        _ => {
+            let (x, y) = along(&[(21, 3), (21, 2), (21, 1), (21, 0)], u / 0.6);
+            Pose { eyes: Eyes::Sherlock(0, 0), mag: Some((x, y, Lens::Glass)), claws: [Claw::Rest, Claw::Hidden], hat: Some(0), pipe: (u > 0.5).then_some(None), ..stand() }
+        }
+    }
+}
+
+/// Voltando a programar: guarda a lupa, tira o chapéu (sobe e some), pega o notebook fechado e
+/// abre.
+fn hat_off(view: View, code: i32, ms: f32) -> Pose {
+    let (i, u) = seg(ms, &HAT_OFF);
+    match i {
+        0 => {
+            let mag = (u < 0.75).then(|| {
+                let (x, y) = along(&[(21, 0), (21, 1), (21, 2), (21, 3)], u / 0.75);
+                (x, y, Lens::Glass)
+            });
+            Pose { mag, claws: [Claw::Rest, if mag.is_some() { Claw::Hidden } else { Claw::Rest }], hat: Some(0), pipe: Some(None), ..stand() }
+        }
+        1 => {
+            let claws = [if u < 0.15 { Claw::Up } else { Claw::High }; 2];
+            Pose { eyes: Eyes::Open(0, -1), claws, hat: (u < 0.7).then_some(-((u / 0.35) as i32).min(1)), ..stand() }
+        }
+        2 => {
+            let mut p = work_base(view, code);
+            p.front = p.front.map(|f| Front { open: false, ..f });
+            p.side = p.side.map(|s| Side { open: false, key: None, ..s });
+            p.glow = false;
+            p.claws = [Claw::Rest; 2];
+            p
+        }
+        _ => {
+            let mut p = work_base(view, code);
+            p.eyes = Eyes::Open(0, 0);
+            p
+        }
+    }
+}
+
+/// Terminou: fecha o notebook (de lado, primeiro o ✓ na tela) ou abaixa a lupa, se espreguiça e
+/// mostra o ✓.
+fn done(view: View, ms: f32, sleuth: bool) -> Pose {
     let stretch = Pose { dy: -1, legs: Legs::Stretch, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::High; 2], ..stand() };
+    if sleuth {
+        let (i, u) = seg(ms, &DONE_SLEUTH);
+        return match i {
+            0 => {
+                let mag = (u < 0.6).then(|| {
+                    let (x, y) = along(&[(21, 0), (21, 1), (21, 2), (21, 3)], u / 0.6);
+                    (x, y, Lens::Glass)
+                });
+                Pose { eyes: Eyes::Happy, mag, claws: [Claw::Rest, if mag.is_some() { Claw::Hidden } else { Claw::Rest }], ..stand() }
+            }
+            1 => stretch,
+            _ => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), check: !(0.4..0.48).contains(&u), ..stand() },
+        };
+    }
     match view {
         View::Front => {
             let closed = Some(Front { open: false, key: None });
@@ -769,26 +1199,33 @@ fn still(mood: Mood, scene: &Scene) -> Pose {
     match mood {
         Mood::Normal => stand(),
         Mood::Sleepy => asleep(None),
+        Mood::Busy if scene.sleuth => sleuth_base(),
         Mood::Busy => work_base(scene.view, scene.code),
         Mood::Worried => Pose { mouth: Some(Mouth::Wavy), blush: Some(true), sweat: Some(0.0), ..stand() },
         Mood::Limit => at_limit(reading(), scene.view, 11, true),
     }
 }
 
-/// O que está em volta dele agora: de onde é visto, se está de Sherlock e o código na tela.
+/// O que está em volta dele agora: de onde é visto, se está investigando (de Sherlock), o
+/// código na tela, os ajudantes, a pilha de papéis e o tema de Natal.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Scene {
     pub view: View,
-    /// com o chapéu de detetive (a tarefa de agora é de Sherlock)
-    pub hat: bool,
+    /// investigando, de Sherlock (sem o notebook)
+    pub sleuth: bool,
     /// as letras de código na tela do notebook de lado
     pub code: i32,
+    /// subagentes trabalhando
+    pub helpers: u8,
+    /// a pilha de papéis da conversa enchendo (0 a `PILE_MAX`)
+    pub pile: u8,
+    pub xmas: bool,
 }
 
 impl Scene {
     #[cfg(test)]
     pub fn new(view: View) -> Scene {
-        Scene { view, hat: false, code: 0 }
+        Scene { view, sleuth: false, code: 0, helpers: 0, pile: 0, xmas: false }
     }
 }
 
@@ -803,7 +1240,6 @@ pub struct Play {
 /// O quadro de agora: com o humor, a animação tocando (se houver), o que está em volta e, se o
 /// mouse está por perto, olhando para ele (`gaze`).
 pub fn pose(mood: Mood, play: Option<Play>, scene: &Scene, gaze: Option<(i32, i32)>) -> Pose {
-    let view = scene.view;
     let base = still(mood, scene);
     let mut p = match play {
         None => base,
@@ -812,23 +1248,38 @@ pub fn pose(mood: Mood, play: Option<Play>, scene: &Scene, gaze: Option<(i32, i3
             frame(anim, t, secs, base, scene)
         }
     };
-    // a fantasia de Sherlock: o chapéu no trabalho todo e, de lado, o cachimbo (menos bocejando,
-    // falando ou tomando café)
-    // (pulando, acordando ou levando um susto, ele está sem o notebook: sem a fantasia)
-    let working = match play.map(|p| p.anim) {
+    // a fantasia de Sherlock, investigando: o chapéu e o cachimbo (menos bocejando ou falando)
+    // (pulando, acordando ou levando um susto, sem a fantasia; pondo ou tirando, ela vem no
+    // desenho da animação)
+    let dressed = match play.map(|p| p.anim) {
         None => mood == Mood::Busy,
-        Some(Anim::Done | Anim::HatOn) => true,
-        Some(Anim::Hop | Anim::Love | Anim::Wake | Anim::Startle) => false,
+        Some(Anim::Done) => true,
+        Some(Anim::HatOn | Anim::HatOff | Anim::Hop | Anim::Love | Anim::Wake | Anim::Startle) => false,
         Some(_) => mood == Mood::Busy,
     };
-    if scene.hat && working {
+    if scene.sleuth && dressed {
         if p.hat.is_none() {
             p.hat = Some(0);
         }
-        if view == View::Side && p.mouth.is_none() && p.cup.is_none() {
+        if p.mouth.is_none() && p.pipe.is_none() {
             let ms = play.map(|p| p.t * p.secs * 1000.0);
             p.pipe = Some(ms.map(|ms| (ms / 2200.0).fract()));
         }
+    }
+    // em volta: os ajudantes trabalhando junto (em cima do notebook de lado, ou no chão), a pilha
+    // de papéis da conversa e o Natal
+    p.xmas = scene.xmas;
+    let around = mood == Mood::Busy;
+    if around && scene.helpers > 0 {
+        let spots: &'static [(i32, i32)] = if p.side.is_some_and(|s| s.open) { &HELPERS_LAPTOP } else { &HELPERS_GROUND };
+        p.helpers = Some((scene.helpers.min(HELPERS_SHOWN), spots));
+    }
+    if around && play.map(|p| p.anim) != Some(Anim::Tidy) {
+        p.pile = scene.pile.min(PILE_MAX);
+    }
+    // (o tempo só entra no quadro quando algo depende dele: os ajudantes)
+    if p.helpers.is_some() {
+        p.ms = play.map(|p| p.t.clamp(0.0, 1.0) * p.secs * 1000.0);
     }
     // os olhos no mouse, se estão abertos
     if let Some((gx, gy)) = gaze {
@@ -853,8 +1304,9 @@ fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
     };
     match anim {
         Anim::Blink => {
+            // fecha e abre passando pela metade
             let mut p = base;
-            open_eyes(&mut p, Eyes::Blink);
+            open_eyes(&mut p, if (0.3..0.7).contains(&t) { Eyes::Blink } else { Eyes::Half });
             p
         }
         Anim::Look => {
@@ -877,21 +1329,41 @@ fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
         Anim::Hop => {
             if t < CROUCH {
                 // agacha antes de pular: já o primeiro quadro é outro (reage ao clique na hora)
-                Pose { dy: 1, legs: Legs::Tuck, ..stand() }
+                Pose { dy: 1, legs: Legs::Tuck, claws: [Claw::Mid; 2], ..stand() }
             } else {
+                // dois pulos, cada um subindo e descendo um quadradinho por quadro e amortecendo
+                // no chão
                 let h = ((t - CROUCH) / (1.0 - CROUCH) * 2.0).fract();
-                let dy = -((h * std::f32::consts::PI).sin() * 4.0).round() as i32;
-                let up = dy <= -3;
-                Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, claws: if up { [Claw::Up; 2] } else { [Claw::Rest; 2] }, ..stand() }
+                if h > 0.86 {
+                    return Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, claws: [Claw::Mid; 2], ..stand() };
+                }
+                let dy = -((h / 0.86 * std::f32::consts::PI).sin() * 4.0).round() as i32;
+                let claws = match dy {
+                    d if d <= -3 => Claw::Up,
+                    d if d < 0 => Claw::Mid,
+                    _ => Claw::Rest,
+                };
+                Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, claws: [claws; 2], ..stand() }
             }
         }
         Anim::Wave => {
-            // acena com uma garra de cada vez, sorrindo (trabalhando, sem largar o notebook)
+            // levanta a garra da esquerda, balança de um lado para o outro e abaixa, sorrindo
+            // (trabalhando, sem largar o notebook nem a lupa)
             let mut p = base;
-            let k = (t * 6.0) as i32 % 2;
-            p.claws[k as usize] = Claw::Up;
+            p.claws[0] = match t {
+                t if t < 0.08 || (0.86..0.94).contains(&t) => Claw::Mid,
+                t if t < 0.86 => {
+                    if ((t - 0.08) * secs * 1000.0 / 140.0) as i32 % 2 == 0 {
+                        Claw::Up
+                    } else {
+                        Claw::Out
+                    }
+                }
+                _ => p.claws[0],
+            };
             open_eyes(&mut p, Eyes::Happy);
-            if p.mouth.is_none() {
+            // (de Sherlock, sorri com o cachimbo na boca)
+            if p.mouth.is_none() && !scene.sleuth {
                 p.mouth = Some(Mouth::Smile);
             }
             p
@@ -901,20 +1373,25 @@ fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
             blush: Some(false),
             mouth: Some(Mouth::Smile),
             heart: Some(t),
-            claws: if t < 0.5 { [Claw::Up; 2] } else { [Claw::Rest; 2] },
+            claws: [match t {
+                t if t < 0.06 || (0.45..0.53).contains(&t) => Claw::Mid,
+                t if t < 0.45 => Claw::Up,
+                _ => Claw::Rest,
+            }; 2],
             ..stand()
         },
         Anim::Music => {
-            let (i, _) = seg(ms, &MUSIC);
+            let (i, u) = seg(ms, &MUSIC);
             let notes = Some((ms / 2600.0).fract());
             let b = beat(ms);
             match i {
-                0 => Pose { eyes: Eyes::Open(0, -1), claws: [Claw::Up; 2], phones: Some(-3), ..stand() },
-                1 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(0), ..stand() },
+                0 => Pose { eyes: Eyes::Open(0, -1), claws: [if u < 0.4 { Claw::Mid } else { Claw::Up }; 2], phones: Some(-3), ..stand() },
+                // o fone desce até a cabeça
+                1 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-2 + (u * 3.0).min(2.0) as i32), ..stand() },
                 2 | 4 => Pose { eyes: Eyes::Chill, phones: Some(0), notes, dx: b as i32, legs: if b { Legs::Tap } else { Legs::Stand }, ..stand() },
                 3 => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), phones: Some(0), notes, dx: b as i32, claws: if b { [Claw::Up, Claw::Rest] } else { [Claw::Rest, Claw::Up] }, ..stand() },
-                5 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-3), ..stand() },
-                _ => stand(),
+                5 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-1 - (u * 3.0).min(2.0) as i32), ..stand() },
+                _ => Pose { claws: [if u < 0.2 { Claw::Mid } else { Claw::Rest }; 2], ..stand() },
             }
         }
         Anim::Party => {
@@ -973,25 +1450,21 @@ fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
             p.dots = ((t * 4.0) as u8).min(3);
             p
         }
-        Anim::Idea => idea(view, scene.code, t),
+        Anim::Idea => idea(base, t),
         Anim::Coffee => coffee(view, scene.code, t, ms),
-        Anim::HatOn => {
-            let mut p = work_base(view, scene.code);
-            p.eyes = Eyes::Open(0, -1);
-            p.claws = if t < 0.6 { [Claw::High; 2] } else { [Claw::Up; 2] };
-            p.hat = Some(0);
-            p
-        }
-        Anim::Investigate => {
-            let mut p = investigate(view, t);
-            if view == View::Side {
-                if let Some(s) = &mut p.side {
-                    s.code = scene.code.max(20);
-                }
-            }
-            p
-        }
-        Anim::Done => done(view, ms),
+        Anim::HatOn => hat_on(view, scene.code, ms),
+        Anim::HatOff => hat_off(view, scene.code, ms),
+        Anim::Investigate => investigate(t),
+        Anim::Trail => trail(view, t),
+        Anim::Puff => puff(t, ms),
+        Anim::Done => done(view, ms, scene.sleuth),
+        Anim::Call => call(base, ms),
+        Anim::Oops => oops(base, t),
+        Anim::Cheer => cheer(base, t, ms),
+        Anim::Wait => wait(base, t, ms),
+        Anim::Scout => scout(t),
+        Anim::Plan => plan(t),
+        Anim::Tidy => tidy(scene.pile, t),
         Anim::SignUp => {
             let (i, u) = seg(ms, &SIGN_UP);
             match i {
@@ -1073,6 +1546,51 @@ fn steps(a: f32) -> f32 {
     (a.clamp(0.0, 1.0) * 4.0).round() / 4.0
 }
 
+/// Os flocos de neve a `secs` segundos: (x, y, lado, opacidade), em quadradinhos, com posições
+/// quebradas (a neve desliza, sem andar de quadradinho em quadradinho). Três camadas: os da
+/// frente, maiores e claros, caem mais rápido e balançam mais; os do fundo, menores e apagados,
+/// devagar. Cada um aparece aos poucos lá em cima, some perto do chão e, a cada volta, cai numa
+/// coluna nova (a neve não fica repetindo o mesmo desenho).
+pub fn flakes(secs: f32) -> impl Iterator<Item = (f32, f32, f32, f32)> {
+    (0..FLAKES).map(move |i| {
+        let layer = (i % 3) as usize;
+        // quadradinhos por segundo
+        let speed = [3.6, 2.5, 1.7][layer];
+        let fall = secs * speed + (i * 7) as f32 % SNOW_FALL + i as f32 * 0.37;
+        let lap = (fall / SNOW_FALL).floor() as i32;
+        let row = fall.rem_euclid(SNOW_FALL);
+        let col = (i * 11 + 3 + lap * 13).rem_euclid(SNOW_WIDE) as f32;
+        // o balanço: devagar, de um lado para o outro
+        let sway = (secs * [1.9, 1.5, 1.1][layer] + i as f32 * 1.9).sin() * [1.2, 0.9, 0.6][layer];
+        let size = [1.0, 0.8, 0.6][layer];
+        // aparece nas duas primeiras linhas e some nas três últimas
+        let fade = (row / 2.0).min((SNOW_FALL - row) / 3.0).clamp(0.0, 1.0);
+        (SNOW_LEFT + col + sway, SNOW_TOP + row, size, [0.95, 0.7, 0.5][layer] * fade)
+    })
+}
+
+/// Os flocos que aparecem com ele em `p`: os que passam por trás dele (e do que ele segura) ficam
+/// escondidos, como se a neve caísse atrás.
+pub fn visible_flakes(p: &Pose, secs: f32) -> Vec<(f32, f32, f32, f32)> {
+    let body = cells(p);
+    flakes(secs)
+        .filter(|&(x, y, size, a)| {
+            let (mx, my) = (x + size / 2.0, y + size / 2.0);
+            a > 0.02 && !body.iter().any(|&(bx, by, bw, bh, _)| mx >= bx as f32 && mx < (bx + bw) as f32 && my >= by as f32 && my < (by + bh) as f32)
+        })
+        .collect()
+}
+
+/// A neve caindo em volta dele (centro da grade em (cx, cy), lugar de `unit` pontos), na camada
+/// animada do cartão: redesenhada a cada quadro, sem redesenhar o cartão.
+pub fn draw_snow(c: &mut Canvas, cx: f32, cy: f32, unit: f32, p: &Pose, secs: f32) {
+    let (x0, y0, u) = origin(c.s, cx, cy, unit);
+    for (x, y, size, a) in visible_flakes(p, secs) {
+        let (ax, ay) = (x0 + x * u, y0 + y * u);
+        c.fill_round_rect(ax, ay, ax + size * u, ay + size * u, size * u * 0.25, SNOW.alpha(a));
+    }
+}
+
 /// Os retângulos do quadro, em quadradinhos (os adereços podem sair da grade: acima, em linhas
 /// negativas; à direita, o notebook de lado e a placa).
 pub fn cells(p: &Pose) -> Vec<Cell> {
@@ -1097,6 +1615,21 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
         out.push((x, y, w, h, c));
     };
     let top = -(p.breath as i32);
+
+
+    // a pilha de papéis no chão à esquerda: uma folha (com a beirada) por vez, meio torta
+    for k in 0..p.pile.min(PILE_MAX) as i32 {
+        let (x, y) = (-3 + (k % 2), 13 - 2 * k);
+        put(x, y, 4, 1, PAGE, false);
+        put(x, y + 1, 4, 1, PAGE_EDGE, false);
+    }
+
+    // as pegadas no chão (por baixo dele, que passa por cima), sem andar junto com ele
+    if let Some(prints) = p.prints {
+        for &(x, y) in prints {
+            art(&mut put, &PRINT_ART, x, y - 1, one(PRINT), false, false);
+        }
+    }
 
     // o corpo: luz em cima e à esquerda, sombra embaixo e à direita, cantos arredondados
     put(5, top, 17, 1, LIGHT, true);
@@ -1320,8 +1853,13 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
         }
     }
     // a caneca (antes das garras: a garra fica por cima da asa, segurando) e o vapor
-    if let Some((sip, steam)) = p.cup {
-        let (cx, cy) = if sip { (9, 4) } else { (-2, 4) };
+    if let Some((at, steam)) = p.cup {
+        let sip = at == Cup::Sip;
+        let (cx, cy) = match at {
+            Cup::Side => (-2, 4),
+            Cup::Mid => (2, 3),
+            Cup::Sip => (9, 4),
+        };
         let color = |ch: u8| match ch {
             b'R' => Some(CUP_RIM),
             b'k' => Some(BREW),
@@ -1368,8 +1906,9 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
         };
         art(&mut put, &HAT_ART, 2, -6 + top + hdy, color, false, true);
     }
-    if let Some((mx, my, zoom)) = p.mag {
-        // a lupa, segura pela garra direita na ponta do cabo; em cima da tela, o código aumentado
+    if let Some((mx, my, lens)) = p.mag {
+        // a lupa, segura pela garra direita na ponta do cabo; dentro dela, o olho ou a pegada
+        // aumentados (o brilho do vidro fica por cima)
         let color = |ch: u8| match ch {
             b'K' => Some(LENS),
             b'G' => Some(glass()),
@@ -1377,10 +1916,19 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             _ => Some(HANDLE),
         };
         art(&mut put, &MAG_ART, mx, my, color, false, true);
-        if let Some(c) = zoom {
-            put(mx + 3, my + 2, 4, 2, CODE[c % 5], true);
-            put(mx + 3, my + 5, 2, 1, CODE[(c + 2) % 5], true);
+        match lens {
+            Lens::Glass => {}
+            Lens::Eye(look) => {
+                // o olho direito por trás da lente: o dobro de alto, com o brilho
+                let ex = mx + 4 + look.clamp(-1, 1);
+                put(ex, my + 1, 2, 5, EYE, true);
+                put(ex + 1, my + 1, 1, 2, SHINE, true);
+            }
+            Lens::Print => {
+                art(&mut put, &[".##.", "#..#", "#.##", ".#.."], mx + 3, my + 1, one(PRINT), false, true);
+            }
         }
+        art(&mut put, &["W", ".W"], mx + 6, my + 1, one(GLINT.alpha(0.9)), false, true);
         art(&mut put, &["LBB", "BBK"], mx, my + 9, claw_color, false, true);
     }
     if let Some(pdy) = p.phones {
@@ -1406,8 +1954,24 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             art(&mut put, glyph, x, yb - glyph.len() as i32 + 1, one(NOTE.alpha(al)), false, true);
         }
     }
+    // o gorro de Papai Noel (no Natal, quando não há outro chapéu; dormindo, é ele o gorro de
+    // dormir, e sai do mesmo jeito ao acordar)
+    let santa = |a: f32| {
+        move |ch: u8| match ch {
+            b'l' => Some(SANTA_LIGHT.alpha(a)),
+            b'r' => Some(SANTA.alpha(a)),
+            b'd' => Some(SANTA_DARK.alpha(a)),
+            b'g' => Some(FUR_SHADE.alpha(a)),
+            _ => Some(FUR.alpha(a)),
+        }
+    };
+    if p.xmas && p.hat.is_none() && p.cap.is_none() && p.phones.is_none() {
+        art(&mut put, &SANTA_ART, 3, -3 + top, santa(1.0), false, true);
+    }
     if let Some((cdy, a)) = p.cap {
-        if a > 0.0 {
+        if a > 0.0 && p.xmas {
+            art(&mut put, &SANTA_ART, 3, -3 + top + cdy, santa(a), false, true);
+        } else if a > 0.0 {
             let color = move |ch: u8| match ch {
                 b'b' => Some(CAP.alpha(a)),
                 b'l' => Some(CAP_LIGHT.alpha(a)),
@@ -1473,6 +2037,79 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
     }
     for &(x, y, s) in DOTS.iter().take(p.dots as usize) {
         put(x, y, s, s, FG, true);
+    }
+    if p.cross {
+        art(&mut put, &CROSS_MARK, 23, -5, one(CROSS), false, true);
+    }
+    if let Some(fell) = p.hourglass {
+        // a ampulheta na garra da esquerda: a areia de cima vai para baixo, um grão caindo
+        let (hx, hy) = (-2, 0);
+        put(hx, hy, 5, 1, BOARD, true);
+        put(hx, hy + 6, 5, 1, BOARD, true);
+        put(hx + 1, hy + 1, 3, 2, glass(), true);
+        put(hx + 2, hy + 3, 1, 1, glass(), true);
+        put(hx + 1, hy + 4, 3, 2, glass(), true);
+        let top_sand = (3.0 * (1.0 - fell)).round() as i32;
+        let bottom_sand = 3 - top_sand;
+        if top_sand >= 1 {
+            put(hx + 1, hy + 2, top_sand.min(3), 1, SAND, true);
+        }
+        if top_sand >= 3 {
+            put(hx + 2, hy + 1, 1, 1, SAND, true);
+        }
+        if bottom_sand >= 1 {
+            put(hx + 1, hy + 5, bottom_sand.min(3), 1, SAND, true);
+        }
+        if bottom_sand >= 3 {
+            put(hx + 2, hy + 4, 1, 1, SAND, true);
+        }
+        if fell < 0.98 {
+            put(hx + 2, hy + 3, 1, 1, SAND, true);
+        }
+    }
+    if let Some(pan) = p.binoculars {
+        let color = |ch: u8| match ch {
+            b'K' => Some(LENS),
+            b'W' => Some(GLINT),
+            _ => Some(glass()),
+        };
+        art(&mut put, &BINOC_ART, 5 + pan, 2, color, false, true);
+    }
+    if let Some(written) = p.clipboard {
+        // a prancheta na frente, com o papel; as linhas aparecem enquanto ele escreve
+        put(7, 5, 8, 9, BOARD, true);
+        put(9, 4, 4, 1, CLIP, true);
+        put(8, 6, 6, 7, PAGE, true);
+        let mut left = written;
+        for row in 0..3 {
+            let n = left.clamp(0, 5);
+            if n > 0 {
+                put(8, 7 + 2 * row, n, 1, CODE[(row as usize + 1) % 5], true);
+            }
+            left -= 5;
+        }
+        // o lápis na garra da direita, na ponta do que está sendo escrito
+        let row = (written.clamp(0, 14) / 5).min(2);
+        let col = 8 + (written - row * 5).clamp(0, 5);
+        let (px, py) = (col, 6 + 2 * row);
+        put(px, py, 1, 1, EYE, true);
+        put(px + 1, py - 1, 1, 1, PENCIL, true);
+        put(px + 2, py - 2, 1, 1, PENCIL, true);
+        put(px + 3, py - 3, 1, 1, ERASER, true);
+        art(&mut put, &["LBB", "BBK"], px + 3, py - 2, claw_color, false, true);
+    }
+    if let Some((n, spots)) = p.helpers {
+        // os ajudantes, mexendo quando ele mexe (cada um no seu tempo)
+        let color = |ch: u8| match ch {
+            b'L' => Some(LIGHT),
+            b'E' => Some(EYE),
+            b'S' => Some(SHADE),
+            _ => Some(BODY),
+        };
+        for (k, &(x, y)) in spots.iter().take(n as usize).enumerate() {
+            let bob = p.ms.map_or(0, |ms| ((ms / 220.0) as i32 + k as i32) % 2);
+            art(&mut put, &HELPER_ART, x, y - bob, color, false, false);
+        }
     }
     out
 }
@@ -1573,9 +2210,26 @@ pub struct Crab {
     /// trabalhando há um bom tempo (pode parar para um café), e quando foi o último
     pub tired: bool,
     last_coffee: Option<Instant>,
-    /// a tarefa de agora é de Sherlock, e se ele já pôs o chapéu
-    sherlock: bool,
-    hat: bool,
+    /// investigando, de Sherlock (sem o notebook); e quando trocou por último
+    sleuth: bool,
+    switched: Option<Instant>,
+    /// o que o Claude Code está fazendo: lendo e procurando (true) ou editando e rodando
+    /// comandos (false); None: não dá para saber (aí vale o sorteio de cada tarefa, `guess`)
+    pub investigating: Option<bool>,
+    guess: bool,
+    /// o Claude Code precisa de você (pedindo permissão, perguntando)
+    pub calling: bool,
+    /// pesquisando na web, planejando, esperando um comando demorado
+    pub web: bool,
+    pub planning: bool,
+    pub running: bool,
+    /// subagentes trabalhando e a pilha de papéis da conversa enchendo
+    pub helpers: u8,
+    pub pile: u8,
+    /// o tema de Natal (mudado também na hora de desenhar, quando a opção muda) e desde quando a
+    /// neve cai
+    pub xmas: std::cell::Cell<bool>,
+    snow_since: Instant,
     /// as letras de código na tela do notebook de lado
     code: i32,
     /// pode pôr o fone (sem números, ele fica embaixo do anel, e as notas chegariam nele)
@@ -1602,8 +2256,18 @@ impl Crab {
             inspired: false,
             tired: false,
             last_coffee: None,
-            sherlock: false,
-            hat: false,
+            sleuth: false,
+            switched: None,
+            investigating: None,
+            guess: false,
+            calling: false,
+            web: false,
+            planning: false,
+            running: false,
+            helpers: 0,
+            pile: 0,
+            xmas: std::cell::Cell::new(false),
+            snow_since: Instant::now(),
             code: 0,
             music: true,
         }
@@ -1618,13 +2282,25 @@ impl Crab {
         c
     }
 
-    /// O mesmo, numa tarefa de Sherlock, já de chapéu (para as imagens e os testes).
+    /// O mesmo, investigando, já de Sherlock (para as imagens e os testes).
     #[cfg(test)]
     pub fn dressed(mut self) -> Crab {
-        self.sherlock = true;
-        self.hat = true;
+        self.sleuth = true;
+        self.guess = true;
+        self.investigating = Some(true);
+        self.switched = Some(Instant::now());
         self.code = 20;
         self
+    }
+
+    /// Está investigando (de Sherlock)?
+    pub fn sleuthing(&self) -> bool {
+        self.sleuth
+    }
+
+    /// Investigar ou programar mudou e já está na hora de trocar (de roupa)?
+    fn switch_due(&self) -> bool {
+        self.investigating.unwrap_or(self.guess) != self.sleuth && self.switched.is_none_or(|t| t.elapsed() >= SWITCH_AFTER)
     }
 
     fn random(&mut self) -> u64 {
@@ -1653,7 +2329,18 @@ impl Crab {
 
     /// O que está em volta dele, visto de `view`.
     pub fn scene(&self, view: View) -> Scene {
-        Scene { view, hat: self.hat, code: self.code.min(CODE_TOTAL) }
+        Scene { view, sleuth: self.sleuth, code: self.code.min(CODE_TOTAL), helpers: self.helpers, pile: self.pile, xmas: self.xmas.get() }
+    }
+
+    /// Com a neve caindo há `secs` segundos (para as imagens do README).
+    #[cfg(test)]
+    pub fn snow_from(&mut self, secs: f32) {
+        self.snow_since = Instant::now() - Duration::from_secs_f32(secs);
+    }
+
+    /// Há quantos segundos a neve cai (dá a volta a cada hora, sem perder a precisão).
+    pub fn snow_secs(&self) -> f32 {
+        self.snow_since.elapsed().as_secs_f32() % 3600.0
     }
 
     /// O quadro de agora, visto de `view`.
@@ -1690,13 +2377,13 @@ impl Crab {
                 self.play(Anim::Wake);
             }
             if before == Mood::Busy && !self.is_playing(Anim::Done) {
-                self.sherlock = false;
-                self.hat = false;
+                self.sleuth = false;
             }
             if mood == Mood::Busy && before != Mood::Busy {
-                // começou a trabalhar: pega o notebook logo; de vez em quando, de Sherlock
-                self.sherlock = self.random() % SHERLOCK_ONE_IN == 0;
-                self.hat = false;
+                // começou a trabalhar: pega o notebook logo (ou, investigando, vira Sherlock)
+                self.guess = self.random() % SHERLOCK_ONE_IN == 0;
+                self.sleuth = false;
+                self.switched = None;
                 self.next = self.next.min(now + Duration::from_millis(600));
             }
         }
@@ -1707,9 +2394,12 @@ impl Crab {
                 match anim {
                     Anim::Type => self.code = (self.code + chars_typed(secs)).min(CODE_TOTAL),
                     Anim::Done => {
-                        self.sherlock = false;
-                        self.hat = false;
+                        self.sleuth = false;
                         self.code = 0;
+                    }
+                    Anim::HatOn | Anim::HatOff => {
+                        self.sleuth = anim == Anim::HatOn;
+                        self.switched = Some(now);
                     }
                     _ => {}
                 }
@@ -1725,9 +2415,13 @@ impl Crab {
                     _ => (7, 16),
                 };
                 self.next = now + Duration::from_secs(lo + self.random() % (hi - lo));
-                // com uma ideia na cabeça (ou o chapéu para pôr), volta ao trabalho logo
-                if mood == Mood::Busy && (self.inspired || (self.sherlock && !self.hat)) {
+                // com uma ideia na cabeça (ou a roupa para trocar), volta ao trabalho logo; e,
+                // chamando você, continua chamando
+                if mood == Mood::Busy && ((self.inspired && !self.sleuth) || self.switch_due()) {
                     self.next = now + Duration::from_millis(300);
+                }
+                if mood == Mood::Busy && self.calling {
+                    self.next = now + Duration::from_millis(700);
                 }
                 return true;
             }
@@ -1764,7 +2458,6 @@ impl Crab {
             }
             Anim::Idea => self.inspired = true,
             Anim::Coffee => self.last_coffee = Some(Instant::now()),
-            Anim::HatOn => self.hat = true,
             _ => {}
         }
         self.anim = Some((anim, Instant::now(), secs));
@@ -1800,8 +2493,26 @@ impl Crab {
         match mood {
             Mood::Sleepy => Anim::Snooze,
             Mood::Busy => {
-                if self.sherlock && !self.hat {
-                    return Anim::HatOn;
+                if self.calling {
+                    return Anim::Call;
+                }
+                if self.switch_due() {
+                    return if self.sleuth { Anim::HatOff } else { Anim::HatOn };
+                }
+                if self.sleuth {
+                    // planejando: a prancheta; na web: o binóculo; investigando o código: quase
+                    // sempre a lupa; às vezes segue pegadas, pensa fumando o cachimbo ou tem
+                    // uma ideia
+                    const PLANNING: [Anim; 6] = [Anim::Plan, Anim::Plan, Anim::Plan, Anim::Puff, Anim::Investigate, Anim::Blink];
+                    const WEB: [Anim; 5] = [Anim::Scout, Anim::Scout, Anim::Scout, Anim::Puff, Anim::Blink];
+                    const SLEUTH: [Anim; 10] = [Anim::Investigate, Anim::Investigate, Anim::Investigate, Anim::Trail, Anim::Trail, Anim::Puff, Anim::Puff, Anim::Idea, Anim::Blink, Anim::Look];
+                    let list: &[Anim] = if self.planning { &PLANNING } else if self.web { &WEB } else { &SLEUTH };
+                    return list[(self.random() % list.len() as u64) as usize];
+                }
+                // um comando demorado: espera olhando a ampulheta
+                if self.running {
+                    const WAITING: [Anim; 5] = [Anim::Wait, Anim::Wait, Anim::Wait, Anim::Look, Anim::Blink];
+                    return WAITING[(self.random() % WAITING.len() as u64) as usize];
                 }
                 if self.inspired {
                     return Anim::Type;
@@ -1811,12 +2522,9 @@ impl Crab {
                 if coffee_due && self.random() % 3 == 0 {
                     return Anim::Coffee;
                 }
-                // quase sempre digitando; às vezes pensa (de Sherlock, investiga), tem uma ideia
+                // quase sempre digitando; às vezes pensa ou tem uma ideia
                 const BUSY: [Anim; 11] = [Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Type, Anim::Think, Anim::Think, Anim::Idea, Anim::Blink, Anim::Look];
-                match BUSY[(self.random() % BUSY.len() as u64) as usize] {
-                    Anim::Think if self.hat => Anim::Investigate,
-                    a => a,
-                }
+                BUSY[(self.random() % BUSY.len() as u64) as usize]
             }
             Mood::Worried => [Anim::Sweat, Anim::Shake, Anim::Sweat, Anim::Blink][(self.random() % 4) as usize],
             // lendo: quase sempre virando a página; às vezes ri ou cochila
@@ -1839,7 +2547,7 @@ pub fn anims_for(mood: Mood, data: bool) -> Vec<Anim> {
         Mood::Normal if data => vec![Blink, Look, Scuttle, Hop, Wave, Love, Music, Party, Wake, Startle, Done, SignDown],
         Mood::Normal => vec![Blink, Look, Scuttle, Hop, Wave, Love, Wake, Startle],
         Mood::Sleepy => vec![Snooze, Startle, Wake],
-        Mood::Busy => vec![Blink, Look, Wave, Hop, Type, Think, Idea, Coffee, HatOn, Investigate, Wake],
+        Mood::Busy => vec![Blink, Look, Wave, Hop, Type, Think, Idea, Coffee, HatOn, HatOff, Investigate, Trail, Puff, Wake, Call, Oops, Cheer, Wait, Scout, Plan, Tidy],
         Mood::Worried => vec![Sweat, Shake, Blink, Wave, Hop],
         Mood::Limit => vec![SignUp, Read, Laugh, Nod, Blink, Hop],
     }
@@ -1858,9 +2566,17 @@ pub fn frames_for(mood: Mood, view: View, data: bool) -> Vec<(Option<Anim>, Vec<
             out.push((anim, cs));
         }
     };
-    for hat in [false, true] {
+    // de Sherlock ou não, com a tela vazia, pela metade ou cheia; e, com a tela pela metade, com
+    // tudo em volta (os ajudantes, a pilha de papéis cheia e o Natal)
+    let mut scenes = Vec::new();
+    for sleuth in [false, true] {
         for code in [0, 20, CODE_TOTAL] {
-            let scene = Scene { view, hat, code };
+            scenes.push(Scene { view, sleuth, code, helpers: 0, pile: 0, xmas: false });
+        }
+        scenes.push(Scene { view, sleuth, code: 20, helpers: HELPERS_SHOWN, pile: PILE_MAX, xmas: true });
+    }
+    for scene in scenes {
+        {
             add(None, cells(&pose(mood, None, &scene, None)));
             for anim in anims_for(mood, data) {
                 let secs = anim.secs(PACE);
@@ -2017,10 +2733,15 @@ mod tests {
         for view in [View::Front, View::Side] {
             let sc = scene(view);
             let hold = at(Mood::Busy, Anim::Coffee, 0.3, &sc);
-            assert!(hold.cup.is_some_and(|(sip, steam)| !sip && steam.is_some()) && hold.eyes == Eyes::Happy);
+            assert!(hold.cup.is_some_and(|(at, steam)| at == Cup::Side && steam.is_some()) && hold.eyes == Eyes::Happy);
             assert_eq!(hold.claws[0], Claw::CupSide);
             let sip = at(Mood::Busy, Anim::Coffee, 0.55, &sc);
-            assert!(sip.cup.is_some_and(|c| c.0) && sip.blush.is_some() && sip.claws[0] == Claw::CupFront, "{view:?}: sem o gole");
+            assert!(sip.cup.is_some_and(|c| c.0 == Cup::Sip) && sip.blush.is_some() && sip.claws[0] == Claw::CupFront, "{view:?}: sem o gole");
+            // a caneca passa pelo meio do caminho, indo e voltando
+            for t in [0.42, 0.72] {
+                let mid = at(Mood::Busy, Anim::Coffee, t, &sc);
+                assert!(mid.cup.is_some_and(|c| c.0 == Cup::Mid) && mid.claws[0] == Claw::CupMid, "{view:?} a {t}");
+            }
             assert_eq!(at(Mood::Busy, Anim::Coffee, 0.9, &sc).mouth, Some(Mouth::Smile));
             // a garra fica por cima da asa da caneca
             let cs = cells(&hold);
@@ -2030,50 +2751,263 @@ mod tests {
         }
     }
 
+    /// Termina a animação de agora, como se o tempo dela tivesse passado.
+    fn finish(crab: &mut Crab, mood: Mood) {
+        let (anim, _, secs) = crab.anim.unwrap();
+        crab.anim = Some((anim, Instant::now() - Duration::from_secs_f32(secs + 1.0), secs));
+        crab.tick(mood);
+    }
+
     #[test]
-    fn sherlock_wears_the_hat_for_the_whole_task_now_and_then() {
-        // de vez em quando: mais ou menos uma tarefa em quatro
+    fn investigates_as_sherlock_and_codes_as_himself() {
+        // sem saber o que o Claude Code faz: mais ou menos uma tarefa em quatro é de investigar
         let mut crab = Crab::new();
-        let mut dressed = 0;
+        let mut sleuths = 0;
         for _ in 0..400 {
             crab.tick(Mood::Normal);
             crab.anim = None;
             crab.tick(Mood::Busy);
             crab.anim = None;
-            dressed += crab.sherlock as i32;
+            sleuths += (crab.pick(Mood::Busy) == Anim::HatOn) as i32;
         }
-        assert!((50..160).contains(&dressed), "{dressed} de 400");
-        // de Sherlock: primeiro põe o chapéu; daí em diante, investiga em vez de pensar
+        assert!((50..160).contains(&sleuths), "{sleuths} de 400");
+        // o Claude Code lendo e procurando: guarda o notebook e vira Sherlock
         let mut crab = Crab::new();
-        crab.mood = Mood::Busy;
-        crab.sherlock = true;
+        crab.tick(Mood::Busy);
+        crab.investigating = Some(true);
         assert_eq!(crab.pick(Mood::Busy), Anim::HatOn);
         crab.play(Anim::HatOn);
-        assert!(crab.hat);
-        assert!((0..300).all(|_| crab.pick(Mood::Busy) != Anim::Think));
-        assert!((0..300).any(|_| crab.pick(Mood::Busy) == Anim::Investigate));
-        // o chapéu em todos os quadros do trabalho; o cachimbo só de lado (de frente, a tampa
-        // cobre a boca); a lupa investigando, com um olho apertado
-        for view in [View::Front, View::Side] {
-            let sc = Scene { hat: true, ..scene(view) };
-            for anim in [Anim::Type, Anim::Idea, Anim::Investigate, Anim::Blink] {
-                let p = at(Mood::Busy, anim, 0.5, &sc);
-                assert!(p.hat.is_some(), "{view:?} {anim:?}: sem chapéu");
-                assert_eq!(p.pipe.is_some(), view == View::Side, "{view:?} {anim:?}: cachimbo");
-            }
-            let inv = at(Mood::Busy, Anim::Investigate, 0.4, &sc);
-            assert!(inv.mag.is_some() && inv.eyes == Eyes::Sherlock(1, 0));
-            assert!(pose(Mood::Busy, None, &sc, None).hat.is_some());
-            // sem a fantasia, nada disso; e o chapéu não sobra fora do trabalho
-            let plain = at(Mood::Busy, Anim::Type, 0.5, &scene(view));
-            assert!(plain.hat.is_none() && plain.pipe.is_none());
-            assert!(pose(Mood::Normal, None, &sc, None).hat.is_none());
+        assert!(!crab.sleuthing(), "só depois de pôr o chapéu");
+        finish(&mut crab, Mood::Busy);
+        assert!(crab.sleuthing());
+        // de Sherlock, só investiga: nada de digitar, pensar no notebook ou café
+        crab.tired = true;
+        let picks: Vec<Anim> = (0..400).map(|_| crab.pick(Mood::Busy)).collect();
+        for a in [Anim::Investigate, Anim::Trail, Anim::Puff] {
+            assert!(picks.contains(&a), "{a:?}");
         }
-        // a tarefa acabou: o chapéu sai junto com o ✓
+        for a in [Anim::Type, Anim::Think, Anim::Coffee, Anim::HatOn, Anim::HatOff] {
+            assert!(!picks.contains(&a), "{a:?} de Sherlock");
+        }
+        // voltou a editar: fica mais um tempo investigando (o Claude Code alterna muito), depois
+        // tira o chapéu e volta ao notebook
+        crab.investigating = Some(false);
+        assert_ne!(crab.pick(Mood::Busy), Anim::HatOff, "trocou logo");
+        crab.switched = Some(Instant::now() - SWITCH_AFTER);
+        assert_eq!(crab.pick(Mood::Busy), Anim::HatOff);
+        crab.play(Anim::HatOff);
+        finish(&mut crab, Mood::Busy);
+        assert!(!crab.sleuthing());
+        let picks: Vec<Anim> = (0..400).map(|_| crab.pick(Mood::Busy)).collect();
+        assert!(picks.contains(&Anim::Type));
+        for a in [Anim::Investigate, Anim::Trail, Anim::Puff] {
+            assert!(!picks.contains(&a), "{a:?} programando");
+        }
+        // investigando, de chapéu, cachimbo e lupa e sem o notebook em todos os quadros; e nada
+        // disso programando ou fora do trabalho
+        for view in [View::Front, View::Side] {
+            let sc = Scene { sleuth: true, ..scene(view) };
+            for anim in [Anim::Investigate, Anim::Trail, Anim::Puff, Anim::Idea, Anim::Blink, Anim::Look, Anim::Wave] {
+                for k in 0..=20 {
+                    let p = at(Mood::Busy, anim, k as f32 / 20.0, &sc);
+                    assert!(p.hat.is_some() && p.pipe.is_some(), "{view:?} {anim:?}: sem a fantasia");
+                    assert!(p.front.is_none() && p.side.is_none(), "{view:?} {anim:?}: de Sherlock no notebook");
+                }
+            }
+            let still = pose(Mood::Busy, None, &sc, None);
+            assert!(still.hat.is_some() && still.mag.is_some() && still.side.is_none() && still.front.is_none());
+            for anim in [Anim::Type, Anim::Think, Anim::Idea, Anim::Coffee] {
+                let p = at(Mood::Busy, anim, 0.5, &scene(view));
+                assert!(p.hat.is_none() && p.pipe.is_none() && p.mag.is_none(), "{view:?} {anim:?}: fantasia programando");
+                assert!(p.front.is_some() || p.side.is_some(), "{view:?} {anim:?}: sem o notebook");
+            }
+            assert!(pose(Mood::Normal, None, &sc, None).hat.is_none());
+            // a lupa sobe até o olho, que aparece aumentado nela, e desce até a pegada no chão
+            let eye = at(Mood::Busy, Anim::Investigate, 0.4, &sc);
+            assert!(matches!(eye.mag, Some((_, _, Lens::Eye(_)))) && matches!(eye.eyes, Eyes::Sherlock(..)));
+            assert!(matches!(at(Mood::Busy, Anim::Investigate, 0.75, &sc).mag, Some((_, _, Lens::Print))));
+            // seguindo as pegadas, anda até elas e volta
+            let far = at(Mood::Busy, Anim::Trail, 0.55, &sc);
+            assert!(far.dx > 0 && far.prints.is_some());
+            assert_eq!(at(Mood::Busy, Anim::Trail, 0.99, &sc).dx, 0);
+        }
+        // a tarefa acabou investigando: o ✓ ainda de chapéu, sem o notebook; depois, sem a fantasia
+        crab.investigating = Some(true);
+        crab.switched = None;
+        crab.play(Anim::HatOn);
+        finish(&mut crab, Mood::Busy);
         crab.play(Anim::Done);
-        crab.anim = Some((Anim::Done, Instant::now() - Duration::from_secs(10), 3.1));
-        crab.tick(Mood::Normal);
-        assert!(!crab.hat && !crab.sherlock);
+        let p = crab.pose(Mood::Normal, None, View::Side);
+        assert!(p.hat.is_some() && p.side.is_none());
+        finish(&mut crab, Mood::Normal);
+        assert!(!crab.sleuthing());
+    }
+
+    /// O que o Claude Code está fazendo aparece no desenho: chamando você, um comando que falha
+    /// ou passa, um comando demorado, a web, o planejamento, os ajudantes, a pilha de papéis da
+    /// conversa e a compactação.
+    #[test]
+    fn shows_what_claude_code_is_doing() {
+        let mut crab = Crab::new();
+        crab.tick(Mood::Busy);
+        // programando (sem isso, o sorteio de cada tarefa às vezes manda investigar)
+        crab.investigating = Some(false);
+        // precisa de você: chama, sem largar o notebook, e continua chamando
+        crab.calling = true;
+        assert_eq!(crab.pick(Mood::Busy), Anim::Call);
+        for view in [View::Front, View::Side] {
+            let sc = Scene { code: 20, ..scene(view) };
+            let p = at(Mood::Busy, Anim::Call, 0.1, &sc);
+            assert!(p.bang && (p.front.is_some() || p.side.is_some()), "{view:?}");
+            // falhou: a garra na testa e o ✗; passou: comemora com o ✓
+            let oops = at(Mood::Busy, Anim::Oops, 0.3, &sc);
+            assert!(oops.cross && oops.claws[0] == Claw::Palm && oops.sweat.is_some());
+            let cheer = at(Mood::Busy, Anim::Cheer, 0.5, &sc);
+            assert!(cheer.check && cheer.eyes == Eyes::Happy);
+            // esperando: a ampulheta com a areia caindo
+            let sand: Vec<f32> = [0.2, 0.5, 0.9].iter().map(|&t| at(Mood::Busy, Anim::Wait, t, &sc).hourglass.unwrap()).collect();
+            assert!(sand.windows(2).all(|w| w[0] < w[1]), "{sand:?}");
+            // de Sherlock na web: o binóculo no lugar da lupa; planejando: a prancheta, escrevendo
+            let sleuth = Scene { sleuth: true, ..sc };
+            let scout = at(Mood::Busy, Anim::Scout, 0.5, &sleuth);
+            assert!(scout.binoculars.is_some() && scout.mag.is_none() && scout.hat.is_some());
+            let (a, b) = (at(Mood::Busy, Anim::Plan, 0.2, &sleuth).clipboard.unwrap(), at(Mood::Busy, Anim::Plan, 0.8, &sleuth).clipboard.unwrap());
+            assert!(b > a, "escrevendo: {a} {b}");
+            // os ajudantes: em cima do notebook de lado, ou no chão; no máximo dois
+            let busy = Scene { helpers: 3, ..sc };
+            let (n, spots) = pose(Mood::Busy, None, &busy, None).helpers.unwrap();
+            assert_eq!(n, HELPERS_SHOWN);
+            assert_eq!(spots, if view == View::Side { &HELPERS_LAPTOP[..] } else { &HELPERS_GROUND[..] });
+            assert!(pose(Mood::Normal, None, &busy, None).helpers.is_none(), "sem trabalho, sem ajudantes");
+            // a pilha de papéis; compactando, ela some aos poucos
+            let full = Scene { pile: PILE_MAX, ..sc };
+            assert_eq!(pose(Mood::Busy, None, &full, None).pile, PILE_MAX);
+            let piles: Vec<u8> = (0..=10).map(|k| at(Mood::Busy, Anim::Tidy, k as f32 / 10.0, &full).pile).collect();
+            assert!(piles.windows(2).all(|w| w[1] <= w[0]) && piles[0] == PILE_MAX && *piles.last().unwrap() == 0, "{piles:?}");
+        }
+        // no modo de cada coisa, o repertório dela
+        crab.calling = false;
+        crab.running = true;
+        assert!((0..200).any(|_| crab.pick(Mood::Busy) == Anim::Wait) && (0..200).all(|_| crab.pick(Mood::Busy) != Anim::Type));
+        crab.running = false;
+        crab.investigating = Some(true);
+        crab.play(Anim::HatOn);
+        finish(&mut crab, Mood::Busy);
+        crab.web = true;
+        assert!((0..200).any(|_| crab.pick(Mood::Busy) == Anim::Scout) && (0..200).all(|_| crab.pick(Mood::Busy) != Anim::Investigate));
+        crab.web = false;
+        crab.planning = true;
+        assert!((0..200).any(|_| crab.pick(Mood::Busy) == Anim::Plan));
+    }
+
+    /// O tema de Natal: só o gorro de Papai Noel (menos com outro chapéu: o de Sherlock, o fone;
+    /// o gorro de dormir fica vermelho); a neve fica na camada animada.
+    #[test]
+    fn christmas_dresses_him_up() {
+        let sc = Scene { xmas: true, ..scene(View::Side) };
+        let has = |p: &Pose, c: Rgba| cells(p).iter().any(|cell| cell.4 == c);
+        let still = pose(Mood::Normal, None, &sc, None);
+        assert!(has(&still, SANTA) && has(&still, FUR));
+        // só o gorro: o resto dele fica igual a fora do Natal
+        let body = |cs: Vec<Cell>| cs.into_iter().filter(|c| ![SANTA, SANTA_LIGHT, SANTA_DARK, FUR, FUR_SHADE].contains(&c.4)).collect::<Vec<_>>();
+        assert_eq!(body(cells(&still)), body(cells(&pose(Mood::Normal, None, &scene(View::Side), None))), "algo além do gorro");
+        assert!(!has(&pose(Mood::Normal, None, &scene(View::Side), None), SANTA), "fora do Natal");
+        // de Sherlock, o chapéu de detetive; ouvindo música, o fone; dormindo, o gorro vermelho
+        assert!(!has(&pose(Mood::Busy, None, &Scene { sleuth: true, ..sc }, None), SANTA));
+        assert!(!has(&at(Mood::Normal, Anim::Music, 0.5, &sc), FUR));
+        assert!(has(&pose(Mood::Sleepy, None, &sc, None), SANTA));
+    }
+
+    /// Os flocos deslizam: de um quadro para o outro (30 por segundo), cada um anda só um
+    /// pedacinho de quadradinho (ou recomeça lá em cima, em outra coluna), sempre dentro da faixa
+    /// da neve; aparecem e somem aos poucos; e a volta seguinte cai em outro lugar.
+    #[test]
+    fn snow_falls_softly() {
+        let dt = 1.0 / SNOW_FPS as f32;
+        let at = |k: u32| flakes(k as f32 * dt).collect::<Vec<_>>();
+        for k in 0..3000 {
+            let (now, next) = (at(k), at(k + 1));
+            for (a, b) in now.iter().zip(&next) {
+                assert!((SNOW_LEFT - 1.5..SNOW_LEFT + SNOW_WIDE as f32 + 1.5).contains(&a.0), "fora da faixa: {a:?}");
+                assert!((SNOW_TOP..SNOW_TOP + SNOW_FALL).contains(&a.1), "fora da faixa: {a:?}");
+                let restarted = b.1 < a.1;
+                if !restarted {
+                    assert!(b.1 - a.1 < 0.2 && (b.0 - a.0).abs() < 0.15, "pulou: {a:?} -> {b:?}");
+                } else {
+                    // recomeçou: estava sumido embaixo e nasce sumido em cima
+                    assert!(a.3 < 0.08 && b.3 < 0.08, "apareceu ou sumiu de uma vez: {a:?} -> {b:?}");
+                }
+            }
+        }
+        // claros e apagados
+        let all: Vec<_> = (0..300).flat_map(at).collect();
+        assert!(all.iter().any(|f| f.3 > 0.9) && all.iter().any(|f| f.3 > 0.1 && f.3 < 0.6));
+        let cols = |secs: f32| flakes(secs).map(|f| f.0.round() as i32).collect::<Vec<_>>();
+        assert_ne!(cols(0.0), cols(SNOW_FALL / 1.7 * 2.0));
+    }
+
+    /// A neve cai por trás dele: nenhum floco aparece em cima do corpo (nem do notebook), e os
+    /// outros aparecem.
+    #[test]
+    fn snow_falls_behind_him() {
+        for view in [View::Front, View::Side] {
+            let p = pose(Mood::Busy, None, &Scene { xmas: true, code: 20, ..scene(view) }, None);
+            let body = cells(&p);
+            let mut hidden = false;
+            for k in 0..200 {
+                let secs = k as f32 * 0.1;
+                let shown = visible_flakes(&p, secs);
+                assert!(!shown.is_empty(), "{view:?}: sem neve");
+                hidden |= shown.len() < flakes(secs).filter(|f| f.3 > 0.02).count();
+                for (x, y, size, _) in shown {
+                    let (mx, my) = (x + size / 2.0, y + size / 2.0);
+                    assert!(!body.iter().any(|b| mx >= b.0 as f32 && mx < (b.0 + b.2) as f32 && my >= b.1 as f32 && my < (b.1 + b.3) as f32), "{view:?}: floco na frente dele");
+                }
+            }
+            assert!(hidden, "{view:?}: nenhum floco passou por trás");
+        }
+    }
+
+    /// As trocas de pose andam um quadradinho por quadro: o chapéu desce até a cabeça (só um: mais
+    /// alto, no pequeno, encostaria no nome do anel), a lupa
+    /// sobe até o olho, as garras passam pelo meio do caminho, o fone desce aos poucos.
+    #[test]
+    fn moves_one_step_at_a_time() {
+        let sc = scene(View::Side);
+        let sleuth = Scene { sleuth: true, ..sc };
+        // o que `get` dá em cada quadro da animação (de 10 em 10 ms), sem repetir em seguida
+        let path = |mood: Mood, anim: Anim, sc: &Scene, get: &dyn Fn(&Pose) -> Option<i32>| {
+            let n = (anim.secs(PACE) * 100.0) as usize;
+            let mut out: Vec<i32> = Vec::new();
+            for k in 0..=n {
+                if let Some(v) = get(&at(mood, anim, k as f32 / n as f32, sc)) {
+                    if out.last() != Some(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+            out
+        };
+        let steady = |v: &[i32], what: &str| {
+            assert!(v.len() >= 2, "{what}: {v:?}");
+            assert!(v.windows(2).all(|w| (w[0] - w[1]).abs() <= 1), "{what} pula: {v:?}");
+        };
+        steady(&path(Mood::Busy, Anim::HatOn, &sc, &|p| p.hat), "o chapéu descendo");
+        steady(&path(Mood::Busy, Anim::HatOff, &sleuth, &|p| p.hat), "o chapéu subindo");
+        steady(&path(Mood::Busy, Anim::Investigate, &sleuth, &|p| p.mag.map(|m| m.0)), "a lupa (coluna)");
+        steady(&path(Mood::Busy, Anim::Investigate, &sleuth, &|p| p.mag.map(|m| m.1)), "a lupa (linha)");
+        steady(&path(Mood::Busy, Anim::Trail, &sleuth, &|p| Some(p.dx)), "andando atrás das pegadas");
+        steady(&path(Mood::Normal, Anim::Music, &sc, &|p| p.phones), "o fone");
+        steady(&path(Mood::Normal, Anim::Hop, &sc, &|p| Some(p.dy)), "o pulo");
+        // a garra: parada (6), no meio (4), levantada (2), nunca direto de uma ponta à outra
+        let claw_y = |c: Claw| c.art().map(|a| a.2);
+        for (mood, anim) in [(Mood::Normal, Anim::Wave), (Mood::Normal, Anim::Hop), (Mood::Normal, Anim::Love), (Mood::Busy, Anim::Idea)] {
+            let ys = path(mood, anim, &sc, &|p| claw_y(p.claws[0]));
+            assert!(ys.windows(2).all(|w| !(w[0] == 6 && w[1] == 2) && !(w[0] == 2 && w[1] == 6)), "{anim:?}: a garra pula {ys:?}");
+        }
+        // o piscar passa pela metade
+        let eyes: Vec<Eyes> = (0..=10).map(|k| at(Mood::Normal, Anim::Blink, k as f32 / 10.0, &sc).eyes).collect();
+        assert!(eyes.contains(&Eyes::Half) && eyes.contains(&Eyes::Blink));
     }
 
     #[test]
@@ -2292,32 +3226,63 @@ mod tests {
 
     /// Folha com os quadros de cada animação, ampliada (%TEMP%\clawd.png):
     ///   cargo test --release clawd_sheet -- --ignored --nocapture
+    /// Só algumas animações, maiores e com mais quadros (CLAWD_ZOOM: o tamanho dos quadradinhos;
+    /// CLAWD_FRAMES: quantos quadros por linha):
+    ///   $env:CLAWD_ANIMS="Wave,Hop"; $env:CLAWD_ZOOM="9"; $env:CLAWD_FRAMES="16"; cargo test ...
     #[test]
     #[ignore]
     fn clawd_sheet() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
+        let only: Option<Vec<String>> = std::env::var("CLAWD_ANIMS").ok().map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+        let zoom: f32 = std::env::var("CLAWD_ZOOM").ok().and_then(|v| v.parse().ok()).unwrap_or(2.6);
+        let frames: usize = std::env::var("CLAWD_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(14);
+        let wanted = |anim: Option<Anim>| match (&only, anim) {
+            (None, _) => true,
+            (Some(names), Some(a)) => names.contains(&format!("{a:?}")),
+            (Some(names), None) => names.iter().any(|n| n == "None"),
+        };
         let mut rows: Vec<(Mood, Option<Anim>, Scene)> = Vec::new();
         for mood in [Mood::Normal, Mood::Sleepy, Mood::Busy, Mood::Worried, Mood::Limit] {
             for view in [View::Front, View::Side] {
-                rows.push((mood, None, scene(view)));
-                for anim in anims_for(mood, true) {
-                    rows.push((mood, Some(anim), scene(view)));
+                if wanted(None) {
+                    rows.push((mood, None, scene(view)));
                     if mood == Mood::Busy {
-                        rows.push((mood, Some(anim), Scene { hat: true, code: 20, ..scene(view) }));
+                        rows.push((mood, None, Scene { sleuth: true, ..scene(view) }));
+                    }
+                }
+                for anim in anims_for(mood, true) {
+                    if !wanted(Some(anim)) {
+                        continue;
+                    }
+                    let sleuthing = matches!(anim, Anim::Investigate | Anim::Trail | Anim::Puff | Anim::HatOff | Anim::Scout | Anim::Plan);
+                    if !sleuthing && anim != Anim::HatOn {
+                        rows.push((mood, Some(anim), Scene { code: 20, ..scene(view) }));
+                    }
+                    if mood == Mood::Busy && (sleuthing || matches!(anim, Anim::Blink | Anim::Look | Anim::Wave | Anim::Idea | Anim::Done)) {
+                        rows.push((mood, Some(anim), Scene { sleuth: true, ..scene(view) }));
+                    }
+                    if anim == Anim::HatOn {
+                        rows.push((mood, Some(anim), Scene { code: 20, ..scene(view) }));
                     }
                 }
             }
         }
-        let (cell_w, cell_h, frames) = (130.0, 72.0, 14);
+        // CLAWD_TUDO=1: com os ajudantes, a pilha de papéis cheia e o Natal
+        if std::env::var("CLAWD_TUDO").is_ok() {
+            for r in rows.iter_mut() {
+                r.2 = Scene { helpers: HELPERS_SHOWN, pile: PILE_MAX, xmas: true, ..r.2 };
+            }
+        }
+        let (cell_w, cell_h) = (50.0 * zoom, 28.0 * zoom);
         let mut c = Canvas::new((cell_w * frames as f32) as u32, (cell_h * rows.len() as f32) as u32, 1.0);
         c.fill_round_rect(0.0, 0.0, c.w as f32, c.h as f32, 0.0, Rgba::rgb(60, 50, 90));
         for (r, (mood, anim, sc)) in rows.iter().enumerate() {
             for f in 0..frames {
                 let t = f as f32 / (frames - 1) as f32;
                 let p = pose(*mood, anim.map(|a| Play { anim: a, t, secs: a.secs(PACE) }), sc, None);
-                draw(&mut c, cell_w * f as f32 + 40.0, cell_h * (r as f32 + 0.62), 2.6, &p);
+                draw(&mut c, cell_w * f as f32 + 15.0 * zoom, cell_h * (r as f32 + 0.62), zoom, &p);
             }
         }
         let path = std::env::temp_dir().join("clawd.png");
@@ -2325,3 +3290,4 @@ mod tests {
         println!("{}", path.display());
     }
 }
+

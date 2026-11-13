@@ -458,10 +458,12 @@ fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
-/// Tela de desenho em memória. Coordenadas lógicas; `s` é a escala do monitor.
+/// Tela de desenho, em memória (`new`) ou direto na superfície da placa de vídeo de uma janela
+/// (`on_target`). Coordenadas lógicas; `s` é a escala do monitor.
 pub struct Canvas {
     rt: ID2D1RenderTarget,
-    bmp: IWICBitmap,
+    /// os pixels, na tela em memória (None: desenhando na placa de vídeo)
+    bmp: Option<IWICBitmap>,
     pub w: u32,
     pub h: u32,
     pub s: f32,
@@ -495,8 +497,28 @@ impl Canvas {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            Canvas { rt, bmp, w, h, s, text_scale: 1.0, layers: 0, rec: None }
+            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None }
         })
+    }
+
+    /// Tela desenhando direto em `rt` (a superfície da placa de vídeo de uma janela, veja `gpu`),
+    /// transparente. Termina com `end`, que não lê os pixels de volta.
+    pub fn on_target(rt: ID2D1RenderTarget, w: u32, h: u32, s: f32) -> Canvas {
+        unsafe {
+            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt.BeginDraw();
+            rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+        }
+        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None }
+    }
+
+    /// Termina o desenho numa tela da placa de vídeo (`on_target`).
+    pub fn end(mut self) -> windows::core::Result<()> {
+        while self.layers > 0 {
+            self.pop_clip();
+        }
+        unsafe { self.rt.EndDraw(None, None) }
     }
 
     fn brush(&self, c: Rgba) -> ID2D1SolidColorBrush {
@@ -1172,7 +1194,9 @@ impl Canvas {
             let _ = self.rt.EndDraw(None, None);
             let mut img = Image::new(self.w, self.h);
             let rect = WICRect { X: 0, Y: 0, Width: self.w as i32, Height: self.h as i32 };
-            let _ = self.bmp.CopyPixels(&rect, self.w * 4, &mut img.px);
+            if let Some(bmp) = &self.bmp {
+                let _ = bmp.CopyPixels(&rect, self.w * 4, &mut img.px);
+            }
             img
         }
     }

@@ -575,6 +575,8 @@ const MESSAGE_EVERY: Duration = Duration::from_secs(12);
 const FADE_MS: f32 = 600.0;
 /// o fundo é desenhado um pouco maior que o cartão (as bordas da ampliação ficam de fora)
 const BG_ZOOM: f32 = 1.2;
+/// quantos fundos ficam guardados (um para cada tamanho do cartão)
+const BG_SIZES: usize = 3;
 const HUD: Duration = Duration::from_millis(1100);
 
 // título comprido demais: ele dá uma volta para o lado (até mostrar o fim e o começo de novo)
@@ -685,8 +687,9 @@ pub struct Media {
     next_poll: Instant,
     next_message: Instant,
     art_cache: RefCell<Option<((String, u32, u32), Image)>>,
-    /// fundo: a capa desfocada, um pouco maior que o cartão
-    bg_cache: RefCell<Option<((String, u32, u32), Image)>>,
+    /// fundo: a capa desfocada, um pouco maior que o cartão; um por tamanho (a troca de
+    /// tamanho desenha os dois), o último usado primeiro
+    bg_cache: RefCell<Vec<((String, u32, u32), Image)>>,
     /// fundo da música anterior, sumindo aos poucos depois de trocar de música
     fade: Option<(Image, Instant)>,
     idle_cache: RefCell<HashMap<(Mode, String, u32), Vec<Image>>>,
@@ -741,7 +744,7 @@ impl Media {
             next_poll: next,
             next_message: next + MESSAGE_EVERY,
             art_cache: RefCell::new(None),
-            bg_cache: RefCell::new(None),
+            bg_cache: RefCell::new(Vec::new()),
             fade: None,
             idle_cache: RefCell::new(HashMap::new()),
             started: Instant::now(),
@@ -1037,10 +1040,14 @@ impl Media {
         let (w, h) = ((l.w * s * BG_ZOOM).round() as u32, (l.h * s * BG_ZOOM).round() as u32);
         let cache_key = (key.clone(), w, h);
         let mut cache = self.bg_cache.borrow_mut();
-        if cache.as_ref().map(|c| &c.0) != Some(&cache_key) {
-            *cache = Some((cache_key, live_background(art, w, h)));
-        }
-        cache.as_ref().map(|c| c.1.clone())
+        let entry = match cache.iter().position(|c| c.0 == cache_key) {
+            Some(i) => cache.remove(i),
+            None => (cache_key, live_background(art, w, h)),
+        };
+        let img = entry.1.clone();
+        cache.insert(0, entry);
+        cache.truncate(BG_SIZES);
+        Some(img)
     }
 
     /// Pinta o fundo (parado) com o canto do cartão em (ox, oy).
@@ -1232,7 +1239,7 @@ impl Media {
 
     /// O título, parado (com "..." se não couber). Se não cabe e há o fundo da capa, a camada
     /// animada o faz dar uma volta (`overlay_title`); aqui fica a versão parada, que aparece fora
-    /// das voltas, nas animações do cartão e na economia de bateria.
+    /// das voltas, nas animações do cartão e com a economia de energia do Windows ligada.
     fn draw_title(&self, c: &mut Canvas, m: &Snapshot, mode: Mode, has_bg: bool) {
         let (x, y, w, size) = Self::title_spot(mode);
         c.text(x, y, &m.title, Face::Semibold, size, FG, Anchor::LA, Some(w));
@@ -1679,7 +1686,7 @@ impl Kind for Media {
                 // trocou de música: o fundo antigo some aos poucos por cima do novo
                 let old_key = self.media.as_ref().and_then(|m| m.art_key.clone());
                 if old_key.is_some() && snap.art_key != old_key {
-                    if let Some((_, img)) = self.bg_cache.borrow().as_ref() {
+                    if let Some((_, img)) = self.bg_cache.borrow().first() {
                         self.fade = Some((img.clone(), now));
                     }
                     self.frame_at = now;
@@ -1704,6 +1711,22 @@ impl Kind for Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O fundo de cada tamanho fica guardado: a troca de tamanho desenha os dois sem desfocar a
+    /// capa de novo, e o último usado é o que some aos poucos quando a música muda.
+    #[test]
+    fn each_size_keeps_its_background() {
+        let m = Media::sample_art("spotify", 300, 300);
+        let (p, g) = (m.background(1.0, Mode::P).unwrap(), m.background(1.0, Mode::G).unwrap());
+        assert!(p.w != g.w || p.h != g.h);
+        let p2 = m.background(1.0, Mode::P).unwrap();
+        assert_eq!(m.bg_cache.borrow().len(), 2, "pequeno e grande");
+        assert_eq!((m.bg_cache.borrow()[0].0 .1, p2.w), (p.w, p.w), "o pequeno, o último usado, primeiro");
+        for mode in [Mode::M, Mode::G, Mode::P, Mode::M] {
+            m.background(1.0, mode);
+        }
+        assert_eq!(m.bg_cache.borrow().len(), BG_SIZES);
+    }
 
     #[test]
     #[ignore] // desenha num PNG: cargo test -- --ignored

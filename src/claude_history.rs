@@ -152,6 +152,64 @@ pub struct Turn {
     pub steps: u32,
     /// a ferramenta que a última resposta chamou (None: a última resposta foi texto)
     pub tool: Option<Tool>,
+    /// subagentes (a ferramenta Agent) trabalhando agora, sem resposta ainda
+    pub helpers: u32,
+    /// um comando rodando agora, sem resultado ainda: (o comando, desde quando)
+    pub running: Option<(String, f64)>,
+    /// o último comando que terminou: (quando, deu certo)
+    pub last_run: Option<(f64, bool)>,
+    /// no modo de planejamento
+    pub plan: bool,
+    /// quando a conversa foi compactada pela última vez (`/compact`, ou sozinha)
+    pub compacted_at: Option<f64>,
+}
+
+/// As ferramentas que rodam comandos.
+fn is_command(name: &str) -> bool {
+    matches!(name, "Bash" | "PowerShell")
+}
+
+/// O resto do que o fim da conversa diz, lendo tudo em ordem: as ferramentas chamadas que ainda
+/// não responderam (subagentes, um comando demorado), o último comando que terminou, o modo de
+/// planejamento e a última compactação.
+fn details(tail: &str, t: &mut Turn) {
+    // as chamadas sem resposta: id → (nome, o principal do que recebeu, quando)
+    let mut open: Vec<(String, String, String, f64)> = Vec::new();
+    for line in tail.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let at = v["timestamp"].as_str().and_then(iso_epoch).map(|s| s as f64);
+        match v["type"].as_str() {
+            Some("permission-mode") => t.plan = v["permissionMode"].as_str() == Some("plan"),
+            Some("system") if v["subtype"] == "compact_boundary" => t.compacted_at = at.or(t.compacted_at),
+            Some("assistant") => {
+                for c in v["message"]["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "tool_use") {
+                    let (Some(id), Some(name)) = (c["id"].as_str(), c["name"].as_str()) else { continue };
+                    let input = c["input"]["command"].as_str().unwrap_or("").to_string();
+                    open.push((id.to_string(), name.to_string(), input, at.unwrap_or(0.0)));
+                }
+            }
+            Some("user") => {
+                let content = &v["message"]["content"];
+                for c in content.as_array().into_iter().flatten().filter(|c| c["type"] == "tool_result") {
+                    let Some(id) = c["tool_use_id"].as_str() else { continue };
+                    if let Some(k) = open.iter().position(|o| o.0 == id) {
+                        let (_, name, _, _) = open.remove(k);
+                        if is_command(&name) {
+                            t.last_run = Some((at.unwrap_or(0.0), c["is_error"].as_bool() != Some(true)));
+                        }
+                    }
+                }
+                // um pedido novo (ou interrompido): o que ficou sem resposta antes não conta mais
+                let prompt = content.is_string() || content.as_array().is_some_and(|a| !a.iter().any(|c| c["type"] == "tool_result"));
+                if prompt && v["isMeta"].as_bool() != Some(true) {
+                    open.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+    t.helpers = open.iter().filter(|o| matches!(o.1.as_str(), "Agent" | "Task")).count() as u32;
+    t.running = open.iter().rev().find(|o| is_command(&o.1)).map(|o| (o.2.clone(), o.3));
 }
 
 /// Uma ferramenta chamada pelo Claude: o nome ("Edit", "Bash"...) e o principal do que recebeu
@@ -243,6 +301,7 @@ pub fn turn(tail: &str, now: f64) -> Turn {
             break;
         }
     }
+    details(tail, &mut t);
     t
 }
 
@@ -353,6 +412,47 @@ mod tests {
         assert_eq!(at(&[other]), Some(Tool { name: "TodoWrite".into(), input: String::new() }));
     }
 
+    /// Os subagentes e o comando que ainda não responderam, o resultado do último comando, o
+    /// modo de planejamento e a compactação.
+    #[test]
+    fn knows_helpers_long_commands_failures_plans_and_compactions() {
+        let at = |lines: &[String]| turn(&lines.join("\n"), NOON + 300.0);
+        let call = |id: &str, name: &str, input: &str| format!(r#""message":{{"role":"assistant","stop_reason":"tool_use","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}}"#);
+        let result = |id: &str, error: bool| format!(r#""message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}","is_error":{error},"content":"x"}}]}}"#);
+        // dois subagentes em paralelo; um responde
+        let mut c = vec![entry("user", PROMPT, 0), entry("assistant", &call("a1", "Agent", r#"{"description":"x"}"#), 5), entry("assistant", &call("a2", "Agent", r#"{"description":"y"}"#), 5)];
+        assert_eq!(at(&c).helpers, 2);
+        c.push(entry("user", &result("a1", false), 60));
+        assert_eq!(at(&c).helpers, 1);
+        // um comando rodando desde 12:01:10
+        c.push(entry("assistant", &call("b1", "Bash", r#"{"command":"cargo test --release"}"#), 70));
+        let t = at(&c);
+        assert_eq!(t.running, Some(("cargo test --release".to_string(), NOON + 70.0)));
+        assert_eq!(t.last_run, None);
+        // falhou; o próximo deu certo
+        c.push(entry("user", &result("b1", true), 90));
+        let t = at(&c);
+        assert_eq!((t.running.clone(), t.last_run), (None, Some((NOON + 90.0, false))));
+        c.push(entry("assistant", &call("b2", "PowerShell", r#"{"command":"ls"}"#), 95));
+        c.push(entry("user", &result("b2", false), 96));
+        assert_eq!(at(&c).last_run, Some((NOON + 96.0, true)));
+        // outras ferramentas não contam como comando
+        c.push(entry("assistant", &call("e1", "Edit", r#"{"file_path":"a"}"#), 97));
+        c.push(entry("user", &result("e1", true), 98));
+        assert_eq!(at(&c).last_run, Some((NOON + 96.0, true)));
+        // um pedido novo: o subagente que ficou sem resposta (interrompido) não conta mais
+        c.push(entry("user", PROMPT, 100));
+        assert_eq!(at(&c).helpers, 0);
+        // o modo de planejamento, e a saída dele
+        c.push(r#"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#.to_string());
+        assert!(at(&c).plan);
+        c.push(r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#.to_string());
+        assert!(!at(&c).plan);
+        // a compactação
+        c.push(entry("system", r#""subtype":"compact_boundary","content":"Conversation compacted""#, 120));
+        assert_eq!(at(&c).compacted_at, Some(NOON + 120.0));
+    }
+
     #[test]
     fn reads_only_the_end_of_long_conversations() {
         let dir = std::env::temp_dir().join(format!("widgets-tail-{}", std::process::id()));
@@ -365,6 +465,19 @@ mod tests {
         assert!(tail.len() < 300 * 1024 && tail.lines().count() == 2);
         assert_eq!(turn(&tail, NOON + 3.0).busy, Some(false));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// O que o fim da conversa mais recente deste computador diz agora (só lê).
+    ///   cargo test --release real_turn -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_turn() {
+        let dir = projects_dir().unwrap();
+        let newest = std::fs::read_dir(&dir).unwrap().flatten().filter(|d| d.path().is_dir()).flat_map(|d| std::fs::read_dir(d.path()).unwrap().flatten()).filter(|f| f.path().extension().is_some_and(|e| e == "jsonl")).max_by_key(|f| f.metadata().unwrap().modified().unwrap()).unwrap();
+        let tail = read_tail(&newest.path()).unwrap();
+        let start = std::time::Instant::now();
+        let t = turn(&tail, crate::win::now());
+        println!("{} em {:?}: {t:?}", newest.path().display(), start.elapsed());
     }
 
     /// Quanto demora ler o histórico de verdade deste computador.

@@ -6,8 +6,10 @@
 //! arquivo (`claude.json`, junto do config.json) e escreve uma linha curta de volta. O widget
 //! "Uso do Claude" lê esse arquivo.
 //!
-//! Conectar mexe só na chave `statusLine` das configurações do Claude Code (com uma cópia de
-//! segurança do arquivo antes da primeira mudança), e só quando não há outra linha de status.
+//! Conectar mexe só na chave `statusLine` das configurações do Claude Code e num aviso
+//! (`hooks.Notification`, para o Clawd saber quando o Claude Code precisa de você), com uma
+//! cópia de segurança do arquivo antes da primeira mudança, e só quando não há outra linha de
+//! status.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +17,10 @@ use serde_json::{json, Value};
 
 /// Argumento com que o Claude Code chama o Widgets.exe.
 pub const FLAG: &str = "--claude-status";
+/// Argumento do aviso de que o Claude Code precisa de você (pedindo permissão, perguntando).
+pub const NOTIFY_FLAG: &str = "--claude-aviso";
 const FILE: &str = "claude.json";
+const NOTICE_FILE: &str = "claude-aviso.json";
 pub const FIVE_HOURS: f64 = 5.0 * 3600.0;
 pub const SEVEN_DAYS: f64 = 7.0 * 86400.0;
 
@@ -59,6 +64,21 @@ pub struct Usage {
     pub updated: f64,
     /// as conversas que chamaram a linha de status na última hora: (arquivo, última vez)
     pub sessions: Vec<(String, f64)>,
+    /// quanto da janela de contexto cada conversa já ocupa (0 a 1), quando o Claude Code informa
+    pub contexts: Vec<(String, f64)>,
+}
+
+/// Quanto da janela de contexto a conversa ocupa (0 a 1), no JSON da linha de status: a
+/// porcentagem, se vier; senão, a conta com os tokens da última resposta.
+pub fn context_of(input: &Value) -> Option<f64> {
+    let c = input.get("context_window")?;
+    if let Some(p) = c.get("used_percentage").and_then(|v| v.as_f64()) {
+        return Some((p / 100.0).clamp(0.0, 1.0));
+    }
+    let size = c.get("context_window_size")?.as_f64().filter(|s| *s > 0.0)?;
+    let u = c.get("current_usage")?;
+    let tokens: f64 = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].iter().filter_map(|k| u.get(*k).and_then(|v| v.as_f64())).sum();
+    Some((tokens / size).clamp(0.0, 1.0))
 }
 
 /// Por quanto tempo lembrar de uma conversa, e de quantas no máximo.
@@ -92,21 +112,44 @@ impl Usage {
     pub fn from_status(input: &Value, now: f64) -> Option<Usage> {
         let r = input.get("rate_limits")?;
         let sessions = input["transcript_path"].as_str().map(|p| vec![(p.to_string(), now)]).unwrap_or_default();
-        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now, sessions };
+        let contexts = match (input["transcript_path"].as_str(), context_of(input)) {
+            (Some(p), Some(c)) => vec![(p.to_string(), c)],
+            _ => Vec::new(),
+        };
+        let u = Usage { five_hour: window_of(&r["five_hour"]), seven_day: window_of(&r["seven_day"]), updated: now, sessions, contexts };
         (u.five_hour.is_some() || u.seven_day.is_some()).then_some(u)
     }
 
     pub fn to_json(&self) -> Value {
         let w = |w: &Option<Window>| w.map(|w| json!({"used": w.used, "resets_at": w.resets_at}));
         let sessions: Vec<Value> = self.sessions.iter().map(|(p, at)| json!({"transcript": p, "at": at})).collect();
-        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated, "sessions": sessions})
+        let contexts: Vec<Value> = self.contexts.iter().map(|(p, c)| json!({"transcript": p, "used": c})).collect();
+        json!({"five_hour": w(&self.five_hour), "seven_day": w(&self.seven_day), "updated": self.updated, "sessions": sessions, "contexts": contexts})
     }
 
     pub fn from_json(v: &Value) -> Option<Usage> {
         let w = |v: &Value| Some(Window { used: v.get("used")?.as_f64()?, resets_at: v.get("resets_at")?.as_f64()? });
         let sessions = v["sessions"].as_array().map_or(Vec::new(), |a| a.iter().filter_map(|s| Some((s["transcript"].as_str()?.to_string(), s["at"].as_f64()?))).collect());
-        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()?, sessions })
+        let contexts = v["contexts"].as_array().map_or(Vec::new(), |a| a.iter().filter_map(|s| Some((s["transcript"].as_str()?.to_string(), s["used"].as_f64()?))).collect());
+        Some(Usage { five_hour: w(&v["five_hour"]), seven_day: w(&v["seven_day"]), updated: v.get("updated")?.as_f64()?, sessions, contexts })
     }
+
+    /// Quanto do contexto a conversa `path` ocupa, se o Claude Code informou.
+    pub fn context(&self, path: &str) -> Option<f64> {
+        self.contexts.iter().find(|(p, _)| p == path).map(|c| c.1)
+    }
+}
+
+/// Junta os contextos de antes com o de agora (o novo vale), só das conversas lembradas.
+pub fn merge_contexts(old: &[(String, f64)], new: &[(String, f64)], sessions: &[(String, f64)]) -> Vec<(String, f64)> {
+    let mut all: Vec<(String, f64)> = new.to_vec();
+    for (p, c) in old {
+        if !all.iter().any(|(q, _)| q == p) {
+            all.push((p.clone(), *c));
+        }
+    }
+    all.retain(|(p, _)| sessions.iter().any(|(s, _)| s == p));
+    all
 }
 
 /// O arquivo com os últimos números.
@@ -160,13 +203,75 @@ pub fn run_status_line() {
     let now = crate::win::now();
     if let Some(mut u) = Usage::from_status(&input, now) {
         // lembra também das outras conversas abertas (o Clawd escreve se qualquer uma trabalha)
-        let before = load().map(|b| b.sessions).unwrap_or_default();
-        u.sessions = merge_sessions(&before, &u.sessions, now);
+        let before = load().unwrap_or_default();
+        u.sessions = merge_sessions(&before.sessions, &u.sessions, now);
+        u.contexts = merge_contexts(&before.contexts, &u.contexts, &u.sessions);
         let _ = write_atomic(&data_file(), &u.to_json().to_string());
     }
     let mut out = std::io::stdout();
     let _ = writeln!(out, "{}", status_text(&input, now));
     let _ = out.flush();
+}
+
+// ---------- o aviso de que o Claude Code precisa de você ----------
+
+/// O Claude Code parou esperando você: de qual conversa, quando e o que ele disse.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notice {
+    pub transcript: String,
+    pub at: f64,
+    pub message: String,
+}
+
+impl Notice {
+    /// O aviso no JSON que o Claude Code manda ao hook `Notification`. O de "esperando você
+    /// responder", que vem um tempo depois de ele terminar, não conta: o Clawd já mostrou o ✓.
+    pub fn from_hook(input: &Value, now: f64) -> Option<Notice> {
+        let message = input["message"].as_str().unwrap_or("").to_string();
+        let kind = input["notification_type"].as_str().unwrap_or("");
+        if kind == "idle_prompt" || message.contains("waiting for your input") {
+            return None;
+        }
+        Some(Notice { transcript: input["transcript_path"].as_str()?.to_string(), at: now, message })
+    }
+
+    fn to_json(&self) -> Value {
+        json!({"transcript": self.transcript, "at": self.at, "message": self.message})
+    }
+
+    fn from_json(v: &Value) -> Option<Notice> {
+        Some(Notice { transcript: v["transcript"].as_str()?.to_string(), at: v["at"].as_f64()?, message: v["message"].as_str().unwrap_or("").to_string() })
+    }
+
+    /// A ferramenta que ele pede permissão para usar ("Claude needs your permission to use
+    /// Bash"), se for isso.
+    pub fn tool(&self) -> Option<&str> {
+        let rest = self.message.split("permission to use ").nth(1)?;
+        Some(rest.split(|c: char| !c.is_alphanumeric() && c != '_').next().filter(|t| !t.is_empty())?)
+    }
+}
+
+pub fn notice_file() -> PathBuf {
+    crate::config::data_dir().join(NOTICE_FILE)
+}
+
+pub fn load_notice() -> Option<Notice> {
+    load_notice_from(&notice_file())
+}
+
+fn load_notice_from(path: &Path) -> Option<Notice> {
+    Notice::from_json(&serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?)
+}
+
+/// `Widgets.exe --claude-aviso`: o Claude Code avisa que precisa de você; guarda e sai.
+pub fn run_notify() {
+    use std::io::Read;
+    let mut text = String::new();
+    let _ = std::io::stdin().read_to_string(&mut text);
+    let input: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if let Some(n) = Notice::from_hook(&input, crate::win::now()) {
+        let _ = write_atomic(&notice_file(), &n.to_json().to_string());
+    }
 }
 
 // ---------- ligação com o Claude Code ----------
@@ -195,6 +300,49 @@ pub enum Link {
 pub fn command() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     Some(format!("\"{}\" {FLAG}", exe.to_string_lossy().replace('\\', "/")))
+}
+
+/// O aviso no lugar da linha de status, no mesmo executável.
+fn notify_command(status: &str) -> String {
+    status.replace(FLAG, NOTIFY_FLAG)
+}
+
+/// O aviso do Widgets está nas configurações?
+fn has_hook(settings: &Value) -> bool {
+    settings["hooks"]["Notification"].as_array().is_some_and(|groups| {
+        groups.iter().any(|g| g["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(NOTIFY_FLAG)))))
+    })
+}
+
+/// Põe o aviso do Widgets (sem mexer nos outros avisos).
+fn add_hook(settings: &mut Value, command: &str) {
+    if has_hook(settings) {
+        return;
+    }
+    if !settings["hooks"].is_object() {
+        settings["hooks"] = json!({});
+    }
+    if !settings["hooks"]["Notification"].is_array() {
+        settings["hooks"]["Notification"] = json!([]);
+    }
+    settings["hooks"]["Notification"].as_array_mut().unwrap().push(json!({"hooks": [{"type": "command", "command": command}]}));
+}
+
+/// Tira o aviso do Widgets (e o que ficar vazio por causa disso).
+fn remove_hook(settings: &mut Value) {
+    let Some(groups) = settings["hooks"]["Notification"].as_array_mut() else { return };
+    for g in groups.iter_mut() {
+        if let Some(hs) = g["hooks"].as_array_mut() {
+            hs.retain(|h| !h["command"].as_str().is_some_and(|c| c.contains(NOTIFY_FLAG)));
+        }
+    }
+    groups.retain(|g| g["hooks"].as_array().is_none_or(|hs| !hs.is_empty()));
+    if groups.is_empty() {
+        settings["hooks"].as_object_mut().unwrap().remove("Notification");
+    }
+    if settings["hooks"].as_object().is_some_and(|h| h.is_empty()) {
+        settings.as_object_mut().unwrap().remove("hooks");
+    }
 }
 
 fn read_settings(path: &Path) -> Result<Value, String> {
@@ -242,8 +390,32 @@ pub fn connect_in(dir: &Path, command: &str) -> Result<(), String> {
         }
     }
     settings["statusLine"] = json!({"type": "command", "command": command, "padding": 0});
+    add_hook(&mut settings, &notify_command(command));
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())? + "\n";
     write_atomic(&path, &text).map_err(|_| "Não consegui gravar as configurações do Claude Code.".to_string())
+}
+
+/// Já conectado (por uma versão sem o aviso): põe o aviso também. Não mexe em nada se não está
+/// conectado ou se o aviso já está lá.
+pub fn upgrade_in(dir: &Path) -> Result<(), String> {
+    if link_in(dir) != Link::Connected {
+        return Ok(());
+    }
+    let path = dir.join("settings.json");
+    let mut settings = read_settings(&path)?;
+    if has_hook(&settings) {
+        return Ok(());
+    }
+    let status = settings["statusLine"]["command"].as_str().unwrap_or("").to_string();
+    add_hook(&mut settings, &notify_command(&status));
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())? + "\n";
+    write_atomic(&path, &text).map_err(|_| "Não consegui gravar as configurações do Claude Code.".to_string())
+}
+
+pub fn upgrade() {
+    if let Some(dir) = claude_dir() {
+        let _ = upgrade_in(&dir);
+    }
 }
 
 pub fn connect() -> Result<(), String> {
@@ -260,6 +432,7 @@ pub fn disconnect_in(dir: &Path) -> Result<(), String> {
     let path = dir.join("settings.json");
     let mut settings = read_settings(&path)?;
     settings.as_object_mut().unwrap().remove("statusLine");
+    remove_hook(&mut settings);
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())? + "\n";
     write_atomic(&path, &text).map_err(|_| "Não consegui gravar as configurações do Claude Code.".to_string())
 }
@@ -368,7 +541,7 @@ mod tests {
     fn keeps_the_last_numbers_in_a_file() {
         let dir = temp_dir("file");
         let path = dir.join(FILE);
-        let u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0, sessions: vec![("C:/c/a.jsonl".into(), 2.0)] };
+        let u = Usage { five_hour: Some(Window { used: 0.5, resets_at: 9.0 }), seven_day: None, updated: 3.0, sessions: vec![("C:/c/a.jsonl".into(), 2.0)], contexts: vec![("C:/c/a.jsonl".into(), 0.4)] };
         write_atomic(&path, &u.to_json().to_string()).unwrap();
         assert_eq!(load_from(&path), Some(u));
         assert!(!path.with_extension("tmp").exists());
@@ -390,6 +563,82 @@ mod tests {
         // e no máximo algumas
         let many: Vec<_> = (0..20).map(|k| (format!("C:/c/{k}.jsonl"), 7000.0 + k as f64)).collect();
         assert_eq!(merge_sessions(&many, &[], 7200.0).len(), SESSIONS_MAX);
+    }
+
+    /// O contexto ocupado vem da linha de status: a porcentagem, ou a conta com os tokens; é
+    /// lembrado por conversa, só das que ainda estão na lista.
+    #[test]
+    fn keeps_how_full_each_conversation_is() {
+        let pct = json!({"context_window": {"used_percentage": 88, "context_window_size": 200000}});
+        assert_eq!(context_of(&pct), Some(0.88));
+        let tokens = json!({"context_window": {"context_window_size": 200000, "current_usage": {"input_tokens": 10000, "cache_creation_input_tokens": 30000, "cache_read_input_tokens": 60000}}});
+        assert_eq!(context_of(&tokens), Some(0.5));
+        assert_eq!(context_of(&json!({"model": {}})), None);
+        let input = json!({"transcript_path": "C:/c/a.jsonl", "context_window": {"used_percentage": 30}, "rate_limits": {"five_hour": {"used_percentage": 1, "resets_at": 5}}});
+        let u = Usage::from_status(&input, 10.0).unwrap();
+        assert_eq!(u.context("C:/c/a.jsonl"), Some(0.3));
+        assert_eq!(Usage::from_json(&u.to_json()), Some(u));
+        let sessions = vec![("C:/c/a.jsonl".to_string(), 10.0), ("C:/c/b.jsonl".to_string(), 9.0)];
+        let old = vec![("C:/c/a.jsonl".to_string(), 0.9), ("C:/c/b.jsonl".to_string(), 0.2), ("C:/c/velha.jsonl".to_string(), 0.5)];
+        let new = vec![("C:/c/a.jsonl".to_string(), 0.1)];
+        assert_eq!(merge_contexts(&old, &new, &sessions), vec![("C:/c/a.jsonl".to_string(), 0.1), ("C:/c/b.jsonl".to_string(), 0.2)]);
+    }
+
+    /// Conectar põe também o aviso de quando o Claude Code precisa de você, sem mexer nos
+    /// outros avisos; desconectar tira só o do Widgets; quem conectou numa versão anterior ganha
+    /// o aviso ao abrir esta.
+    #[test]
+    fn the_notice_hook_comes_and_goes_with_the_connection() {
+        let dir = temp_dir("hook");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "som.exe"}]}], "Stop": [{"hooks": [{"type": "command", "command": "fim.exe"}]}]}}"#).unwrap();
+        connect_in(&dir, "\"C:/W/Widgets.exe\" --claude-status").unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let groups = v["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "o aviso de antes continua");
+        assert_eq!(groups[1]["hooks"][0]["command"], "\"C:/W/Widgets.exe\" --claude-aviso");
+        // conectar de novo não duplica
+        connect_in(&dir, "\"C:/W/Widgets.exe\" --claude-status").unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Notification"].as_array().unwrap().len(), 2);
+        disconnect_in(&dir).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Notification"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["Notification"][0]["hooks"][0]["command"], "som.exe");
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "fim.exe");
+        // conectado por uma versão antiga (só a linha de status): ganha o aviso
+        let old = temp_dir("hook-old");
+        std::fs::write(old.join("settings.json"), r#"{"statusLine": {"type": "command", "command": "\"C:/W/Widgets.exe\" --claude-status"}}"#).unwrap();
+        upgrade_in(&old).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(old.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Notification"][0]["hooks"][0]["command"], "\"C:/W/Widgets.exe\" --claude-aviso");
+        // desconectado: nada muda; e sem outros avisos, desconectar não deixa "hooks" vazio
+        disconnect_in(&old).unwrap();
+        let text = std::fs::read_to_string(old.join("settings.json")).unwrap();
+        assert!(!text.contains("hooks"), "{text}");
+        upgrade_in(&old).unwrap();
+        assert_eq!(std::fs::read_to_string(old.join("settings.json")).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&old);
+    }
+
+    /// O aviso guarda de qual conversa veio e o que ele pede; o de "esperando você responder"
+    /// (depois de terminar) não conta.
+    #[test]
+    fn reads_the_notice() {
+        let ask = json!({"hook_event_name": "Notification", "transcript_path": "C:/c/a.jsonl", "message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"});
+        let n = Notice::from_hook(&ask, 50.0).unwrap();
+        assert_eq!((n.transcript.as_str(), n.at, n.tool()), ("C:/c/a.jsonl", 50.0, Some("Bash")));
+        assert_eq!(Notice::from_json(&n.to_json()), Some(n));
+        let idle = json!({"transcript_path": "C:/c/a.jsonl", "message": "Claude is waiting for your input", "notification_type": "idle_prompt"});
+        assert_eq!(Notice::from_hook(&idle, 50.0), None);
+        let other = Notice::from_hook(&json!({"transcript_path": "x", "message": "Claude has a question"}), 1.0).unwrap();
+        assert_eq!(other.tool(), None);
+        let dir = temp_dir("notice");
+        let path = dir.join(NOTICE_FILE);
+        write_atomic(&path, &other.to_json().to_string()).unwrap();
+        assert_eq!(load_notice_from(&path), Some(other));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 
