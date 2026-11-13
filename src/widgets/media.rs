@@ -1716,7 +1716,9 @@ mod tests {
     /// capa de novo, e o último usado é o que some aos poucos quando a música muda.
     #[test]
     fn each_size_keeps_its_background() {
-        com();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
         let m =Media::sample_art("spotify", 300, 300);
         let (p, g) = (m.background(1.0, Mode::P).unwrap(), m.background(1.0, Mode::G).unwrap());
         assert!(p.w != g.w || p.h != g.h);
