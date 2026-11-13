@@ -36,7 +36,7 @@ pub const TIPS: [(&str, &str); 5] = [
 ];
 
 pub const APPEARANCE_KEYS: [&str; 6] = ["desfoque", "escurecimento", "texto", "esmaecer", "opacidade_ociosa", "animacoes"];
-pub const BEHAVIOR_KEYS: [&str; 3] = ["atalhos_clique", "dicas", "economia_bateria"];
+pub const BEHAVIOR_KEYS: [&str; 4] = ["atalhos_clique", "dicas", "economia_bateria", "placa_de_video"];
 
 /// Faixas das durações do Pomodoro: (fase, rótulo, mínimo, máximo, passo).
 pub const PHASE_RANGES: [(&str, &str, f64, f64, f64); 3] =
@@ -352,7 +352,8 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
         Row("Travar posições".into(), Some("Evita arrastar sem querer (o modo edição continua liberado)".into()), sw("travado", v.sh.locked(), A::Lock)),
         Row("Cliques abrem programas e sites".into(), Some("Gerenciador de Tarefas, previsão do tempo, GitHub…".into()), setting_switch(v, "atalhos_clique")),
         Row("Dicas ao passar o mouse".into(), Some("Explicações curtas sobre o que está sob o mouse".into()), setting_switch(v, "dicas")),
-        Row("Economizar energia na bateria".into(), Some("Atualiza menos e pausa as animações contínuas".into()), setting_switch(v, "economia_bateria")),
+        Row("Acompanhar a economia de energia".into(), Some("Pausa as animações contínuas quando a economia de energia do Windows está ligada".into()), setting_switch(v, "economia_bateria")),
+        Row("Desenhar pela placa de vídeo".into(), Some("Animações mais lisas, com menos CPU (experimental; vale ao abrir o app de novo)".into()), setting_switch(v, "placa_de_video")),
     ]);
     let y = section(ui, x, y, "Organizar");
     let y = rows(ui, x, y, w, vec![
@@ -609,13 +610,19 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
             let y = section(ui, x, y, "Claude Code");
             let y = rows(ui, x, y, w, vec![
                 Row("Conexão".into(), Some(state.into()), control),
-                Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana".into()), Control::None),
+                Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana, e recebe o aviso de quando ele precisa de você".into()), Control::None),
             ]);
             let y = section(ui, x, y, "Clawd na barra de tarefas");
-            rows(ui, x, y, w, vec![
+            let y = rows(ui, x, y, w, vec![
                 Row("Como levar".into(), Some("Clique no Clawd e ele pula para cima da barra de tarefas; outro clique o traz de volta".into()), Control::None),
                 Row("Nomes de arquivos no balão".into(), Some("O balão mostra o arquivo ou o comando em uso; desligado, só a ação (bom para compartilhar a tela)".into()),
                     sw("claude_nomes", widgets::claude::show_names(&v.sh.cfg), A::Toggle("claude_nomes"))),
+            ]);
+            let natal = [("dezembro", "Em dezembro"), ("sempre", "Sempre"), ("nunca", "Nunca")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+            let y = section(ui, x, y, "Clawd");
+            rows(ui, x, y, w, vec![
+                Row("Tema de Natal".into(), Some("Gorro de Papai Noel e neve caindo".into()),
+                    Control::Seg("claude_natal", natal, wcfg.str_of("natal").unwrap_or("dezembro").into())),
             ])
         }
         _ => {

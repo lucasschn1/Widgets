@@ -22,6 +22,7 @@ macro_rules! debug_log {
 }
 
 pub(crate) mod app;
+mod arrange;
 mod backdrop;
 mod battery;
 mod claude_history;
@@ -29,10 +30,13 @@ mod claude_usage;
 mod card;
 mod config;
 mod drawing;
+mod entrance;
+mod gpu;
 mod events;
 mod gfx;
 mod imgops;
 mod morph;
+mod output;
 mod overlay;
 mod panel;
 mod popup;
@@ -82,6 +86,11 @@ fn main() {
         claude_usage::run_status_line();
         return;
     }
+    // chamado pelo Claude Code quando precisa de você: guarda o aviso e sai
+    if std::env::args().nth(1).as_deref() == Some(claude_usage::NOTIFY_FLAG) {
+        claude_usage::run_notify();
+        return;
+    }
     // `--versao`: responde e sai, sem abrir nada nem mexer nas opções
     if std::env::args().nth(1).as_deref() == Some(updates::VERSION_FLAG) {
         println!("{}", updates::VERSION);
@@ -96,6 +105,8 @@ fn main() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
     startup::refresh();
+    // conectado ao Claude Code por uma versão sem o aviso de "precisa de você": põe o aviso
+    claude_usage::upgrade();
     let mut app = app::App::new();
     let mut msg = MSG::default();
     let mut fine_timer = false;

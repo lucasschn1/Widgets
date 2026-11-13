@@ -440,32 +440,9 @@ fn readme() {
         save(&trio(key), &docs().join(format!("{key}.png")));
     }
 
-    // ---------- o Clawd: quatro momentos no médio ----------
-    {
-        use crate::widgets::clawd::Anim;
-        let views: [(Claude, &str); 4] = [
-            (Claude::sample_busy().with_crab(Anim::Coffee, 0.55), "Uma pausa para o café"),
-            (Claude::sample_sherlock().with_crab(Anim::Investigate, 0.4), "De Sherlock, de vez em quando"),
-            (Claude::sample().with_crab(Anim::Music, 0.3), "Ouvindo música"),
-            (Claude::sample_ko().with_crab(Anim::Read, 0.1), "No limite: volto logo"),
-        ];
-        let (margin, gap, label_h) = (48, 36, 40);
-        let mut items = Vec::new();
-        let mut labels = Vec::new();
-        let (mut w, mut h) = (0, 0);
-        for (k, (kind, label)) in views.iter().enumerate() {
-            let (img, radius) = content(kind, Mode::M, &cfg);
-            let (iw, ih) = (img.w as i32, img.h as i32);
-            let (x, y) = (margin + (k as i32 % 2) * (iw + gap), margin + (k as i32 / 2) * (label_h + ih + gap) + label_h);
-            labels.push(Label { text: (*label).into(), x: (x + iw / 2) as f32, y: (y - 14) as f32 });
-            items.push(Item { img, radius, x, y });
-            w = w.max(x + iw + margin);
-            h = h.max(y + ih + margin);
-        }
-        let wall = wallpaper(w as u32, h as u32);
-        let bd = Backdrop::from_picture(&wall, BLUR, S);
-        save(&compose(&wall, &bd, &items, &labels), &docs().join("claude-clawd.png"));
-    }
+    // ---------- o Clawd: o que ele faz, uma cena depois da outra, e na barra de tarefas ----------
+    clawd_scenes(&cfg);
+    clawd_on_the_taskbar(&cfg);
 
     // ---------- janelas: configurações e boas-vindas ----------
     for page in ["aparencia", "widgets"] {
@@ -755,6 +732,96 @@ fn readme() {
 }
 
 /// Recorte w×h de uma imagem a partir de (x, y).
+/// Uma cena do Clawd: a legenda, a animação e o widget a `t` (0 a 1) dela, `secs` segundos depois
+/// de começar (a neve anda com o tempo), e as opções com que ele se desenha.
+type ClawdScene<'a> = (&'static str, crate::widgets::clawd::Anim, Box<dyn Fn(f32, f32) -> Claude>, &'a Value);
+
+/// Os quadros do clawd.gif: o Clawd grande, num cartão de vidro, fazendo cada coisa nova, uma
+/// cena depois da outra, com a legenda em cima.
+fn clawd_scenes(cfg: &Value) {
+    use crate::widgets::clawd::{Anim, PACE};
+    let xmas = json!({"claude": {"natal": "sempre"}, "app": {}});
+    let scenes: Vec<ClawdScene> = vec![
+        ("Programando no notebook", Anim::Type, Box::new(|t, _| Claude::sample_busy().using_tool("Edit", "src/widgets/clawd.rs").with_crab(Anim::Type, t)), cfg),
+        ("Lendo o código, de Sherlock", Anim::Investigate, Box::new(|t, _| Claude::sample_sherlock().using_tool("Grep", "fn draw").with_crab(Anim::Investigate, t)), cfg),
+        ("Pesquisando na web", Anim::Scout, Box::new(|t, _| Claude::sample_sherlock().using_tool("WebSearch", "").with_crab(Anim::Scout, t)), cfg),
+        ("Planejando", Anim::Plan, Box::new(|t, _| Claude::sample_sherlock().with_crab(Anim::Plan, t)), cfg),
+        ("Esperando um comando demorado", Anim::Wait, Box::new(|t, _| Claude::sample_busy().using_tool("Bash", "cargo test").with_crab(Anim::Wait, t)), cfg),
+        ("Com ajudantes", Anim::Type, Box::new(|t, _| Claude::sample_busy().using_tool("Agent", "").with_crab(Anim::Type, t).with_helpers(2)), cfg),
+        ("Ouvindo música", Anim::Music, Box::new(|t, _| Claude::sample().with_crab(Anim::Music, t)), cfg),
+        ("No Natal", Anim::Wave, Box::new(|t, secs| Claude::sample().with_crab(Anim::Wave, t).snowing_for(secs)), &xmas),
+        ("Cochilando", Anim::Snooze, Box::new(|t, _| Claude::sample_napping().with_crab(Anim::Snooze, t)), cfg),
+    ];
+    let dir = frames_dir("clawd");
+    let (margin, label_h, frame_ms) = (36, 40, 60u64);
+    // o cartão (em pontos) e o Clawd nele: de lado, com o notebook à direita da grade
+    let (cw, ch, unit) = (300.0f32, 200.0f32, 10.0f32);
+    let (pw, ph) = ((cw * S).round() as u32, (ch * S).round() as u32);
+    let (w, h) = (pw + 2 * margin as u32, ph + 2 * margin as u32 + label_h as u32);
+    let wall = wallpaper(w, h);
+    let bd = Backdrop::from_picture(&wall, BLUR, S);
+    let (mut k, mut list) = (0, String::new());
+    for (label, anim, make, scfg) in &scenes {
+        // cada cena por até 2,6 s, no ritmo de verdade da animação
+        let total = anim.secs(PACE);
+        let n = (total.min(2.6) * 1000.0 / frame_ms as f32) as usize;
+        for f in 0..n {
+            let secs = f as f32 * frame_ms as f32 / 1000.0;
+            let kind = make((secs / total).min(0.999), secs);
+            let mut c = Canvas::new(pw, ph, S);
+            kind.draw_crab_alone(&mut c, cw / 2.0 - 34.0, ch / 2.0 + 12.0, unit, scfg);
+            let items = [Item { img: c.finish(), radius: 24.0 * S, x: margin, y: margin + label_h }];
+            let labels = [Label { text: (*label).into(), x: w as f32 / 2.0, y: (margin + label_h - 14) as f32 }];
+            gfx::save_png(&compose(&wall, &bd, &items, &labels), &dir.join(format!("{k:03}.png"))).unwrap();
+            list.push_str(&format!("{k:03}.png {frame_ms}\n"));
+            k += 1;
+        }
+    }
+    std::fs::write(dir.join("frames.txt"), list).unwrap();
+    println!("{}", dir.display());
+}
+
+/// Os quadros do clawd-barra.gif: o Clawd em cima da barra de tarefas, ao lado do relógio,
+/// programando, com o balão dizendo o que o Claude Code faz.
+fn clawd_on_the_taskbar(cfg: &Value) {
+    use crate::widgets::claude::{PERCH_H, PERCH_W};
+    use crate::widgets::clawd::{Anim, PACE};
+    let dir = frames_dir("barra");
+    let (lw, lh, bar_h) = (440.0f32, 140.0f32, 48.0f32);
+    let (w, h) = ((lw * S).round() as u32, (lh * S).round() as u32);
+    let wall = wallpaper(w * 2, h * 3);
+    let wall = crop(&wall, w, h, w as i32, (h * 2) as i32);
+    let frame_ms = 60u64;
+    let total = Anim::Type.secs(PACE);
+    let (mut list, n) = (String::new(), (total.min(2.4) * 1000.0 / frame_ms as f32) as usize);
+    let icons = [Rgba::rgb(0, 120, 212), Rgba::rgb(255, 185, 0), Rgba::rgb(16, 124, 16), Rgba::rgb(124, 92, 255)];
+    for k in 0..n {
+        let t = (k as f32 * frame_ms as f32 / 1000.0 / total).min(0.999);
+        let kind = Claude::sample_busy().using_tool("Edit", "src/widgets/clawd.rs").with_crab(Anim::Type, t);
+        let mut perch = Canvas::new((PERCH_W * S).round() as u32, (PERCH_H * S).round() as u32, S);
+        kind.draw_perch(&mut perch, &Env { cfg, key: "claude" });
+        let perch = perch.finish();
+        let mut c = Canvas::new(w, h, S);
+        c.image(&wall, 0.0, 0.0);
+        // a barra de tarefas: escura, translúcida, com os ícones no meio e o relógio à direita
+        let top = lh - bar_h;
+        c.fill_round_rect(0.0, top, lw, lh, 0.0, Rgba(22, 22, 30, 236));
+        c.fill_round_rect(0.0, top, lw, top + 1.0, 0.0, WHITE.alpha(0.08));
+        for (i, col) in icons.iter().enumerate() {
+            let x = lw / 2.0 - 110.0 + i as f32 * 40.0;
+            c.fill_round_rect(x + 8.0, top + 12.0, x + 32.0, top + 36.0, 6.0, *col);
+        }
+        c.text(lw - 14.0, top + bar_h / 2.0 - 8.0, "14:32", Face::Regular, 11.5, FG, Anchor::RM, None);
+        c.text(lw - 14.0, top + bar_h / 2.0 + 8.0, "13/11/2026", Face::Regular, 11.5, FG, Anchor::RM, None);
+        // a janela do Clawd, como no app: o pé dela na borda de cima da barra, perto do relógio
+        c.image(&perch, lw - PERCH_W - 10.0, top - PERCH_H);
+        gfx::save_png(&c.finish(), &dir.join(format!("{k:03}.png"))).unwrap();
+        list.push_str(&format!("{k:03}.png {frame_ms}\n"));
+    }
+    std::fs::write(dir.join("frames.txt"), list).unwrap();
+    println!("{}", dir.display());
+}
+
 fn crop(img: &Image, w: u32, h: u32, x: i32, y: i32) -> Image {
     let mut out = Image::new(w, h);
     out.over(img, -x, -y);

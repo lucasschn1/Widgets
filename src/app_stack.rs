@@ -106,7 +106,7 @@ impl App {
 
     /// Pode mostrar a janela do cartão `i` agora? (Nem no modo foco, nem com o Tocando agora
     /// virado ilha.)
-    fn may_show(&self, i: usize) -> bool {
+    pub(super) fn may_show(&self, i: usize) -> bool {
         !self.sh.focus && !(self.island.is_some() && self.cards[i].key() == "midia")
     }
 

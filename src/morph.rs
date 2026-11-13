@@ -6,9 +6,10 @@
 //! cada tamanho, e as duas gravações são ligadas peça a peça. O mesmo texto (o nome da cidade,
 //! "24°", "Sunset Drive") é a mesma peça; formas da mesma cor também (o anel verde da bateria, a
 //! trilha das barras), na ordem em que aparecem; imagens, pelo formato e pela cor média (a capa
-//! do disco, o sol do tempo). Uma peça que aparece bem mais vezes num tamanho que no outro (o
-//! mapa de contribuições do GitHub, com 12 semanas no pequeno e 28 no médio) não tem par: troca
-//! esmaecendo, em vez de voar.
+//! do disco, o sol do tempo); uma imagem que cobre o cartão inteiro é o fundo dele (a capa viva
+//! da Música) e cresce junto com o cartão, mesmo mudando de proporção. Uma peça que aparece bem
+//! mais vezes num tamanho que no outro (o mapa de contribuições do GitHub, com 12 semanas no
+//! pequeno e 28 no médio) não tem par: troca esmaecendo, em vez de voar.
 
 use std::collections::HashMap;
 
@@ -41,7 +42,7 @@ const MAX_RATIO: usize = 2;
 
 /// Um quadro da troca, a `p` (0 a 1, no tempo) do caminho de `a` para `b`.
 pub fn draw(c: &mut Canvas, a: &Recording, b: &Recording, p: f32) {
-    let pairs = pair(&a.ops, &b.ops);
+    let pairs = pair(a, b);
     let mut used = vec![false; a.ops.len()];
     for i in pairs.iter().flatten() {
         used[*i] = true;
@@ -122,6 +123,8 @@ enum Key {
     Text(String, Face),
     Shape(u8, [u8; 8], u8),
     Image(i32, [u8; 3]),
+    /// uma imagem que cobre o cartão inteiro: o fundo, que só muda de proporção
+    Backdrop,
 }
 
 fn rgba(c: Rgba) -> [u8; 4] {
@@ -170,10 +173,25 @@ fn mean_color(img: &Image) -> [u8; 3] {
     [(sum[0] / count / 48) as u8, (sum[1] / count / 48) as u8, (sum[2] / count / 48) as u8]
 }
 
-fn key(op: &Op) -> Option<Key> {
+/// A imagem cobre o cartão (w×h) inteiro?
+fn covers(x: f32, y: f32, w: f32, h: f32, card_w: f32, card_h: f32) -> bool {
+    x <= 0.5 && y <= 0.5 && x + w >= card_w - 0.5 && y + h >= card_h - 0.5
+}
+
+/// A gravação tem uma imagem cobrindo o cartão inteiro (um fundo)?
+#[cfg(test)]
+pub fn has_backdrop(r: &Recording) -> bool {
+    r.ops.iter().any(|x| key(&x.op, r.w, r.h) == Some(Key::Backdrop))
+}
+
+/// O que identifica a peça `op` de um cartão w×h.
+fn key(op: &Op, card_w: f32, card_h: f32) -> Option<Key> {
     let shape = |tag: u8, cols: [u8; 8]| Some(Key::Shape(tag, cols, 0));
     match op {
         Op::Text { text, face, .. } => Some(Key::Text(text.clone(), *face)),
+        // o fundo de um tamanho é o fundo do outro, mesmo com outra proporção: sem par, ele
+        // sumiria e o novo apareceria esmaecendo, deixando o cartão transparente no meio
+        &Op::Image { x, y, w, h, .. } if covers(x, y, w, h, card_w, card_h) => Some(Key::Backdrop),
         Op::Image { img, w, h, .. } => Some(Key::Image((w / h.max(0.01) * 10.0).round() as i32, mean_color(img))),
         Op::RRect { fill, .. } => shape(1, fill_colors(fill)),
         Op::StrokeRRect { c, .. } => shape(2, colors(*c, *c)),
@@ -206,15 +224,16 @@ fn compatible(a: &Op, b: &Op) -> bool {
 }
 
 /// Para cada peça do tamanho novo, a do tamanho de antes que é a mesma (None: é nova).
-fn pair(a: &[Rec], b: &[Rec]) -> Vec<Option<usize>> {
+fn pair(ra: &Recording, rb: &Recording) -> Vec<Option<usize>> {
+    let (a, b) = (&ra.ops, &rb.ops);
     let mut groups: HashMap<Key, (Vec<usize>, Vec<usize>)> = HashMap::new();
     for (i, r) in a.iter().enumerate() {
-        if let Some(k) = key(&r.op) {
+        if let Some(k) = key(&r.op, ra.w, ra.h) {
             groups.entry(k).or_default().0.push(i);
         }
     }
     for (j, r) in b.iter().enumerate() {
-        if let Some(k) = key(&r.op) {
+        if let Some(k) = key(&r.op, rb.w, rb.h) {
             groups.entry(k).or_default().1.push(j);
         }
     }
@@ -459,7 +478,7 @@ mod tests {
                 c.fill_round_rect(i as f32 * 10.0, 0.0, i as f32 * 10.0 + 8.0, 8.0, 2.0, Rgba::rgb(9, 9, 9));
             }
         });
-        let p = pair(&a.ops, &b.ops);
+        let p = pair(&a, &b);
         assert_eq!(p[0], None, "texto novo");
         assert_eq!(p[1], Some(0), "o mesmo texto");
         assert_eq!(p[2], Some(1), "o círculo da mesma cor");
@@ -479,6 +498,21 @@ mod tests {
             draw(&mut c, &a, &b, p);
             let _ = c.finish();
         }
+    }
+
+    /// A imagem que cobre o cartão inteiro (o fundo) tem par no outro tamanho mesmo com outra
+    /// proporção e outra cor média; uma imagem menor, não.
+    #[test]
+    fn the_backdrop_pairs_even_with_another_shape() {
+        let img = |w: u32, h: u32, v: u8| {
+            let mut i = Image::new(w, h);
+            i.px.chunks_mut(4).for_each(|p| p.copy_from_slice(&[v, v, v, 255]));
+            i
+        };
+        let op = |i: Image, x: f32, y: f32, w: f32, h: f32| Rec { op: Op::Image { img: i, x, y, w, h, opacity: 1.0, sharp: false }, clip: None, alpha: 1.0 };
+        let a = Recording { ops: vec![op(img(184, 184, 40), -15.0, -15.0, 184.0, 184.0), op(img(20, 40, 200), 10.0, 10.0, 20.0, 40.0)], w: 154.0, h: 154.0 };
+        let b = Recording { ops: vec![op(img(380, 184, 120), -32.0, -15.0, 380.0, 184.0), op(img(30, 30, 200), 10.0, 10.0, 30.0, 30.0)], w: 316.0, h: 154.0 };
+        assert_eq!(pair(&a, &b), vec![Some(0), None]);
     }
 
     /// Esmaecer multiplica a opacidade de tudo o que a peça pinta.

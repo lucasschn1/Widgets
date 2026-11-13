@@ -487,6 +487,13 @@ impl App {
     }
 
     /// Lugar padrão: no alto e no meio do monitor onde o widget está.
+    /// O espaço que a ilha ocupa aberta (do tamanho grande), para a arrumação deixar livre.
+    pub(super) fn island_keep_clear(&self) -> Option<Rect> {
+        let isl = self.island.as_ref().filter(|i| !i.hidden)?;
+        let g = isl.target(Shape::Large);
+        Some((g.x.floor() as i32, g.y.floor() as i32, (g.x + g.w).ceil() as i32, (g.y + g.h).ceil() as i32))
+    }
+
     fn island_default_anchor(&self, near: Rect, s: f32) -> (f32, f32) {
         let work = win::area_for(near);
         ((work.0 + work.2) as f32 / 2.0, work.1 as f32 + TOP_GAP * s)

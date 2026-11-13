@@ -22,7 +22,7 @@ pub struct Shared {
     pub paused: Vec<win::Rect>,
     /// modo foco: widgets escondidos
     pub focus: bool,
-    /// economia de energia (na bateria)
+    /// a economia de energia do Windows está ligada (e a opção também): pausa as animações contínuas
     pub saving: bool,
 }
 

@@ -46,6 +46,9 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         out.push((format!("tempo início {m}"), Box::new(Tempo::sample("inicio", 0, 0.0, mode)), cfg.clone()));
         out.push((format!("tempo rolado {m}"), Box::new(Tempo::sample("inicio", 0, 9.5, mode)), cfg.clone()));
         out.push((format!("tempo chovendo {m}"), Box::new(Tempo::sample_raining(3.0, mode)), cfg.clone()));
+        for at in [0.3, 0.7] {
+            out.push((format!("tempo temperatura rolando {at} {m}"), Box::new(Tempo::sample_temp_rolling(at, mode)), cfg.clone()));
+        }
         // cada clima do app Tempo da Apple, em horas diferentes (a trovoada com um raio caindo)
         for (name, code, hour, windy) in [
             ("céu limpo de madrugada", 0, 3.0, false),
@@ -102,6 +105,13 @@ fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
         }
     }
     out.push(("pomodoro novo".into(), Box::new(Pomodoro::new(&cfg)), cfg.clone()));
+    for at in [0.0, 0.4, 0.8] {
+        let c = pomodoro_cfg("foco", false);
+        out.push((format!("pomodoro rolando {at}"), Box::new(Pomodoro::sample_rolling(&c, at)), c));
+    }
+    for ms in [300, 450] {
+        out.push((format!("sistema contando {ms}"), Box::new(System::sample_counting(ms)), cfg.clone()));
+    }
     out.push(("claude".into(), Box::new(Claude::sample()), cfg.clone()));
     out.push(("claude no limite".into(), Box::new(Claude::sample_limit()), cfg.clone()));
     out.push(("claude sem conectar".into(), Box::new(Claude::sample_unlinked()), cfg.clone()));
@@ -327,6 +337,69 @@ fn every_widget_morphs_between_every_size() {
             }
         }
     }
+}
+
+/// Um widget com fundo próprio cobrindo o cartão (a capa viva da Música) continua coberto durante
+/// toda a troca de tamanho: o fundo cresce junto com o cartão, em vez de sumir e reaparecer
+/// esmaecendo (o que deixava o cartão transparente no meio da troca).
+#[test]
+fn a_covered_card_stays_covered_while_changing_size() {
+    use crate::theme::ease_spring;
+    com();
+    // os pixels quase transparentes do miolo do cartão (longe dos cantos arredondados)
+    let holes = |img: &crate::gfx::Image| {
+        let inset = (32.0 * S) as u32;
+        let mut n = 0;
+        for y in inset..img.h.saturating_sub(inset) {
+            for x in inset..img.w.saturating_sub(inset) {
+                if img.px[((y * img.w + x) * 4 + 3) as usize] < 230 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    };
+    // cada widget uma vez, mais todo estado com uma imagem de fundo cobrindo o cartão (todos os
+    // estados do Tempo levariam tempo demais)
+    let (mut seen, mut backdrops) = (std::collections::HashSet::new(), 0);
+    for (name, kind, cfg) in cases() {
+        let env = Env { cfg: &cfg, key: kind.key() };
+        let first = seen.insert(kind.key());
+        // só os tamanhos em que o widget cobre o cartão sozinho
+        let covered: Vec<Mode> = kind
+            .sizes()
+            .iter()
+            .copied()
+            .filter(|&m| {
+                let l = Layout::of(m);
+                let mut c = Canvas::new((l.w * S).round() as u32, (l.h * S).round() as u32, S);
+                kind.draw(&mut c, m, &env);
+                holes(&c.finish()) == 0
+            })
+            .collect();
+        for &from in &covered {
+            for &to in covered.iter().filter(|&&m| m != from) {
+                let (a, b) = (crate::morph::record(kind.as_ref(), from, S, 1.0, &env), crate::morph::record(kind.as_ref(), to, S, 1.0, &env));
+                let backdrop = crate::morph::has_backdrop(&a) && crate::morph::has_backdrop(&b);
+                if !first && !backdrop {
+                    continue;
+                }
+                backdrops += backdrop as usize;
+                let (la, lb) = (Layout::of(from), Layout::of(to));
+                for i in 0..=10 {
+                    let p = i as f32 / 10.0;
+                    // o cartão do tamanho do meio do caminho, como em `Card::anim_step`
+                    let e = ease_spring(p);
+                    let (w, h) = (la.w + (lb.w - la.w) * e, la.h + (lb.h - la.h) * e);
+                    let mut c = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
+                    crate::morph::draw(&mut c, &a, &b, p);
+                    let n = holes(&c.finish());
+                    assert_eq!(n, 0, "{name} {from:?} → {to:?} a {p}: {n} pixels transparentes no meio do cartão");
+                }
+            }
+        }
+    }
+    assert!(backdrops > 0, "nenhum widget com imagem de fundo para conferir (a capa viva da Música)");
 }
 
 /// Cada widget trocando de tamanho (pequeno → médio → grande → pequeno), em quadros, num PNG

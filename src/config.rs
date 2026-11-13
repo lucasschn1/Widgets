@@ -148,6 +148,8 @@ pub fn default_setting(name: &str) -> Value {
         "texto" => json!(0.0), // 0 = seguir o Windows
         "esmaecer" => json!(false),
         "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" => json!(true),
+        // (experimental: desligado até ser conferido em mais PCs)
+        "placa_de_video" => json!(false),
         "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("sempre"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true, "bateria": true}),

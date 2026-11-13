@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::odometer::Odometer;
 use super::sky::{self, Weather};
 use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
@@ -546,6 +547,8 @@ pub struct Tempo {
     shake_on: Cell<bool>,
     /// hora fixa do céu (exemplos e imagens do README); None: a hora da cidade
     fixed_hour: Option<f32>,
+    /// a temperatura, rolando como num hodômetro quando muda
+    temp_roll: Odometer,
 }
 
 impl Tempo {
@@ -577,6 +580,7 @@ impl Tempo {
             sky_at: Cell::new(Instant::now() + SKY_EVERY),
             shake_on: Cell::new(true),
             fixed_hour: None,
+            temp_roll: Odometer::default(),
         }
     }
 
@@ -851,7 +855,7 @@ impl Tempo {
     }
 
     fn animating(&self) -> bool {
-        self.main_scroll.animating() || self.day_scroll.animating() || self.view_at.get().elapsed() < Duration::from_millis(700)
+        self.main_scroll.animating() || self.day_scroll.animating() || self.view_at.get().elapsed() < Duration::from_millis(700) || self.temp_roll.animating()
     }
 
     /// Começa a entrada dos painéis (abriu os detalhes, um dia ou outra página).
@@ -1034,7 +1038,7 @@ impl Tempo {
         let pad = if big { G_PAD } else { M_PAD };
         let (city_y, temp_y, temp_size) = if big { (18.0, 30.0, 54.0) } else { (16.0, 29.0, 40.0) };
         c.text(pad, city_y, &short_city(&self.city(env)), Face::Semibold, if big { 14.0 } else { 13.0 }, FG, Anchor::LA, Some(170.0));
-        c.text(pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), Face::Light, temp_size, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), Face::Light, temp_size, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = if big { 26.0 } else { 22.0 };
@@ -1145,7 +1149,7 @@ impl Tempo {
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
         let (x, w) = (16.0, SMALL - 32.0);
         c.text(x, 16.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 28.0));
-        c.text(x - 3.0, 29.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, x - 3.0, 29.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = 22.0;
@@ -2002,6 +2006,23 @@ impl Tempo {
         t
     }
 
+    /// A temperatura acabou de mudar (de um grau a menos): os dígitos parados a `at` (0 a 1) do
+    /// caminho.
+    #[cfg(test)]
+    pub fn sample_temp_rolling(at: f32, mode: Mode) -> Tempo {
+        let mut t = Tempo::sample("inicio", 0, 0.0, mode);
+        let (before, now) = t.temp_change();
+        t.temp_roll = Odometer::frozen(&before, &now, at);
+        t
+    }
+
+    /// A temperatura de agora e a de um grau a menos (para os exemplos rolando).
+    #[cfg(test)]
+    fn temp_change(&self) -> (String, String) {
+        let temp = self.weather.as_ref().and_then(|w| w.i64_of("temp")).unwrap_or(0);
+        (format!("{}°", temp - 1), self.temp_text())
+    }
+
     /// Buscando o tempo pela primeira vez (o esqueleto no lugar da condição e das horas).
     #[cfg(test)]
     pub fn sample_loading() -> Tempo {
@@ -2047,6 +2068,20 @@ impl Tempo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temperatura que mudou rola como num hodômetro e o widget pede quadros até ela parar.
+    #[test]
+    fn temperature_rolls_when_it_changes() {
+        let rolled = |ms: f32| {
+            let mut t = Tempo::sample("inicio", 0, 0.0, Mode::P);
+            let (before, now) = t.temp_change();
+            t.temp_roll = Odometer::rolled(&before, &now, ms);
+            t
+        };
+        assert!(rolled(100.0).animating(), "rolando, sem quadros");
+        assert!(!rolled(2000.0).animating(), "terminou e continua pedindo quadros");
+        assert!(!Tempo::sample("inicio", 0, 0.0, Mode::P).animating());
+    }
 
     /// Desenha todas as vistas com a previsão de verdade (precisa de internet):
     /// cargo test tempo -- --ignored --nocapture
