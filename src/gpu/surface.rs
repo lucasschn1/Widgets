@@ -55,26 +55,29 @@ impl Surface {
     }
 
     fn frame(&mut self, d: &Device, w: u32, h: u32, s: f32, draw: impl FnOnce(&mut Canvas)) -> windows::core::Result<()> {
-        let swap = self.swap_for(d, w, h)?;
-        unsafe {
-            let buffer: IDXGISurface = swap.GetBuffer(0)?;
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                ..Default::default()
-            };
-            let target = d.dc.CreateBitmapFromDxgiSurface(&buffer, Some(&props))?;
-            d.dc.SetTarget(&target);
-            let rt: ID2D1RenderTarget = d.dc.cast()?;
-            let mut c = Canvas::on_target(rt, w, h, s);
-            draw(&mut c);
-            let ended = c.end();
-            d.dc.SetTarget(None);
-            ended?;
-            swap.Present(0, DXGI_PRESENT(0)).ok()
-        }
+        use crate::meter::{self, Step};
+        let (swap, mut c) = meter::time("gpu", Step::Target, || -> windows::core::Result<_> {
+            let swap = self.swap_for(d, w, h)?;
+            unsafe {
+                let buffer: IDXGISurface = swap.GetBuffer(0)?;
+                let props = D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    ..Default::default()
+                };
+                let target = d.dc.CreateBitmapFromDxgiSurface(&buffer, Some(&props))?;
+                d.dc.SetTarget(&target);
+                let rt: ID2D1RenderTarget = d.dc.cast()?;
+                Ok((swap, Canvas::on_target(rt, w, h, s, d.generation)))
+            }
+        })?;
+        draw(&mut c);
+        let ended = meter::time("gpu", Step::EndDraw, || c.end());
+        unsafe { d.dc.SetTarget(None) };
+        ended?;
+        meter::time("gpu", Step::Present, || unsafe { swap.Present(0, DXGI_PRESENT(0)).ok() })
     }
 
     /// A cadeia de quadros da janela, de pelo menos `w` × `h` (criada ou aumentada agora).

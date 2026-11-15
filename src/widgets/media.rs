@@ -25,7 +25,7 @@ use windows_future::IAsyncOperation;
 use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing;
-use crate::gfx::{self, Anchor, Canvas, Face, Image};
+use crate::gfx::{self, Anchor, Canvas, Face, Image, Kept};
 use crate::imgops::{blur, Rgb};
 use crate::theme::*;
 use crate::win;
@@ -689,10 +689,10 @@ pub struct Media {
     art_cache: RefCell<Option<((String, u32, u32), Image)>>,
     /// fundo: a capa desfocada, um pouco maior que o cartão; um por tamanho (a troca de
     /// tamanho desenha os dois), o último usado primeiro
-    bg_cache: RefCell<Vec<((String, u32, u32), Image)>>,
+    bg_cache: RefCell<Vec<((String, u32, u32), Kept)>>,
     /// fundo da música anterior, sumindo aos poucos depois de trocar de música
-    fade: Option<(Image, Instant)>,
-    idle_cache: RefCell<HashMap<(Mode, String, u32), Vec<Image>>>,
+    fade: Option<(Kept, Instant)>,
+    idle_cache: RefCell<HashMap<(Mode, String, u32), Vec<Kept>>>,
     started: Instant,
     /// aviso de volume no topo (roda do mouse)
     hud_until: Option<Instant>,
@@ -1033,7 +1033,7 @@ impl Media {
     /// A capa é reduzida e o desfoque é gaussiano, feito em meia resolução: ampliar uma imagem
     /// minúscula direto deixaria degraus e dobras no lugar de cada pixel. No fim entra um ruído
     /// quase invisível, para o degradê não formar faixas.
-    fn background(&self, s: f32, mode: Mode) -> Option<Image> {
+    fn background(&self, s: f32, mode: Mode) -> Option<Kept> {
         let m = self.media.as_ref().filter(|m| !m.empty)?;
         let (art, key) = (m.art.as_ref()?, m.art_key.as_ref()?);
         let l = self.layout_of(mode);
@@ -1042,7 +1042,7 @@ impl Media {
         let mut cache = self.bg_cache.borrow_mut();
         let entry = match cache.iter().position(|c| c.0 == cache_key) {
             Some(i) => cache.remove(i),
-            None => (cache_key, live_background(art, w, h)),
+            None => (cache_key, Kept::new(live_background(art, w, h))),
         };
         let img = entry.1.clone();
         cache.insert(0, entry);
@@ -1056,9 +1056,9 @@ impl Media {
         let l = self.layout_of(mode);
         let s = c.s;
         let room = (BG_ZOOM - 1.0) / 2.0;
-        let place = |c: &mut Canvas, img: &Image, opacity: f32| {
+        let place = |c: &mut Canvas, img: &Kept, opacity: f32| {
             let (x, y) = (ox - room * l.w, oy - room * l.h);
-            c.image_px(img, (x * s).round(), (y * s).round(), (l.w * BG_ZOOM * s).round(), (l.h * BG_ZOOM * s).round(), opacity);
+            c.image_px_kept(img, (x * s).round(), (y * s).round(), (l.w * BG_ZOOM * s).round(), (l.h * BG_ZOOM * s).round(), opacity);
         };
         c.push_round_clip(ox, oy, ox + l.w, oy + l.h, l.radius);
         place(c, &bg, 1.0);
@@ -1091,7 +1091,7 @@ impl Media {
     }
 
     /// Quadros de um equalizador "cochilando", com zzz subindo. Desenhados uma vez só.
-    fn idle_frames(&self, mode: Mode, s: f32) -> std::cell::Ref<'_, Vec<Image>> {
+    fn idle_frames(&self, mode: Mode, s: f32) -> std::cell::Ref<'_, Vec<Kept>> {
         let pref = self.pref();
         let key = (mode, pref.clone(), (s * 100.0) as u32);
         if !self.idle_cache.borrow().contains_key(&key) {
@@ -1132,7 +1132,7 @@ impl Media {
                         c.text(zx, zy, "z", Face::Semibold, size, Rgba(220, 220, 228, alpha), Anchor::MM, None);
                     }
                 }
-                frames.push(c.finish());
+                frames.push(Kept::new(c.finish()));
             }
             self.idle_cache.borrow_mut().insert(key.clone(), frames);
         }
@@ -1392,7 +1392,7 @@ impl Media {
         let frames = self.idle_frames(mode, s);
         let index = (self.started.elapsed().as_secs_f32() * IDLE_FPS as f32) as usize % frames.len();
         let (x, y, _, _) = Self::idle_box(mode);
-        c.image(&frames[index], ox + x, oy + y);
+        c.image_kept(&frames[index], ox + x, oy + y);
     }
 
 }

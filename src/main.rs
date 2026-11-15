@@ -35,10 +35,13 @@ mod gpu;
 mod events;
 mod gfx;
 mod imgops;
+mod meter;
 mod morph;
 mod output;
 mod overlay;
 mod panel;
+#[cfg(test)]
+mod perf;
 mod popup;
 mod prompt;
 #[cfg(test)]
@@ -147,6 +150,7 @@ fn main() {
         }
         app.after_events();
         app.run_timers();
+        meter::flush();
         if t0.elapsed() > std::time::Duration::from_millis(200) {
             debug_log!("laço lento: {:?}", t0.elapsed());
         }

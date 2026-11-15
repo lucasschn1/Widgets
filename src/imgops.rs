@@ -115,6 +115,51 @@ impl Rgb {
     }
 }
 
+/// O mesmo que `x.round().clamp(0.0, 255.0) as u8`, mas rápido: no x86 sem extensões, o
+/// `round` do Rust chama a `roundf` da biblioteca do C, e as passadas por pixel faziam dezenas
+/// dessas chamadas. Arredonda a metade para longe do zero, como o `round`; a conta `x - t` é exata
+/// nesta faixa, então o resultado é sempre o mesmo (veja o teste). Sem desvios: se a fração passa
+/// de meio ou não é quase sorteio, e o processador errava a aposta a cada pixel.
+#[inline(always)]
+pub fn round_u8(x: f32) -> u8 {
+    // (o `max` ignora NaN: ele vira 0, como no `as u8`)
+    let x = x.max(0.0).min(255.0);
+    let t = x as i32;
+    (t + (x - t as f32 >= 0.5) as i32) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::round_u8;
+
+    /// Igual ao `round` com `clamp` em toda a faixa, inclusive nos casos difíceis: as metades, o
+    /// maior número abaixo de cada metade, negativos, os extremos e NaN.
+    #[test]
+    fn round_u8_matches_round() {
+        let slow = |x: f32| x.round().clamp(0.0, 255.0) as u8;
+        let mut checked = 0;
+        // todos os f32 de -2 a 300, pulando de 127 em 127 (passa por todos os expoentes)
+        let (mut bits, end) = (0u32, 300f32.to_bits());
+        while bits <= end {
+            for x in [f32::from_bits(bits), -f32::from_bits(bits)] {
+                assert_eq!(round_u8(x), slow(x), "{x:e}");
+            }
+            bits += 127;
+            checked += 1;
+        }
+        for k in -4..520 {
+            let half = k as f32 / 2.0;
+            for x in [half, f32::from_bits(half.to_bits().wrapping_sub(1)), f32::from_bits(half.to_bits() + 1)] {
+                assert_eq!(round_u8(x), slow(x), "{x:e}");
+            }
+        }
+        for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX, f32::MIN_POSITIVE, 0.0, -0.0] {
+            assert_eq!(round_u8(x), slow(x), "{x:e}");
+        }
+        assert!(checked > 5_000_000);
+    }
+}
+
 /// Desfoque gaussiano aproximado por três desfoques de caixa (rápido e quase igual).
 pub fn blur(px: &mut [u8], w: u32, h: u32, channels: usize, sigma: f32) {
     if sigma < 0.5 || w == 0 || h == 0 {

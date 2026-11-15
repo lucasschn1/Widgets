@@ -60,7 +60,7 @@ as suas configurações.
 |---|---|
 | **Sistema** | Windows 10 ou 11, 64 bits |
 | **Tamanho** | 3,5 MB instalado (um `.exe` só, sem dependências) |
-| **Consumo** | Uns 40 MB de memória e pouca CPU (veja [quanto pesa no PC](#quanto-pesa-no-pc)) |
+| **Consumo** | Uns 50 MB de memória (uns 100 MB desenhando pela placa de vídeo) e pouca CPU (veja [quanto pesa no PC](#quanto-pesa-no-pc)) |
 | **Permissões** | Nenhuma de administrador; tudo fica na sua pasta de usuário |
 | **Desinstalar** | Configurações → Aplicativos → Widgets |
 
@@ -104,16 +104,23 @@ versão 3.11).
 Pouco. Os widgets só se redesenham quando algo muda (o relógio, uma música nova, um número do
 sistema), e um jogo ou vídeo em tela cheia pausa os widgets daquele monitor.
 
-Medido na versão 3.17 num notebook com Ryzen 7 7730U (8 núcleos, 16 threads), com seis widgets
-abertos (Tempo, Tocando agora, Uso do Claude e uma pilha com Sistema, GitHub e Bateria), no pior
-caso: o Claude Code trabalhando (o Clawd animando o tempo todo) e o tema de Natal ligado (a neve
-caindo). Um minuto em cada jeito de desenhar (veja
-[Desenhar pela CPU ou pela placa de vídeo](#desenhar-pela-cpu-ou-pela-placa-de-vídeo)):
+Medido num notebook com Intel Core 5 120U (10 núcleos, 12 threads), com sete widgets abertos no
+tamanho pequeno (Tempo, Tocando agora, Uso do Claude, Sistema, GitHub, Bateria e Pomodoro), num
+caso pesado: o Claude Code trabalhando, o tema de Natal ligado (a neve caindo o tempo todo), o
+Pomodoro contando e o equalizador do Tocando agora animando (sem música). Quatro rodadas de um
+minuto em cada jeito de desenhar (veja
+[Desenhar pela CPU ou pela placa de vídeo](#desenhar-pela-cpu-ou-pela-placa-de-vídeo)), com a
+mediana:
 
 | Desenho | CPU de um núcleo | CPU do processador inteiro | Memória |
 |---|---|---|---|
-| Pela CPU (o padrão) | ~14% | 0,9% | ~55 MB |
-| Pela placa de vídeo | ~8% | 0,5% | ~85 MB |
+| Pela CPU (o padrão) | ~6,5% | 0,55% | ~47 MB |
+| Pela placa de vídeo | ~5% | 0,4% | ~105 MB |
+
+O número muda com o que mais o PC está fazendo: entre as rodadas, pela CPU foi de 5,6% a 9,8% de
+um núcleo, e pela placa de vídeo, de 4,3% a 6,1%. Na mesma medição, a versão 3.17 gastava ~8% de
+um núcleo pela placa de vídeo (o vidro de cada cartão era refeito e reenviado para a placa a cada
+quadro) e ~6,7% pela CPU, praticamente o mesmo de agora.
 
 Nas situações mais calmas, a versão 3.12 media, desenhando pela CPU: parado e sem música, ~4% de
 um núcleo (0,25% do processador inteiro); com música tocando, ~6,5% (0,4%). Elas não foram
@@ -337,7 +344,7 @@ pela placa de vídeo** e vale ao abrir o app de novo.
 - **Pela placa de vídeo (experimental):** o quadro é desenhado direto na placa de vídeo e
   mostrado pela DirectComposition do Windows, sem a cópia da janela inteira. As animações
   contínuas (o Clawd, a neve do Natal, a chuva do Tempo) gastam menos CPU: na medição de
-  [Quanto pesa no PC](#quanto-pesa-no-pc), cerca de 40% menos, em troca de uns 30 MB a mais de
+  [Quanto pesa no PC](#quanto-pesa-no-pc), uns 25% menos, em troca de uns 55 MB a mais de
   memória. Com o cartão parado, os cliques valem no retângulo dele (os cantinhos arredondados
   também). Se a placa de vídeo for reiniciada (o PC dormiu, o driver atualizou), os widgets se
   refazem sozinhos.
