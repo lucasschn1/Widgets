@@ -121,6 +121,10 @@ pub struct Gfx {
     pub dw: IDWriteFactory,
     pub wic: IWICImagingFactory,
     formats: RefCell<HashMap<(Face, u32), IDWriteTextFormat>>,
+    /// textos já medidos (measure): o mesmo texto, na mesma fonte e tamanho, é medido e
+    /// desenhado várias vezes em cada quadro (largura, corte com "…", quebra de linhas) e em
+    /// todos os quadros seguintes; montar o layout do DirectWrite é a parte cara
+    layouts: RefCell<HashMap<(String, Face, u32), Measured>>,
     round: ID2D1StrokeStyle,
     icon_family: &'static str,
     /// números grandes (temperatura, relógio): a fonte de títulos do Windows 11, se houver
@@ -130,6 +134,18 @@ pub struct Gfx {
     /// as fontes embutidas no executável (None se o Windows não conseguir carregá-las)
     embedded: Option<IDWriteFontCollection>,
 }
+
+/// Um texto medido: o layout pronto para desenhar, a largura, a distância do topo até a linha de
+/// base e o topo e a base da "tinta" em relação a ela (pixels).
+type Measured = (IDWriteTextLayout, f32, f32, f32, f32);
+
+/// Quantos textos medidos ficam guardados, no máximo (passando disso, a lista recomeça: os textos
+/// que mudam a cada segundo, como os números, iam enchendo para sempre).
+const LAYOUTS: usize = 1500;
+
+/// Liga ou desliga a lista de textos medidos (para a bancada comparar com e sem).
+#[cfg(test)]
+pub static LAYOUT_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// As fontes embutidas: a Outfit, variável do peso 100 ao 900 (licença SIL Open Font License, ver
 /// res/fonts/OFL.txt).
@@ -183,7 +199,7 @@ impl Gfx {
                 t.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 }).is_ok()
             });
             let embedded = memory_collection(&dw, &EMBEDDED).ok();
-            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular, embedded })
+            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular, embedded })
         }
     }
 
@@ -225,7 +241,26 @@ impl Gfx {
 
     /// Mede um texto: (largura, distância do topo até a linha de base, topo e base da "tinta" em
     /// relação à linha de base), em pixels.
-    fn measure(&self, text: &str, face: Face, px: f32) -> (IDWriteTextLayout, f32, f32, f32, f32) {
+    fn measure(&self, text: &str, face: Face, px: f32) -> Measured {
+        #[cfg(test)]
+        if !LAYOUT_CACHE.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.measure_now(text, face, px);
+        }
+        let key = (text.to_string(), face, px.to_bits());
+        if let Some(m) = self.layouts.borrow().get(&key) {
+            return m.clone();
+        }
+        let m = self.measure_now(text, face, px);
+        let mut layouts = self.layouts.borrow_mut();
+        if layouts.len() >= LAYOUTS {
+            layouts.clear();
+        }
+        layouts.insert(key, m.clone());
+        m
+    }
+
+    /// Mede de verdade (monta o layout do DirectWrite).
+    fn measure_now(&self, text: &str, face: Face, px: f32) -> Measured {
         let format = self.format(face, px);
         let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
@@ -473,6 +508,69 @@ pub struct Canvas {
     /// gravando: o que seria desenhado vai para cá, e nada é desenhado (a troca de tamanho
     /// liga o que cada tamanho desenha e anda de um para o outro)
     rec: Option<Recorder>,
+    /// o dispositivo da placa de vídeo em que esta tela desenha (0: tela em memória)
+    domain: u64,
+}
+
+/// Pixels BGRA com alfa pré-multiplicado, a 96 dpi (as coordenadas da tela já estão em pixels).
+fn bitmap_props() -> D2D1_BITMAP_PROPERTIES {
+    D2D1_BITMAP_PROPERTIES {
+        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        dpiX: 96.0,
+        dpiY: 96.0,
+    }
+}
+
+/// Quanto as imagens guardadas na placa de vídeo (`Canvas::image_kept`) podem ocupar lá, no
+/// máximo: o vidro de cada cartão aberto (perto de 1 MB cada) e as animações quadro a quadro (os
+/// 60 quadros do equalizador da música), com folga. As usadas há mais tempo saem primeiro.
+const GPU_BUDGET: usize = 48 << 20;
+
+thread_local! {
+    /// imagens já enviadas para a placa de vídeo: (identificador, dispositivo, imagem lá, bytes),
+    /// da usada há mais tempo à mais recente
+    static GPU_BITMAPS: RefCell<Vec<(u64, u64, ID2D1Bitmap, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn new_image_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Uma imagem pronta que não muda mais e é desenhada em muitos quadros (o vidro de um cartão, o
+/// fundo da capa da música): copiar é barato (é a mesma imagem) e, na placa de vídeo, ela é
+/// enviada uma vez só e fica guardada lá (`Canvas::image_kept`) até a última cópia sumir.
+#[derive(Clone)]
+pub struct Kept(std::rc::Rc<KeptImage>);
+
+struct KeptImage {
+    img: Image,
+    id: u64,
+}
+
+impl Kept {
+    pub fn new(img: Image) -> Kept {
+        Kept(std::rc::Rc::new(KeptImage { img, id: new_image_id() }))
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0.id
+    }
+}
+
+impl std::ops::Deref for Kept {
+    type Target = Image;
+    fn deref(&self) -> &Image {
+        &self.0.img
+    }
+}
+
+impl Drop for KeptImage {
+    fn drop(&mut self) {
+        // ninguém mais desenha esta imagem: solta a cópia da placa de vídeo
+        let id = self.id;
+        let _ = GPU_BITMAPS.try_with(|c| c.borrow_mut().retain(|e| e.0 != id));
+    }
 }
 
 impl Canvas {
@@ -497,20 +595,23 @@ impl Canvas {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None }
+            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None, domain: 0 }
         })
     }
 
     /// Tela desenhando direto em `rt` (a superfície da placa de vídeo de uma janela, veja `gpu`),
     /// transparente. Termina com `end`, que não lê os pixels de volta.
-    pub fn on_target(rt: ID2D1RenderTarget, w: u32, h: u32, s: f32) -> Canvas {
+    ///
+    /// `domain` identifica o dispositivo da placa de vídeo (muda quando ele é refeito): as imagens
+    /// guardadas nela (`image_kept`) só servem no mesmo.
+    pub fn on_target(rt: ID2D1RenderTarget, w: u32, h: u32, s: f32, domain: u64) -> Canvas {
         unsafe {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
         }
-        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None }
+        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None, domain }
     }
 
     /// Termina o desenho numa tela da placa de vídeo (`on_target`).
@@ -916,18 +1017,45 @@ impl Canvas {
             return;
         }
         let geom = self.round_geom(x0, y0, x1, y1, r);
+        // a camada só precisa cobrir o recorte (com folga para a borda suavizada): com limites
+        // enormes, a placa de vídeo preparava uma camada do tamanho da tela inteira
+        let pad = 2.0;
+        let mut bounds = self.rect_px(x0, y0, x1, y1);
+        (bounds.left, bounds.top, bounds.right, bounds.bottom) = (bounds.left - pad, bounds.top - pad, bounds.right + pad, bounds.bottom + pad);
+        self.push_layer(bounds, Some(geom.cast().unwrap()), 1.0);
+    }
+
+    /// Começa uma camada (até `pop_clip`) sem criar um objeto de camada a cada vez: o Direct2D
+    /// reaproveita as dele.
+    fn push_layer(&mut self, bounds: D2D_RECT_F, mask: Option<ID2D1Geometry>, opacity: f32) {
         unsafe {
-            let layer = self.rt.CreateLayer(None).expect("layer");
-            let params = D2D1_LAYER_PARAMETERS {
-                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
-                geometricMask: std::mem::ManuallyDrop::new(Some(geom.cast().unwrap())),
+            let params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: bounds,
+                geometricMask: std::mem::ManuallyDrop::new(mask),
                 maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                 maskTransform: windows_numerics::Matrix3x2::identity(),
-                opacity: 1.0,
+                opacity,
                 opacityBrush: std::mem::ManuallyDrop::new(None),
-                layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
             };
-            self.rt.PushLayer(&params, &layer);
+            match self.rt.cast::<ID2D1DeviceContext>() {
+                Ok(dc) => dc.PushLayer(&params, None),
+                Err(_) => {
+                    // (sem o contexto do Direct2D 1.1: com um objeto de camada, como antes)
+                    let old = D2D1_LAYER_PARAMETERS {
+                        contentBounds: params.contentBounds,
+                        geometricMask: std::mem::ManuallyDrop::new((*params.geometricMask).clone()),
+                        maskAntialiasMode: params.maskAntialiasMode,
+                        maskTransform: params.maskTransform,
+                        opacity,
+                        opacityBrush: std::mem::ManuallyDrop::new(None),
+                        layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                    };
+                    let layer = self.rt.CreateLayer(None).expect("layer");
+                    self.rt.PushLayer(&old, &layer);
+                    let _ = std::mem::ManuallyDrop::into_inner(old.geometricMask);
+                }
+            }
             // devolve a referência guardada no ManuallyDrop
             let _ = std::mem::ManuallyDrop::into_inner(params.geometricMask);
         }
@@ -940,20 +1068,7 @@ impl Canvas {
             r.layers.push(Layer::Alpha(alpha.clamp(0.0, 1.0)));
             return;
         }
-        unsafe {
-            let layer = self.rt.CreateLayer(None).expect("layer");
-            let params = D2D1_LAYER_PARAMETERS {
-                contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 },
-                geometricMask: std::mem::ManuallyDrop::new(None),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: windows_numerics::Matrix3x2::identity(),
-                opacity: alpha.clamp(0.0, 1.0),
-                opacityBrush: std::mem::ManuallyDrop::new(None),
-                layerOptions: D2D1_LAYER_OPTIONS_NONE,
-            };
-            self.rt.PushLayer(&params, &layer);
-        }
-        self.layers += 1;
+        self.push_layer(D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 }, None, alpha.clamp(0.0, 1.0));
     }
 
     pub fn pop_clip(&mut self) {
@@ -977,6 +1092,51 @@ impl Canvas {
             return;
         }
         self.image_px(img, px, py, img.w as f32, img.h as f32, 1.0);
+    }
+
+    /// Como `image`, para uma imagem guardada (`Kept`): na placa de vídeo, ela é enviada uma vez
+    /// só; na tela em memória, é igual a `image`. O desenho é o mesmo.
+    pub fn image_kept(&mut self, img: &Kept, x: f32, y: f32) {
+        let (px, py) = ((x * self.s).round(), (y * self.s).round());
+        if self.domain == 0 || self.rec.is_some() {
+            self.image(img, x, y);
+            return;
+        }
+        self.image_px_kept(img, px, py, img.w as f32, img.h as f32, 1.0);
+    }
+
+    /// Como `image_px`, para uma imagem guardada (`Kept`).
+    pub fn image_px_kept(&mut self, img: &Kept, x: f32, y: f32, w: f32, h: f32, opacity: f32) {
+        if self.domain == 0 || self.rec.is_some() {
+            self.image_px(img, x, y, w, h, opacity);
+            return;
+        }
+        if img.w == 0 || img.h == 0 {
+            return;
+        }
+        let (domain, id) = (self.domain, img.id());
+        let bmp = GPU_BITMAPS.with(|c| {
+            let mut c = c.borrow_mut();
+            if let Some(i) = c.iter().position(|e| e.0 == id && e.1 == domain) {
+                // usada agora: vai para o fim (a última a sair)
+                let e = c.remove(i);
+                let bmp = e.2.clone();
+                c.push(e);
+                return Some(bmp);
+            }
+            let bmp = crate::meter::time("keyed", crate::meter::Step::Upload, || unsafe { self.rt.CreateBitmap(D2D_SIZE_U { width: img.w, height: img.h }, Some(img.px.as_ptr() as _), img.w * 4, &bitmap_props()) }).ok()?;
+            c.retain(|e| e.1 == domain);
+            let bytes = (img.w * img.h * 4) as usize;
+            let mut total: usize = c.iter().map(|e| e.3).sum();
+            while !c.is_empty() && total + bytes > GPU_BUDGET {
+                total -= c.remove(0).3;
+            }
+            c.push((id, domain, bmp.clone(), bytes));
+            Some(bmp)
+        });
+        let Some(bmp) = bmp else { return self.image_px(img, x, y, w, h, opacity) };
+        let dest = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h };
+        unsafe { self.rt.DrawBitmap(&bmp, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
     }
 
     /// Cola uma imagem no retângulo w×h com o canto em (x, y) (em pontos), nítida: ela é
@@ -1011,15 +1171,11 @@ impl Canvas {
             return;
         }
         unsafe {
-            let props = D2D1_BITMAP_PROPERTIES {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-                dpiX: 96.0,
-                dpiY: 96.0,
-            };
-            let bmp = self
-                .rt
-                .CreateBitmap(D2D_SIZE_U { width: img.w, height: img.h }, Some(img.px.as_ptr() as _), img.w * 4, &props)
-                .expect("bitmap");
+            let up = if self.domain != 0 { "gpu" } else { "memória" };
+            let bmp = crate::meter::time(up, crate::meter::Step::Upload, || {
+                self.rt.CreateBitmap(D2D_SIZE_U { width: img.w, height: img.h }, Some(img.px.as_ptr() as _), img.w * 4, &bitmap_props())
+            })
+            .expect("bitmap");
             let dest = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h };
             self.rt.DrawBitmap(&bmp, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
         }
@@ -1630,5 +1786,69 @@ mod glow_tests {
         let path = std::env::temp_dir().join("brilho_borda.png");
         save_png(&c.finish(), &path).unwrap();
         println!("{}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Os textos guardados dão as mesmas medidas, ao centésimo de pixel, que medir de novo: em
+    /// cada fonte, em tamanhos quebrados, com acentos, ícones e o "…".
+    #[test]
+    fn cached_text_measures_match_measuring_again() {
+        com();
+        with(|g| {
+            for face in [Face::Regular, Face::Semibold, Face::Light, Face::Symbol, Face::Icons, Face::Custom("Outfit", 600)] {
+                for px in [9.0, 13.75, 22.5, 61.0] {
+                    for text in ["Florianópolis", "23°", "12:07", "\u{e995}", "Uso diário 46%…", " "] {
+                        let fresh = g.measure_now(text, face, px);
+                        for _ in 0..2 {
+                            let kept = g.measure(text, face, px);
+                            assert_eq!((kept.1, kept.2, kept.3, kept.4), (fresh.1, fresh.2, fresh.3, fresh.4), "{face:?} {px} {text:?}");
+                        }
+                    }
+                }
+            }
+            assert!(g.layouts.borrow().len() <= LAYOUTS);
+        });
+    }
+
+    /// Uma imagem guardada (`Kept`) vai para a placa de vídeo uma vez só, por mais quadros que a
+    /// desenhem, e sai de lá quando a última cópia some; na tela em memória, desenha o mesmo que
+    /// uma imagem comum.
+    #[test]
+    fn kept_images_are_sent_once_and_freed() {
+        com();
+        let mut img = Image::new(40, 30);
+        for (i, p) in img.px.chunks_exact_mut(4).enumerate() {
+            p.copy_from_slice(&[(i % 256) as u8, 90, 200, 255]);
+        }
+        let kept = Kept::new(img.clone());
+        let mut a = Canvas::new(60, 50, 1.0);
+        a.image(&img, 7.0, 9.0);
+        let mut b = Canvas::new(60, 50, 1.0);
+        b.image_kept(&kept, 7.0, 9.0);
+        assert!(a.finish().px == b.finish().px, "na tela em memória, igual a uma imagem comum");
+        if !crate::gpu::available() {
+            return;
+        }
+        let id = kept.id();
+        let count = || GPU_BITMAPS.with(|c| c.borrow().iter().filter(|e| e.0 == id).count());
+        for _ in 0..5 {
+            crate::gpu::draw_offscreen(60, 50, 1.0, |c| c.image_kept(&kept, 7.0, 9.0)).unwrap();
+        }
+        assert_eq!(count(), 1, "enviada uma vez só");
+        let copy = kept.clone();
+        drop(kept);
+        assert_eq!(count(), 1, "ainda há uma cópia");
+        drop(copy);
+        assert_eq!(count(), 0, "solta da placa de vídeo");
     }
 }

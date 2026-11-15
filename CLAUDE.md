@@ -54,6 +54,24 @@ Para devolver os widgets à versão lançada: `powershell -File dev\aplicar.ps1 
 - PowerShell 5.1: scripts `.ps1` com acentos precisam ser salvos em UTF-8 **com BOM**, e nomes de
   funções e variáveis não diferenciam maiúsculas (`$marker` é o mesmo que `$Marker`).
 
+## Desempenho
+
+Otimize com números, não no chute:
+
+- **App aberto, uso de verdade:** feche os widgets e abra o instalado com `WIDGETS_PERF=1`; a
+  cada 10 s, `%TEMP%\widgets-perf.txt` mostra a CPU do processo e da thread da interface e, por
+  widget, quanto cada etapa custa (conteúdo, vidro, quadro na tela, partes da placa de vídeo), em
+  ciclos de CPU de verdade (sem contar espera). Desligado, o medidor (`src/meter.rs`) não custa nada.
+- **Bancada** (`src/perf.rs`, testes ignorados): `cargo test --release perf::perf -- --ignored
+  --nocapture --exact` (cada widget e o vidro) e `perf::gpu_frame` (um quadro na placa de vídeo,
+  também no ritmo do app). Compare números da mesma rodada: o PC muda de velocidade com a carga.
+- O que já se aprendeu: o vidro guarda o fundo e as peças (`GlassParts`) enquanto o cartão não
+  anda; na placa de vídeo, imagens que se repetem por muitos quadros vão como `Kept` (enviadas uma
+  vez só); um quadro na placa de vídeo tem um piso fixo (~0,5 ms de CPU no ritmo do app), então
+  o que mais pesa são as animações contínuas.
+- Uma mudança de desempenho não pode mudar o desenho: compare com o jeito antigo num teste (byte
+  a byte quando der; no máximo 1 tom de diferença, como em `glass_parts_match_finish_glass`).
+
 ## Imagens do README
 
 Geradas pelo código: `cargo test --release readme_images::readme -- --ignored --exact` e depois

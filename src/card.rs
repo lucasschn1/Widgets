@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 
 use crate::entrance::{Entrance, Look};
-use crate::gfx::{Canvas, Image};
+use crate::backdrop::GlassParts;
+use crate::gfx::{Canvas, Image, Kept};
+use crate::meter::{self, Step};
 use crate::output::{Frame, Output};
 use crate::shared::Shared;
 use crate::theme::*;
@@ -56,6 +58,10 @@ pub struct ResizeAnim {
 /// Quanto dura a troca de tamanho desenhada quadro a quadro: mais que a de sempre, para dar tempo
 /// de cada coisa andar até o lugar novo.
 pub const MORPH_MS: u64 = 650;
+
+/// Do que o fundo do vidro guardado depende: canto na tela, tamanho, versão do fundo, escurecimento
+/// e o raio dos cantos.
+type BaseKey = ((i32, i32), (u32, u32), u64, u64, u32);
 
 pub struct Slide {
     from: (i32, i32),
@@ -133,7 +139,10 @@ pub struct Card {
     pub expand_at: Option<Instant>,
     pub outside_since: Option<Instant>,
     pub content: Option<Image>,
-    composed: Option<((i32, i32), u64, (u32, u32), Image)>,
+    composed: Option<((i32, i32), u64, (u32, u32), Kept)>,
+    /// o fundo do vidro (papel de parede desfocado, escurecido e com granulado): só muda quando o
+    /// cartão anda, muda de tamanho, ou o fundo ou o escurecimento mudam
+    base: Option<(BaseKey, Image, Option<GlassParts>)>,
     /// mudou algo enquanto estava pausado ou escondido
     pub stale: bool,
     pub close_hot: bool,
@@ -194,6 +203,7 @@ impl Card {
             outside_since: None,
             content: None,
             composed: None,
+            base: None,
             stale: false,
             close_hot: false,
             status: Status::default(),
@@ -470,12 +480,14 @@ impl Card {
     // --- desenho ---
 
     pub fn render(&self, mode: Mode, sh: &Shared) -> Image {
-        let (w, h) = self.card_size_of(mode);
-        let mut c = Canvas::new(w as u32, h as u32, self.s);
-        c.text_scale = sh.text_scale;
-        let env = Env { cfg: &sh.cfg, key: self.key() };
-        self.kind.draw(&mut c, mode, &env);
-        c.finish()
+        meter::time(self.kind.key(), Step::Content, || {
+            let (w, h) = self.card_size_of(mode);
+            let mut c = Canvas::new(w as u32, h as u32, self.s);
+            c.text_scale = sh.text_scale;
+            let env = Env { cfg: &sh.cfg, key: self.key() };
+            self.kind.draw(&mut c, mode, &env);
+            c.finish()
+        })
     }
 
     /// Redesenha o cartão com os dados atuais e mostra na tela.
@@ -566,14 +578,34 @@ impl Card {
         let m = self.margin;
         let key = (self.pos, sh.backdrop.version, (content.w, content.h));
         if self.composed.as_ref().map(|c| (c.0, c.1, c.2)) != Some(key) {
-            let glass = sh.backdrop.glass(content, self.radius_px(self.mode), self.pos.0 + m, self.pos.1 + m, sh.tint);
-            self.composed = Some((key.0, key.1, key.2, glass));
+            let (x, y) = (self.pos.0 + m, self.pos.1 + m);
+            let radius = self.radius_px(self.mode);
+            let base_key: BaseKey = ((x, y), (content.w, content.h), sh.backdrop.version, sh.tint.to_bits(), radius.to_bits());
+            let key_name = self.kind.key();
+            let moved = self.base.as_ref().map(|b| b.0) != Some(base_key);
+            if moved {
+                let base = meter::time(key_name, Step::Base, || sh.backdrop.glass_base(content.w, content.h, x, y, sh.tint));
+                self.base = Some((base_key, base, None));
+            }
+            let (_, base, parts) = self.base.as_mut().unwrap();
+            let glass = meter::time(key_name, Step::Glass, || {
+                if moved {
+                    // num lugar novo (andando, arrastando), de uma vez: preparar as peças só vale
+                    // a pena se o cartão ficar parado ali
+                    sh.backdrop.glass_on(base, content, radius, x, y)
+                } else {
+                    // parado: só o conteúdo muda, montado sobre as peças guardadas
+                    parts.get_or_insert_with(|| sh.backdrop.glass_parts(base, radius, x, y)).compose(content)
+                }
+            });
+            // (guardado: na placa de vídeo, o vidro é enviado uma vez só, não a cada quadro)
+            self.composed = Some((key.0, key.1, key.2, Kept::new(glass)));
         }
         let glass = &self.composed.as_ref().unwrap().3;
         let (w, h) = (glass.w + 2 * m as u32, glass.h + 2 * m as u32);
         let frame = Frame { w, h, s: self.s, pos: move_win.then_some(self.pos), alpha: self.opacity(sh), hit: self.hit_area(sh, (w, h)) };
         let mut out = std::mem::replace(&mut self.out, Output::Layered);
-        out.show(self.hwnd, frame, |c| self.paint(c, sh));
+        meter::time(self.kind.key(), Step::Show, || out.show(self.hwnd, frame, |c| self.paint(c, sh)));
         self.out = out;
         self.last_frame = Instant::now();
     }
@@ -593,11 +625,11 @@ impl Card {
         // o tremor do trovão leva o vidro e a camada animada juntos
         let (dx, dy) = if sh.animations && self.anim.is_none() { self.kind.shake() } else { (0.0, 0.0) };
         let dy = dy + look.lift;
-        c.image(glass, MARGIN + dx, MARGIN + dy);
+        c.image_kept(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
-            self.kind.overlay(c, self.mode, MARGIN + dx, MARGIN + dy);
+            meter::time(self.kind.key(), Step::Overlay, || self.kind.overlay(c, self.mode, MARGIN + dx, MARGIN + dy));
         }
-        self.decorate(c, sh);
+        meter::time(self.kind.key(), Step::Decorate, || self.decorate(c, sh));
         c.reset_transform();
     }
 
@@ -970,7 +1002,7 @@ impl Card {
         let mut resized = false;
         let mut slid = false;
         if self.anim.is_some() {
-            if self.anim_step(sh) {
+            if meter::time(self.kind.key(), Step::Resize, || self.anim_step(sh)) {
                 resized = true;
             }
             self.last_frame = Instant::now();

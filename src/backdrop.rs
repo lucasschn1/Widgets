@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use crate::gfx::{self, Canvas, Image};
-use crate::imgops::{blur, Rgb};
+use crate::imgops::{blur, round_u8, Rgb};
 use crate::theme::*;
 use crate::win;
 
@@ -237,10 +237,77 @@ impl Backdrop {
     /// Cartão de vidro sob `content`, com o canto superior esquerdo em (x, y) na tela.
     /// `tint` é o escurecimento base (sobe sozinho em papéis de parede claros).
     pub fn glass(&self, content: &Image, radius: f32, x: i32, y: i32, tint: f64) -> Image {
-        let (w, h) = (content.w, content.h);
+        let base = self.glass_base(content.w, content.h, x, y, tint);
+        self.glass_on(&base, content, radius, x, y)
+    }
+
+    /// Como `glass`, sobre um fundo já pronto (`glass_base`, que o cartão guarda enquanto não sai
+    /// do lugar).
+    pub fn glass_on(&self, base: &Image, content: &Image, radius: f32, x: i32, y: i32) -> Image {
+        finish_glass(base, content, radius, self.scale_for(x, y))
+    }
+
+    /// As peças do vidro sobre este fundo (`GlassParts`), para montar com conteúdos novos.
+    pub fn glass_parts(&self, base: &Image, radius: f32, x: i32, y: i32) -> GlassParts {
+        GlassParts::new(base, radius, self.scale_for(x, y))
+    }
+
+    /// O fundo do vidro (w × h pixels, canto em (x, y) na tela): o papel de parede desfocado,
+    /// escurecido e com o granulado; só depende do lugar, do tamanho e do fundo, não do conteúdo.
+    ///
+    /// É o recorte com interpolação (`Rgb::sample`), o escurecimento e o granulado (`grain`) numa
+    /// passada só, com as mesmas contas na mesma ordem (o resultado é o mesmo, byte a byte: veja o
+    /// teste), sem as imagens intermediárias e com o que é de cada coluna calculado uma vez.
+    pub fn glass_base(&self, w: u32, h: u32, x: i32, y: i32, tint: f64) -> Image {
+        let (w, h) = (w.max(1), h.max(1));
+        let (bx, by, bw, bh) = self.bbox(x, y, w, h);
+        // contraste automático: quanto mais claro o fundo, mais o vidro escurece
+        let light = self.lightness(bx, by, bw, bh);
+        let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
+        let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
+        let src = &self.image;
+        let (fx, fy) = (bw / w as f32, bh / h as f32);
+        // para cada coluna: os dois pixels vizinhos na imagem desfocada e o peso entre eles
+        let cols: Vec<(usize, usize, f32)> = (0..w)
+            .map(|ox| {
+                let sx = (bx + (ox as f32 + 0.5) * fx - 0.5).clamp(0.0, (src.w - 1) as f32);
+                let x0 = sx.floor() as u32;
+                let x1 = (x0 + 1).min(src.w - 1);
+                (x0 as usize * 3, x1 as usize * 3, sx - x0 as f32)
+            })
+            .collect();
+        let stride = src.w as usize * 3;
+        let mut out = Image::new(w, h);
+        for (oy, row) in out.px.chunks_exact_mut(w as usize * 4).enumerate() {
+            let sy = (by + (oy as f32 + 0.5) * fy - 0.5).clamp(0.0, (src.h - 1) as f32);
+            let y0 = sy.floor() as u32;
+            let y1 = (y0 + 1).min(src.h - 1);
+            let ty = sy - y0 as f32;
+            let r0 = &src.px[y0 as usize * stride..][..stride];
+            let r1 = &src.px[y1 as usize * stride..][..stride];
+            let py = y + oy as i32;
+            for (ox, (&(a, b, tx), d)) in cols.iter().zip(row.chunks_exact_mut(4)).enumerate() {
+                let n = (noise(x + ox as i32, py) - 0.5) * 2.0 * GRAIN;
+                for c in 0..3 {
+                    let (p00, p10, p01, p11) = (r0[a + c] as f32, r0[b + c] as f32, r1[a + c] as f32, r1[b + c] as f32);
+                    let top = p00 + (p10 - p00) * tx;
+                    let bottom = p01 + (p11 - p01) * tx;
+                    let v = round_u8(top + (bottom - top) * ty);
+                    let v = round_u8(v as f32 + (tint_rgb[c] - v as f32) * amount);
+                    // (RGB para BGRA)
+                    d[2 - c] = round_u8(v as f32 + n);
+                }
+                d[3] = 255;
+            }
+        }
+        out
+    }
+
+    /// O fundo do vidro do jeito antigo, passo a passo (para conferir que o rápido dá o mesmo).
+    #[cfg(test)]
+    pub fn glass_base_steps(&self, w: u32, h: u32, x: i32, y: i32, tint: f64) -> Image {
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
         let mut base = self.image.sample(bx, by, bw, bh, w, h);
-        // contraste automático: quanto mais claro o fundo, mais o vidro escurece
         let light = self.lightness(bx, by, bw, bh);
         let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
         let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
@@ -250,7 +317,7 @@ impl Backdrop {
             }
         }
         grain(&mut base, x, y);
-        finish_glass(&base.to_image(), content, radius, self.scale_for(x, y))
+        base.to_image()
     }
 }
 
@@ -269,6 +336,85 @@ pub fn finish_glass(base: &Image, content: &Image, radius: f32, s: f32) -> Image
     c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
     c.pop_clip();
     c.finish()
+}
+
+/// O vidro de um cartão em peças, para montar com um conteúdo novo sem refazer o resto: o mesmo
+/// que `finish_glass`, que repete tudo a cada vez (camada com recorte, fundo, reflexo, conteúdo e
+/// as duas bordas em degradê, numa tela em memória) quando só o conteúdo mudou.
+///
+/// As peças são desenhadas com as mesmas chamadas de `finish_glass`; montar é só a composição
+/// "por cima" de cada pixel (a mesma conta que o Direct2D faz), que pula o que não muda: pixels
+/// transparentes do conteúdo, bordas só onde há borda, cantos só onde há canto.
+pub struct GlassParts {
+    /// fundo com o reflexo (opaco)
+    under: Image,
+    /// as duas bordas (alfa pré-multiplicado) e onde elas têm tinta (índices de pixel)
+    edges: Image,
+    edge_px: Vec<u32>,
+    /// quanto de cada pixel fica dentro do retângulo arredondado, onde não é inteiro: (índice, 0 a 255)
+    corners: Vec<(u32, u8)>,
+}
+
+impl GlassParts {
+    pub fn new(base: &Image, radius: f32, s: f32) -> GlassParts {
+        let (w, h) = (base.w as f32, base.h as f32);
+        let mut c = Canvas::new(base.w, base.h, 1.0);
+        c.image(base, 0.0, 0.0);
+        c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, WHITE.alpha(SHEEN)), (0.6, WHITE.alpha(0.0)), (1.0, WHITE.alpha(0.0))], 0.0, h);
+        let under = c.finish();
+        let mut c = Canvas::new(base.w, base.h, 1.0);
+        let line = s.round().max(1.0);
+        c.gradient_stroke_round_rect(0.0, 0.0, w, h, radius, WHITE.alpha(EDGE.0), WHITE.alpha(EDGE.1), line);
+        c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
+        let edges = c.finish();
+        let edge_px = edges.px.chunks_exact(4).enumerate().filter(|(_, p)| p.iter().any(|&v| v != 0)).map(|(i, _)| i as u32).collect();
+        let mut c = Canvas::new(base.w, base.h, 1.0);
+        c.fill_round_rect(0.0, 0.0, w, h, radius, WHITE);
+        let corners = c.finish().px.chunks_exact(4).enumerate().filter(|(_, p)| p[3] != 255).map(|(i, p)| (i as u32, p[3])).collect();
+        GlassParts { under, edges, edge_px, corners }
+    }
+
+    /// O vidro com este conteúdo (do mesmo tamanho).
+    pub fn compose(&self, content: &Image) -> Image {
+        // (a mesma conta do Direct2D: cor de cima + a de baixo × o que a de cima deixa passar,
+        // com alfa pré-multiplicado, arredondada)
+        #[inline(always)]
+        fn mul(v: u8, k: u32) -> u32 {
+            (v as u32 * k + 127) / 255
+        }
+        let mut out = self.under.clone();
+        if content.w == out.w && content.h == out.h {
+            for (o, c) in out.px.chunks_exact_mut(4).zip(content.px.chunks_exact(4)) {
+                let a = c[3];
+                if a == 0 {
+                    continue;
+                }
+                if a == 255 {
+                    o.copy_from_slice(c);
+                    continue;
+                }
+                let keep = 255 - a as u32;
+                for k in 0..4 {
+                    o[k] = (c[k] as u32 + mul(o[k], keep)).min(255) as u8;
+                }
+            }
+        }
+        for &i in &self.edge_px {
+            let i = i as usize * 4;
+            let e = &self.edges.px[i..i + 4];
+            let keep = 255 - e[3] as u32;
+            for k in 0..4 {
+                out.px[i + k] = (e[k] as u32 + mul(out.px[i + k], keep)).min(255) as u8;
+            }
+        }
+        for &(i, cover) in &self.corners {
+            let i = i as usize * 4;
+            for k in 0..4 {
+                out.px[i + k] = mul(out.px[i + k], cover as u32) as u8;
+            }
+        }
+        out
+    }
 }
 
 /// quanto o granulado do vidro clareia ou escurece cada pixel, no máximo (de 0 a 255)
@@ -337,6 +483,73 @@ impl Backdrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O vidro montado por peças sai igual ao feito de uma vez (`finish_glass`), com o conteúdo de
+    /// todos os widgets em todos os tamanhos: no máximo um tom de diferença em algum canal (o
+    /// arredondamento da conta do Direct2D por dentro), e quase sempre nenhuma.
+    #[test]
+    fn glass_parts_match_finish_glass() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut picture = Image::new(800, 600);
+        for (i, p) in picture.px.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % 800, i as u32 / 800);
+            p.copy_from_slice(&[(x * 5 % 256) as u8, (y * 3 % 256) as u8, ((x + y) % 200) as u8, 255]);
+        }
+        let s = 1.25;
+        let bd = Backdrop::from_picture(&picture, 8.0, s);
+        let (mut worst, mut differing, mut total, mut drawn) = (0u8, 0usize, 0usize, 0);
+        for (name, kind, cfg) in crate::testes::cases().into_iter().step_by(7) {
+            for &mode in kind.sizes() {
+                let l = crate::widgets::Layout::of(mode);
+                let (w, h) = ((l.w * s).round() as u32, (l.h * s).round() as u32);
+                let mut c = Canvas::new(w, h, s);
+                kind.draw(&mut c, mode, &crate::widgets::Env { cfg: &cfg, key: kind.key() });
+                let content = c.finish();
+                let base = bd.glass_base(w, h, 40, 30, 0.4);
+                let r = l.radius * s;
+                let whole = finish_glass(&base, &content, r, s);
+                let parts = GlassParts::new(&base, r, s).compose(&content);
+                assert_eq!(whole.px.len(), parts.px.len(), "{name}");
+                for (a, b) in whole.px.iter().zip(&parts.px) {
+                    let d = a.abs_diff(*b);
+                    worst = worst.max(d);
+                    differing += (d > 0) as usize;
+                }
+                total += whole.px.len();
+                drawn += 1;
+            }
+        }
+        println!("vidros: {drawn}; maior diferença: {worst}; bytes diferentes: {differing} de {total}");
+        assert!(drawn > 20);
+        assert!(worst <= 1, "maior diferença {worst}");
+    }
+
+    /// O fundo do vidro numa passada só sai igual, byte a byte, ao feito passo a passo: em vários
+    /// lugares (até saindo da tela), tamanhos, escurecimentos e escalas.
+    #[test]
+    fn fast_glass_base_is_identical() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let (w, h) = (640u32, 400u32);
+        let mut picture = Image::new(w, h);
+        for (i, p) in picture.px.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            p.copy_from_slice(&[(x * 7 % 256) as u8, (y * 3 % 256) as u8, ((x ^ y) % 256) as u8, 255]);
+        }
+        for s in [1.0, 1.25, 1.5] {
+            let bd = Backdrop::from_picture(&picture, 8.0, s);
+            for (x, y, cw, ch, tint) in [(0, 0, 200, 120, 0.4), (37, 51, 455, 282, 0.49), (-30, -12, 158, 158, 0.12), (600, 380, 300, 200, 0.85), (123, 77, 1, 1, 0.3)] {
+                let fast = bd.glass_base(cw, ch, x, y, tint);
+                let slow = bd.glass_base_steps(cw, ch, x, y, tint);
+                assert_eq!((fast.w, fast.h), (slow.w, slow.h));
+                let first = fast.px.iter().zip(&slow.px).position(|(a, b)| a != b);
+                assert!(first.is_none(), "diferente em {:?} na escala {s}: byte {first:?} ({:?} × {:?})", (x, y, cw, ch, tint), first.map(|i| &fast.px[i / 4 * 4..i / 4 * 4 + 4]), first.map(|i| &slow.px[i / 4 * 4..i / 4 * 4 + 4]));
+            }
+        }
+    }
 
     /// O granulado é leve, preso à tela e não muda a cor média do vidro.
     #[test]

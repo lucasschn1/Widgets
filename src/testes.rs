@@ -38,7 +38,7 @@ fn pomodoro_cfg(fase: &str, running: bool) -> Value {
 }
 
 /// Cada widget em cada estado que dá para montar sem rede nem janela: (nome, widget, opções).
-fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
+pub(crate) fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     let cfg = empty_cfg();
     let mut out: Vec<(String, Box<dyn Kind>, Value)> = Vec::new();
     for mode in Mode::ALL {
