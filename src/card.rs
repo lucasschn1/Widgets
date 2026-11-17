@@ -104,6 +104,8 @@ const SWAP_SHRINK: f32 = 0.06;
 /// trocar de widget, ficam este tempo e somem neste outro.
 const DOTS_SHOW_MS: f32 = 1000.0;
 const DOTS_FADE_MS: f32 = 300.0;
+/// a força das bolinhas da pilha só com o mouse em cima (1: como logo depois de trocar)
+const DOTS_HOVER: f32 = 0.55;
 
 /// O esqueleto pulsando enquanto o widget busca os dados pela primeira vez: o ciclo e a
 /// opacidade dos blocos, do mais fraco ao mais forte.
@@ -273,15 +275,13 @@ impl Card {
     }
 
     /// Quanto as bolinhas da pilha aparecem agora (0 a 1): inteiras logo depois da troca,
-    /// sumindo em seguida.
+    /// sumindo em seguida; com o mouse em cima, apagadas (para saber que há outros widgets ali).
     fn dots_alpha(&self) -> f32 {
-        let Some(at) = self.dots_at else { return 0.0 };
+        let hovered = DOTS_HOVER * self.hover.clamp(0.0, 1.0);
+        let Some(at) = self.dots_at else { return hovered };
         let ms = at.elapsed().as_secs_f32() * 1000.0;
-        if ms < DOTS_SHOW_MS {
-            1.0
-        } else {
-            1.0 - ease_in_out(((ms - DOTS_SHOW_MS) / DOTS_FADE_MS).min(1.0))
-        }
+        let switched = if ms < DOTS_SHOW_MS { 1.0 } else { 1.0 - ease_in_out(((ms - DOTS_SHOW_MS) / DOTS_FADE_MS).min(1.0)) };
+        switched.max(hovered)
     }
 
     /// As bolinhas da pilha, como no macOS: fora do cartão, na margem transparente do lado
@@ -635,10 +635,12 @@ impl Card {
 
     /// A área da janela (`size` pixels) que recebe cliques: só o cartão, parado; a janela toda
     /// enquanto algo passa da borda dele (entrando, apertado, trocando na pilha, com as bolinhas
-    /// da pilha ou os botões do modo edição). (Na janela transparente, os pixels transparentes já
-    /// deixam os cliques passar e isto não é usado.)
+    /// da pilha, o botão de tamanho, que sobressai do canto, ou os botões do modo edição). A
+    /// área também recorta o desenho: com o botão de tamanho recortado, ele virava um "+"
+    /// cortado. (Na janela transparente, os pixels transparentes já deixam os cliques passar e
+    /// isto não é usado.)
     fn hit_area(&self, sh: &Shared, size: (u32, u32)) -> Option<win::Rect> {
-        let beyond = sh.editing || self.entering() || self.press_anim.is_some() || self.swap.is_some() || self.dots_alpha() > 0.0 || self.drop_hint || self.anim.is_some();
+        let beyond = sh.editing || self.hover > 0.0 || self.entering() || self.press_anim.is_some() || self.swap.is_some() || self.dots_alpha() > 0.0 || self.drop_hint || self.anim.is_some();
         let m = self.margin;
         (!beyond).then_some((m, m, size.0 as i32 - m, size.1 as i32 - m))
     }
@@ -768,13 +770,31 @@ impl Card {
         let r = r - 1.0;
         c.fill_circle(cx, cy, r, fade(Rgba(28, 28, 34, 190)));
         c.stroke_circle(cx, cy, r - 0.5, fade(WHITE.with_a(46)), 1.0);
-        let arm = 4.0;
-        c.line(&[(cx - arm, cy), (cx + arm, cy)], fade(FG.alpha(0.9)), 1.5);
-        // "+" quando o próximo tamanho é maior (ou para fixar aberto), "−" quando volta ao menor
+        // setas na diagonal (um "+" parecia "adicionar"): para fora quando o próximo tamanho é
+        // maior (ou para fixar aberto), para dentro quando volta ao menor
+        let ink = fade(FG.alpha(0.9));
+        for (sx, sy) in [(1.0, -1.0), (-1.0, 1.0)] {
+            let (tip, tail, head) = if self.badge_grows() { (4.0, 0.5, -2.8) } else { (1.0, 4.5, 2.8) };
+            let (tx, ty) = (cx + sx * tip, cy + sy * tip);
+            c.line(&[(cx + sx * tail, cy + sy * tail), (tx, ty)], ink, 1.5);
+            c.line(&[(tx + sx * head, ty), (tx, ty), (tx, ty + sy * head)], ink, 1.5);
+        }
+    }
+
+    /// O botão de tamanho leva a um tamanho maior (ou fixa aberto o que abriu pelo mouse)?
+    pub fn badge_grows(&self) -> bool {
         let sizes = self.kind.sizes();
-        let bigger = self.temp || sizes.iter().position(|&m| m == self.next_mode()) > sizes.iter().position(|&m| m == self.mode);
-        if bigger {
-            c.line(&[(cx, cy - arm), (cx, cy + arm)], fade(FG.alpha(0.9)), 1.5);
+        self.temp || sizes.iter().position(|&m| m == self.next_mode()) > sizes.iter().position(|&m| m == self.mode)
+    }
+
+    /// A dica do botão de tamanho.
+    pub fn badge_tip(&self) -> &'static str {
+        if self.temp {
+            "Manter aberto"
+        } else if self.badge_grows() {
+            "Aumentar"
+        } else {
+            "Diminuir"
         }
     }
 
@@ -1057,6 +1077,59 @@ mod tests {
         Card::new(Box::new(crate::widgets::battery::Battery::sample()), HWND::default(), Mode::M, 1.0)
     }
 
+    /// O botão de tamanho diz o que faz: "Aumentar" até o maior tamanho, "Diminuir" nele e
+    /// "Manter aberto" no que abriu pelo mouse; e as setas ficam dentro do círculo.
+    #[test]
+    fn size_button_says_what_it_does() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut sh = Shared::new(serde_json::json!({}), serde_json::json!({}), 1.0);
+        sh.editing = true; // o botão inteiro, sem depender do mouse
+        let mut c = card();
+        let sizes = c.kind.sizes();
+        for (k, &mode) in sizes.iter().enumerate() {
+            c.mode = mode;
+            let last = k + 1 == sizes.len();
+            assert_eq!(c.badge_grows(), !last, "{mode:?}");
+            assert_eq!(c.badge_tip(), if last { "Diminuir" } else { "Aumentar" }, "{mode:?}");
+            let (w, h) = c.size();
+            let mut canvas = Canvas::new(w as u32, h as u32, 1.0);
+            c.draw_badge(&mut canvas, &sh);
+            let img = canvas.finish();            let (cx, cy) = c.badge_center();
+            for y in 0..img.h {
+                for x in 0..img.w {
+                    let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                    let alpha = img.px[((y * img.w + x) * 4 + 3) as usize];
+                    assert!(d <= BADGE_D / 2.0 + 1.0 || alpha == 0, "{mode:?}: tinta fora do botão em ({x}, {y})");
+                }
+            }
+        }
+        c.temp = true;
+        assert!(c.badge_grows());
+        assert_eq!(c.badge_tip(), "Manter aberto");
+    }
+
+    /// Pela placa de vídeo, a área de cliques recorta a janela: com o mouse em cima, o botão de
+    /// tamanho (que sobressai do canto do cartão) cabe inteiro nela; parado, só o cartão.
+    #[test]
+    fn hit_area_leaves_room_for_the_size_button() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let sh = Shared::new(serde_json::json!({}), serde_json::json!({}), 1.0);
+        let mut c = card();
+        let size = c.size();
+        let (w, h) = (size.0 as u32, size.1 as u32);
+        let m = c.margin;
+        assert_eq!(c.hit_area(&sh, (w, h)), Some((m, m, w as i32 - m, h as i32 - m)), "parado: só o cartão");
+        c.hover = 0.4;
+        let (bx, by) = c.badge_center();
+        let r = BADGE_D / 2.0;
+        assert!(bx + r > c.layout(c.mode).w + MARGIN && by - r < MARGIN, "o botão sobressai do cartão");
+        assert_eq!(c.hit_area(&sh, (w, h)), None, "com o botão aparecendo, a janela toda");
+    }
+
     /// Entrando, o cartão começa invisível, pede quadros até assentar e depois fica como sempre;
     /// sem as animações do Windows, aparece de uma vez.
     #[test]
@@ -1096,16 +1169,21 @@ mod tests {
         assert!(c.content.is_some() && !c.stale);
     }
 
-    /// As bolinhas da pilha aparecem ao trocar de widget e somem sozinhas logo depois (como no
-    /// macOS), sem depender do mouse.
+    /// As bolinhas da pilha aparecem inteiras ao trocar de widget e somem sozinhas logo depois
+    /// (como no macOS); com o mouse em cima, ficam apagadas, avisando que há outros ali.
     #[test]
     fn stack_dots_show_on_a_switch_and_then_fade() {
         let mut c = card();
         c.dots = Some((1, 3));
         assert_eq!(c.dots_alpha(), 0.0);
         c.set_hover(true);
+        c.hover = 0.5;
+        assert_eq!(c.dots_alpha(), DOTS_HOVER * 0.5, "aparecendo junto com o mouse");
         c.hover = 1.0;
-        assert_eq!(c.dots_alpha(), 0.0, "só o mouse em cima não mostra");
+        assert_eq!(c.dots_alpha(), DOTS_HOVER, "com o mouse em cima, apagadas");
+        c.dots_at = Some(Instant::now() - Duration::from_secs(3));
+        assert_eq!(c.dots_alpha(), DOTS_HOVER, "a troca passou, o mouse continua");
+        c.hover = 0.0;
         c.dots_at = Some(Instant::now());
         assert_eq!(c.dots_alpha(), 1.0);
         assert!(c.next_frame().is_some(), "redesenha para sumir");

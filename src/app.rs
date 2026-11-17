@@ -854,7 +854,13 @@ impl App {
             Cursor::Arrow
         };
         let hot = if action.is_some() && !card.animating() { card.hot_at(x, y, sh) } else { None };
-        let tip = if !card.animating() && !on_badge && config::setting_bool(&sh.cfg, "dicas") { card.tooltip_at(x, y, sh) } else { None };
+        let tip = if card.animating() || close_hot || !config::setting_bool(&sh.cfg, "dicas") {
+            None
+        } else if on_badge {
+            Some(card.badge_tip().to_string())
+        } else {
+            card.tooltip_at(x, y, sh)
+        };
         events::set_cursor(card.hwnd, cursor);
         let changed = hot.map(|h| h.0) != card.hot.map(|h| h.0) || close_hot != card.close_hot;
         let animations = sh.animations;
