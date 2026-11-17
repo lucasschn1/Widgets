@@ -209,12 +209,13 @@ const HELPER_ART: [&str; 4] = [".LLL.", "LEBEB", "BBBBS", "S.S.S"];
 /// o gorro de Papai Noel, das colunas 3 a 26: a copa redonda, com luz à esquerda e sombra à
 /// direita, deitando para a direita até o pompom; e a barra de pelo grossa, um pouco mais larga
 /// que a cabeça, cobrindo o alto dela. l luz, r vermelho, d sombra, W pelo, g sombra do pelo
-/// (baixo: pulando, mais alto encostaria no nome do anel do pequeno)
+/// (baixo: pulando, mais alto encostaria no nome do anel do pequeno). O pompom é uma bolinha
+/// 4 × 4 de cantos cortados, com a sombra embaixo à direita: com 3 linhas ele virava um "+".
 const SANTA_ART: [&str; 5] = [
     ".......llrrrrrdd.....WW.",
-    ".....llrrrrrrrrrrdddWWWg",
-    "...lrrrrrrrrrrrrrrdd.gg.",
-    "WWWWWWWWWWWWWWWWWWWWW...",
+    ".....llrrrrrrrrrrdddWWWW",
+    "...lrrrrrrrrrrrrrrddWWWg",
+    "WWWWWWWWWWWWWWWWWWWWWgg.",
     "gWWWgWWWWgWWWWWgWWWWg...",
 ];
 /// a neve do Natal: quantos flocos, quantos quadros por segundo (na camada animada do cartão) e
@@ -2916,6 +2917,15 @@ mod tests {
         assert!(!has(&pose(Mood::Busy, None, &Scene { sleuth: true, ..sc }, None), SANTA));
         assert!(!has(&at(Mood::Normal, Anim::Music, 0.5, &sc), FUR));
         assert!(has(&pose(Mood::Sleepy, None, &sc, None), SANTA));
+    }
+
+    /// O pompom do gorro (colunas 20 a 23) é uma bolinha: 2 em cima e duas linhas cheias de 4 no
+    /// meio, não um "+" (uma linha só de 4, entre duas de 2); e o gorro cabe na grade.
+    #[test]
+    fn santa_pompom_is_round() {
+        let widths: Vec<usize> = SANTA_ART[..3].iter().map(|r| r.bytes().skip(20).filter(|&c| matches!(c, b'W' | b'g')).count()).collect();
+        assert_eq!(widths, [2, 4, 4], "pompom: {widths:?}");
+        assert!(SANTA_ART.iter().all(|r| 3.0 + r.len() as f32 <= COLS), "o gorro sai da grade");
     }
 
     /// Os flocos deslizam: de um quadro para o outro (30 por segundo), cada um anda só um
