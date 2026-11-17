@@ -235,6 +235,64 @@ fn widgets_that_draw_their_size_change_draw_every_frame() {
     assert!(morphing > 0, "nenhum widget desenha a troca de tamanho");
 }
 
+/// Os rótulos dos cabeçalhos ("GITHUB", "SISTEMA", "POMODORO", "SPOTIFY"...) têm todos a mesma
+/// letra, em cor (nunca cinza); os do alto do cartão ficam todos na mesma altura (lado a lado,
+/// alinhados).
+#[test]
+fn header_labels_look_the_same_everywhere() {
+    use crate::gfx::{Face, Op};
+    com();
+    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let mut top_base: Option<f32> = None;
+    let mut seen = std::collections::HashSet::new();
+    for (name, kind, cfg) in cases() {
+        let env = Env { cfg: &cfg, key: kind.key() };
+        for &mode in kind.sizes() {
+            let _ = draw(kind.as_ref(), mode, &cfg);
+            for rec in crate::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops {
+                let Op::Text { base, text, face, size, c, .. } = rec.op else { continue };
+                if !labels.contains(&text.as_str()) {
+                    continue;
+                }
+                seen.insert(text.clone());
+                assert!(face == Face::Semibold && size == widgets::LABEL_SIZE, "{name} {mode:?}: {text} em {face:?} {size}");
+                assert!(c.0.abs_diff(c.1).max(c.1.abs_diff(c.2)) > 20, "{name} {mode:?}: {text} sem cor");
+                // os que ficam no alto do cartão (o da música fica junto do texto dela)
+                if base < 30.0 && !["SPOTIFY", "YOUTUBE", "MÍDIA"].contains(&text.as_str()) {
+                    let first = *top_base.get_or_insert(base);
+                    assert!((base - first).abs() < 0.01, "{name} {mode:?}: {text} em {base}, os outros em {first}");
+                }
+            }
+        }
+    }
+    for label in ["GITHUB", "SISTEMA", "POMODORO"] {
+        assert!(seen.contains(label), "nenhum caso desenhou {label}");
+    }
+}
+
+/// O número principal de cada cartão vai em letra fina, como a temperatura do Clima, o relógio
+/// do Pomodoro e o anel do Claude: o "812" do GitHub também.
+#[test]
+fn hero_numbers_are_light() {
+    use crate::gfx::{Face, Op};
+    com();
+    let cfg = json!({});
+    let kind = GitHub::sample(&cfg, &json!({}));
+    let env = Env { cfg: &cfg, key: kind.key() };
+    for &mode in kind.sizes() {
+        let big: Vec<_> = crate::morph::record(&kind, mode, 1.0, 1.0, &env)
+            .ops
+            .into_iter()
+            .filter_map(|r| match r.op {
+                Op::Text { face, size, text, .. } if size >= 24.0 => Some((face, text)),
+                _ => None,
+            })
+            .collect();
+        assert!(!big.is_empty(), "{mode:?}: sem número grande");
+        assert!(big.iter().all(|(f, _)| *f == Face::Light), "{mode:?}: {big:?}");
+    }
+}
+
 #[test]
 fn every_widget_answers_the_mouse_everywhere() {
     com();

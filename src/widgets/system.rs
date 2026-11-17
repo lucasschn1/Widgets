@@ -227,7 +227,8 @@ impl System {
         s.mode_seen.set(mode);
         s.flipped.set(which);
         let mut s = s;
-        let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6)];
+        // cinco, como no uso de verdade (a lista do grande mostra até `LIST_N`)
+        let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6), ("Explorador de Arquivos", 0.4, 0.2)];
         s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
         s.bars_since = Instant::now() - Duration::from_secs(5);
         s.rates = (1.8e6, 2.4e5);
@@ -332,9 +333,11 @@ impl System {
     }
 
     /// Botão de voltar aos anéis, no cartão virado.
+    /// O ✕ do lado virado: afastado do canto, onde o botão de tamanho do cartão aparece com o
+    /// mouse em cima (encostado nele, um clique no canto do ✕ trocava o tamanho).
     fn close_rect(mode: Mode) -> (f32, f32, f32, f32) {
         let r = if mode == Mode::P { SMALL } else { W };
-        (r - 38.0, 8.0, r - 10.0, 36.0)
+        (r - 46.0, 10.0, r - 20.0, 36.0)
     }
 
     /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
@@ -482,8 +485,8 @@ impl System {
     /// Cabeçalho do grande: "SISTEMA" na cor da CPU e os núcleos à direita.
     fn draw_header(&self, c: &mut Canvas) {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        c.text(PAD, 12.0, "SISTEMA", Face::Semibold, 11.0, PINK.mix(WHITE, 0.12), Anchor::LA, None);
-        c.text(W - PAD, 12.0, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
+        super::draw_label(c, PAD, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+        c.text(W - PAD, super::LABEL_Y, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 
     fn draw_metrics(&self, c: &mut Canvas, mode: Mode) {
@@ -761,6 +764,21 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O ✕ do lado virado não encosta no botão de tamanho do cartão (canto de cima à direita,
+    /// centro a 5 pontos das bordas, que recebe cliques até `BADGE_D / 2 + 2`).
+    #[test]
+    fn close_stays_clear_of_the_size_button() {
+        for mode in [Mode::P, Mode::M, Mode::G] {
+            let w = if mode == Mode::P { SMALL } else { W };
+            let (x0, y0, x1, y1) = System::close_rect(mode);
+            let (bx, by): (f32, f32) = (w - 5.0, 5.0);
+            // o ponto do ✕ mais perto do centro do botão
+            let (nx, ny) = (bx.clamp(x0, x1), by.clamp(y0, y1));
+            let d = ((nx - bx).powi(2) + (ny - by).powi(2)).sqrt();
+            assert!(d > BADGE_D / 2.0 + 2.0 + 2.0, "{mode:?}: o ✕ fica a {d} do botão de tamanho");
+        }
+    }
 
     /// As porcentagens contam junto com os anéis, de um inteiro ao outro, e param no número.
     #[test]
