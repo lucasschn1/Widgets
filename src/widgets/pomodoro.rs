@@ -86,6 +86,9 @@ const M_RING: (f32, f32, f32, f32) = (77.0, MEDIUM_H / 2.0, 110.0, 8.0);
 const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
 const M_CTRL_Y: f32 = 120.0;
 const M_DOTS_Y: f32 = 86.0;
+/// médio: a hora e a data, embaixo do rótulo "POMODORO"
+const M_CLOCK_Y: f32 = 22.0;
+const M_DATE_Y: f32 = 60.0;
 const M_PLAY_D: f32 = 34.0;
 // grande: cabeçalho, o anel grande no meio, os ciclos, os botões e, no pé, a próxima fase
 const G_HEAD_LINE: f32 = 92.0;
@@ -514,8 +517,10 @@ impl Kind for Pomodoro {
             let size = if timer.len() <= 5 { 25.0 } else { 19.0 };
             self.timer_roll.draw(c, cx, cy - 4.0, &timer, Face::Light, size, digits, Anchor::MM, None);
             c.text(cx, cy + 20.0, label, Face::Semibold, 10.5, color, Anchor::MM, Some(diameter - 24.0));
-            self.clock_roll.draw(c, M_COL_X - 2.0, 10.0, &clock, Face::Light, 32.0, FG, Anchor::LA, None);
-            c.text(M_COL_X, 52.0, &util::short_date(&t), Face::Regular, 11.0, MUTED, Anchor::LA, None);
+            // a coluna da direita: o rótulo, a hora e a data (os anéis ocupam a altura toda)
+            super::draw_label(c, M_COL_X, super::LABEL_Y, "POMODORO", focus);
+            self.clock_roll.draw(c, M_COL_X - 2.0, M_CLOCK_Y, &clock, Face::Light, 30.0, FG, Anchor::LA, None);
+            c.text(M_COL_X, M_DATE_Y, &util::short_date(&t), Face::Regular, 11.0, MUTED, Anchor::LA, None);
             c.text(W - 16.0, M_DOTS_Y, &format!("hoje: {}", stats.1), Face::Regular, 10.5, MUTED, Anchor::RM, None);
             return;
         }

@@ -79,6 +79,8 @@ const POP_TEXT: Rgba = Rgba::rgb(206, 238, 255);
 const UV_STOPS: [(f32, Rgba); 5] =
     [(0.0, Rgba::rgb(48, 209, 88)), (0.3, Rgba::rgb(255, 214, 10)), (0.55, Rgba::rgb(255, 159, 10)), (0.8, Rgba::rgb(255, 69, 58)), (1.0, Rgba::rgb(191, 90, 242))];
 /// faixa de temperatura: do frio ao quente
+/// umidade: do seco (quase branco) ao úmido (o azul claro da chance de chuva, que lê sobre o céu)
+const HUMID_STOPS: [(f32, Rgba); 2] = [(0.0, Rgba(255, 255, 255, 110)), (1.0, POP_TEXT)];
 const TEMP_STOPS: [(f32, Rgba); 4] = [(0.0, Rgba::rgb(90, 200, 250)), (0.45, Rgba::rgb(120, 220, 160)), (0.75, Rgba::rgb(255, 214, 10)), (1.0, Rgba::rgb(255, 120, 40))];
 
 const WEATHER_EVERY: Duration = Duration::from_secs(15 * 60);
@@ -223,7 +225,7 @@ fn fetch_weather(city: String, lat: Option<f64>, lon: Option<f64>, place: Option
         "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}\
          &current=temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,uv_index,is_day,precipitation\
          &hourly=temperature_2m,weather_code,is_day,precipitation_probability&minutely_15=precipitation&forecast_minutely_15=6\
-         &daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,uv_index_max\
+         &daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_direction_10m_dominant,uv_index_max\
          &timezone=auto&forecast_days=7"
     );
     match util::fetch_json(&url) {
@@ -399,6 +401,7 @@ fn process(data: &Value, place: &str) -> Value {
                 "pop": daily["precipitation_probability_max"][d].as_i64().unwrap_or(0),
                 "rain": daily["precipitation_sum"][d].as_f64().unwrap_or(0.0),
                 "wind": round(&daily["wind_speed_10m_max"][d]),
+                "wind_dir": daily["wind_direction_10m_dominant"][d].as_f64(),
                 "uv": daily["uv_index_max"][d].as_f64().unwrap_or(0.0),
                 "sunrise": daily["sunrise"][d].as_str().unwrap_or(""),
                 "sunset": daily["sunset"][d].as_str().unwrap_or(""),
@@ -504,6 +507,10 @@ enum Visual {
     Wind(f64, i64),
     /// sensação: a temperatura real e a sensação
     Feels(i64, i64),
+    /// umidade (%): faixa do seco ao úmido, com o ponto
+    Humidity(i64),
+    /// chance de chuva hora a hora (%): barrinhas
+    Rain(Vec<i64>),
 }
 
 /// Um painel de detalhe: título, valor grande, frase embaixo e o desenho.
@@ -511,6 +518,9 @@ struct Tile {
     title: String,
     value: String,
     sub: String,
+    /// a frase no painel baixo (pequeno e médio), quando a inteira não cabe numa linha ao lado
+    /// do desenho
+    sub_short: Option<String>,
     visual: Visual,
 }
 
@@ -944,23 +954,39 @@ impl Tempo {
         let (rise_m, set_m) = (minute_of_day(&sunrise), minute_of_day(&sunset));
         let frac = |m: Option<i64>| m.map(|m| m as f32 / 1440.0);
         let path = Visual::Sun(frac(rise_m).unwrap_or(0.25), frac(set_m).unwrap_or(0.75), frac(now_min));
+        let tile = |title: &str, value: String, sub: String, visual: Visual| Tile { title: title.into(), value, sub, sub_short: None, visual };
         let sun = match (now_min, rise_m, set_m) {
-            (Some(t), Some(r), Some(_)) if t < r => Tile { title: "NASCER DO SOL".into(), value: hhmm(&sunrise), sub: format!("Pôr do sol: {}", hhmm(&sunset)), visual: path },
-            (Some(t), Some(_), Some(st)) if t < st => Tile { title: "PÔR DO SOL".into(), value: hhmm(&sunset), sub: format!("Nascer do sol: {}", hhmm(&sunrise)), visual: path },
-            _ => Tile { title: "NASCER DO SOL".into(), value: hhmm(&s("sunrise_next")), sub: format!("Pôr do sol: {}", hhmm(&sunset)), visual: path },
+            (Some(t), Some(r), Some(_)) if t < r => tile("NASCER DO SOL", hhmm(&sunrise), format!("Pôr do sol: {}", hhmm(&sunset)), path),
+            (Some(t), Some(_), Some(st)) if t < st => tile("PÔR DO SOL", hhmm(&sunset), format!("Nascer do sol: {}", hhmm(&sunrise)), path),
+            _ => tile("NASCER DO SOL", hhmm(&s("sunrise_next")), format!("Pôr do sol: {}", hhmm(&sunset)), path),
         };
         let rain_today = f("rain_today");
+        let humidity = n("humidity");
+        // as próximas 12 horas da faixa (sem as colunas do nascer e do pôr do sol)
+        let pops: Vec<i64> = self.next_hours().iter().filter(|h| h[2].is_i64()).take(12).map(|h| h[4].as_i64().unwrap_or(0)).collect();
         vec![
-            Tile { title: "SENSAÇÃO".into(), value: deg(n("feels")), sub: feels_sub, visual: Visual::Feels(temp, feels) },
-            Tile { title: "UMIDADE".into(), value: n("humidity").map(|v| format!("{v}%")).unwrap_or_else(|| "--".into()), sub: format!("O ponto de orvalho está em {} agora.", deg(n("dew"))), visual: Visual::None },
-            Tile { title: "VENTO".into(), value: format!("{} km/h", n("wind").unwrap_or(0)), sub: format!("Do {}", wind_from(f("wind_dir"))), visual: Visual::Wind(f("wind_dir"), n("wind").unwrap_or(0)) },
-            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: format!("Máximo de {} hoje", f("uv_max").round()), visual: Visual::Uv(f("uv")) },
+            Tile { sub_short: Some(format!("Real: {temp}°")), ..tile("SENSAÇÃO", deg(n("feels")), feels_sub, Visual::Feels(temp, feels)) },
+            Tile {
+                sub_short: Some(format!("Orvalho: {}", deg(n("dew")))),
+                ..tile(
+                    "UMIDADE",
+                    humidity.map(|v| format!("{v}%")).unwrap_or_else(|| "--".into()),
+                    format!("O ponto de orvalho está em {} agora.", deg(n("dew"))),
+                    humidity.map_or(Visual::None, Visual::Humidity),
+                )
+            },
+            tile("VENTO", format!("{} km/h", n("wind").unwrap_or(0)), format!("Do {}", wind_from(f("wind_dir"))), Visual::Wind(f("wind_dir"), n("wind").unwrap_or(0))),
+            tile("ÍNDICE UV", format!("{}", f("uv").round()), format!("Máximo de {} hoje", f("uv_max").round()), Visual::Uv(f("uv"))),
             sun,
             Tile {
-                title: "CHUVA".into(),
-                value: format!("{}%", n("pop").unwrap_or(0)),
-                sub: if rain_today >= 0.1 { format!("Nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Nas próximas 12\u{a0}h.".into() },
-                visual: Visual::None,
+                // no painel baixo, as barrinhas já mostram as próximas horas
+                sub_short: (rain_today >= 0.1).then(|| format!("{}\u{a0}mm hoje", br1(rain_today))),
+                ..tile(
+                    "CHUVA",
+                    format!("{}%", n("pop").unwrap_or(0)),
+                    if rain_today >= 0.1 { format!("Nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Nas próximas 12\u{a0}h.".into() },
+                    if pops.is_empty() { Visual::None } else { Visual::Rain(pops) },
+                )
             },
         ]
     }
@@ -969,17 +995,29 @@ impl Tempo {
         let n = |k: &str| day.i64_of(k).unwrap_or(0);
         let f = |k: &str| day.f64_of(k).unwrap_or(0.0);
         let s = |k: &str| day.str_of(k).unwrap_or("").to_string();
+        let tile = |title: &str, value: String, sub: String, visual: Visual| Tile { title: title.into(), value, sub, sub_short: None, visual };
         let rain = f("rain");
+        let pops: Vec<i64> = day["hours"].as_array().map(|hs| hs.iter().map(|h| h[4].as_i64().unwrap_or(0)).collect()).unwrap_or_default();
+        // a direção que mais soprou no dia (o clima guardado por uma versão antiga não tem)
+        let wind = match day.f64_of("wind_dir") {
+            Some(dir) => Visual::Wind(dir, n("wind")),
+            None => Visual::None,
+        };
         vec![
-            Tile { title: "CHUVA".into(), value: format!("{}%", n("pop")), sub: if rain >= 0.1 { format!("{} mm no dia", br1(rain)) } else { "Sem chuva prevista".into() }, visual: Visual::None },
-            Tile { title: "VENTO".into(), value: format!("{} km/h", n("wind")), sub: "Máximo do dia".into(), visual: Visual::None },
-            Tile { title: "ÍNDICE UV".into(), value: format!("{}", f("uv").round()), sub: "Máximo do dia".into(), visual: Visual::Uv(f("uv")) },
-            Tile {
-                title: "NASCER DO SOL".into(),
-                value: hhmm(&s("sunrise")),
-                sub: format!("Pôr do sol: {}", hhmm(&s("sunset"))),
-                visual: Visual::Sun(minute_of_day(&s("sunrise")).unwrap_or(360) as f32 / 1440.0, minute_of_day(&s("sunset")).unwrap_or(1080) as f32 / 1440.0, None),
-            },
+            tile(
+                "CHUVA",
+                format!("{}%", n("pop")),
+                if rain >= 0.1 { format!("{} mm no dia", br1(rain)) } else { "Sem chuva prevista".into() },
+                if pops.is_empty() { Visual::None } else { Visual::Rain(pops) },
+            ),
+            tile("VENTO", format!("{} km/h", n("wind")), "Máximo do dia".into(), wind),
+            tile("ÍNDICE UV", format!("{}", f("uv").round()), "Máximo do dia".into(), Visual::Uv(f("uv"))),
+            tile(
+                "NASCER DO SOL",
+                hhmm(&s("sunrise")),
+                format!("Pôr do sol: {}", hhmm(&s("sunset"))),
+                Visual::Sun(minute_of_day(&s("sunrise")).unwrap_or(360) as f32 / 1440.0, minute_of_day(&s("sunset")).unwrap_or(1080) as f32 / 1440.0, None),
+            ),
         ]
     }
 
@@ -1258,6 +1296,16 @@ impl Tempo {
         (top, (LARGE_H - 14.0 - top) / G_DAYS as f32)
     }
 
+    /// O ✕ de voltar à tela principal (diferente das setas de trocar de dia, que ficam na mesma
+    /// linha; o mesmo ✕ do Sistema virado).
+    fn draw_close(c: &mut Canvas, r: Rect4) {
+        let (cx, cy) = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
+        c.fill_circle(cx, cy, 12.0, WHITE.alpha(0.16));
+        let d = 3.8;
+        c.line(&[(cx - d, cy - d), (cx + d, cy + d)], FG, 1.6);
+        c.line(&[(cx + d, cy - d), (cx - d, cy + d)], FG, 1.6);
+    }
+
     fn draw_button(c: &mut Canvas, r: Rect4, left: bool, enabled: bool) {
         let (cx, cy) = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
         c.fill_circle(cx, cy, 12.0, WHITE.alpha(if enabled { 0.16 } else { 0.06 }));
@@ -1322,13 +1370,16 @@ impl Tempo {
         Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 10.5, head);
         c.text(ix + 13.0, y + 11.0, &t.title, Face::Semibold, 9.5, head, Anchor::LA, Some(iw - 13.0));
 
-        // a bússola do vento ocupa o painel alto inteiro, com a velocidade no meio
+        // a bússola do vento ocupa o painel alto, com a velocidade no meio e a frase no pé
         if let (Visual::Wind(deg, speed), true) = (&t.visual, tall) {
-            let (cx, cy) = (x + w / 2.0, y + 26.0 + (h - 34.0) / 2.0);
-            let rad = ((h - 40.0) / 2.0).min(w / 2.0 - 14.0);
+            // (do pé do título até um pouco acima da frase; no alto o círculo é estreito e passa
+            // ao lado do título)
+            let rad = ((h - 46.0) / 2.0).min(w / 2.0 - 14.0);
+            let (cx, cy) = (x + w / 2.0, y + 24.0 + rad);
             Self::draw_compass(c, cx, cy, rad, *deg, true, &fa);
             c.text(cx, cy - 4.0, &speed.to_string(), Face::Semibold, 16.0, fa(FG), Anchor::MM, None);
-            c.text(cx, cy + 10.0, "km/h", Face::Regular, 9.0, fa(FG.alpha(0.7)), Anchor::MM, None);
+            c.text(cx, cy + 9.0, "km/h", Face::Regular, 9.0, fa(FG.alpha(0.7)), Anchor::MM, None);
+            c.text(ix, y + h - 10.0, &t.sub, Face::Regular, 10.5, fa(FG.alpha(0.8)), Anchor::LS, Some(iw));
             return;
         }
 
@@ -1357,9 +1408,9 @@ impl Tempo {
         // a frase no pé (até 2 linhas no alto; 1 no baixo quando há desenho)
         let has_art = !matches!(t.visual, Visual::None | Visual::Wind(..));
         let max_lines = if tall { 2 } else if has_art { 1 } else { 2 };
-        // no painel baixo, a sensação diz só a temperatura real (a frase inteira não cabe)
-        let sub = match t.visual {
-            Visual::Feels(real, _) if !tall => format!("Real: {real}°"),
+        // no painel baixo, a frase curta (a inteira não cabe ao lado do desenho)
+        let sub = match &t.sub_short {
+            Some(short) if !tall => short.clone(),
             _ => t.sub.clone(),
         };
         let lines = c.wrap(&sub, Face::Regular, 10.5, iw, max_lines);
@@ -1370,12 +1421,27 @@ impl Tempo {
         }
         let text_top = y + h - 10.0 - 13.0 * n - 4.0;
 
-        match t.visual {
-            Visual::Uv(uv) => {
+        match &t.visual {
+            &Visual::Uv(uv) => {
                 let by = text_top - 8.0;
                 Self::draw_scale(c, ix, by, iw, (uv as f32 / 11.0).clamp(0.0, 1.0), None, &UV_STOPS, &fa);
             }
-            Visual::Feels(real, feels) => {
+            &Visual::Humidity(pct) => {
+                let by = text_top - 8.0;
+                Self::draw_scale(c, ix, by, iw, (pct as f32 / 100.0).clamp(0.0, 1.0), None, &HUMID_STOPS, &fa);
+            }
+            Visual::Rain(pops) => {
+                if tall {
+                    // entre o valor e a frase, na largura do painel
+                    let (top, bottom) = (value_bottom + 4.0, text_top - 6.0);
+                    Self::draw_rain_bars(c, ix, top, iw, (bottom - top).max(10.0), pops, &fa);
+                } else {
+                    // baixo: ao lado do valor, como o caminho do sol
+                    let x0 = ix + nw + 14.0;
+                    Self::draw_rain_bars(c, x0, vy + 4.0, (ix + iw - x0).max(30.0), vsize - 2.0, pops, &fa);
+                }
+            }
+            &Visual::Feels(real, feels) => {
                 // faixa da temperatura: a real como um traço, a sensação como o ponto
                 let lo = real.min(feels) as f32 - 8.0;
                 let hi = real.max(feels) as f32 + 8.0;
@@ -1383,7 +1449,7 @@ impl Tempo {
                 let by = text_top - 8.0;
                 Self::draw_scale(c, ix, by, iw, pos(feels), Some(pos(real)), &TEMP_STOPS, &fa);
             }
-            Visual::Sun(rise, set, now) => {
+            &Visual::Sun(rise, set, now) => {
                 if tall {
                     Self::draw_sun_path(c, ix, value_bottom + 6.0, iw, (text_top - 4.0 - value_bottom - 6.0).max(12.0), rise, set, now, &fa);
                 } else {
@@ -1392,12 +1458,30 @@ impl Tempo {
                     Self::draw_sun_path(c, x0, vy + 3.0, (ix + iw - x0).max(30.0), vsize - 2.0, rise, set, now, &fa);
                 }
             }
-            Visual::Wind(deg, _) => {
+            &Visual::Wind(deg, _) => {
                 // baixo: a bússola pequena à direita do valor
                 let rad = (h - 30.0).min(52.0) / 2.0;
                 Self::draw_compass(c, x + w - 12.0 - rad, y + 18.0 + (h - 18.0) / 2.0 - 4.0, rad, deg, false, &fa);
             }
             Visual::None => {}
+        }
+    }
+
+    /// Barrinhas da chance de chuva, uma por hora, de baixo para cima; sem chance, só um tracinho
+    /// apagado no pé (a linha do tempo continua lá).
+    fn draw_rain_bars(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, pops: &[i64], fa: &dyn Fn(Rgba) -> Rgba) {
+        if pops.is_empty() {
+            return;
+        }
+        let step = w / pops.len() as f32;
+        let bw = (step * 0.62).clamp(1.5, 7.0);
+        let bottom = y + h;
+        for (i, &p) in pops.iter().enumerate() {
+            let cx = x + step * (i as f32 + 0.5);
+            let frac = (p as f32 / 100.0).clamp(0.0, 1.0);
+            let bh = (h * frac).max(2.0);
+            let col = if p <= 0 { FG.alpha(0.25) } else { POP_TEXT.alpha(0.55 + 0.45 * frac) };
+            c.fill_round_rect(cx - bw / 2.0, bottom - bh, cx + bw / 2.0, bottom, (bw / 2.0).min(1.5), fa(col));
         }
     }
 
@@ -1490,7 +1574,7 @@ impl Tempo {
     }
 
     fn draw_details(&self, c: &mut Canvas, mode: Mode, env: &Env) {
-        Self::draw_button(c, Self::back_rect(), true, true);
+        Self::draw_close(c, Self::back_rect());
         let w = Self::width(mode);
         let city = self.city(env);
         let city = city.split(',').next().unwrap_or(&city).to_string();
@@ -1513,7 +1597,7 @@ impl Tempo {
     /// Um dia: título com a data, as setas, a faixa de horas e (no grande) os painéis.
     fn draw_day(&self, c: &mut Canvas, mode: Mode, d: usize) {
         let Some(day) = self.day(d) else { return };
-        Self::draw_button(c, Self::back_rect(), true, true);
+        Self::draw_close(c, Self::back_rect());
         Self::draw_button(c, Self::prev_rect(), true, d > 0);
         Self::draw_button(c, Self::next_rect(), false, d + 1 < self.day_count());
         let nw = c.text(42.0, 22.0, day.str_of("name").unwrap_or(""), Face::Semibold, 13.5, FG, Anchor::LM, Some(120.0));
@@ -1985,6 +2069,7 @@ pub fn sample_data() -> Value {
             "precipitation_probability_max": [10, 40, 5, 80, 35, 10, 0],
             "precipitation_sum": [0.0, 2.4, 0.0, 12.6, 0.8, 0.0, 0.0],
             "wind_speed_10m_max": [18.0, 22.0, 15.0, 31.0, 26.0, 14.0, 12.0],
+            "wind_direction_10m_dominant": [120.0, 90.0, 60.0, 200.0, 180.0, 135.0, 100.0],
             "uv_index_max": [8.4, 6.1, 9.0, 2.3, 3.4, 7.8, 8.9]
         }
     })
@@ -2097,6 +2182,45 @@ mod tests {
         }
         assert_ne!(POP_TEXT, RAIN_BLUE);
         assert!(POP_TEXT.0 > 190 && POP_TEXT.1 > 220, "a chance de chuva bem clara sobre o céu");
+    }
+
+    /// Todo painel de detalhe tem um desenho (a umidade e a chuva tinham só o número, com o meio
+    /// vazio), a chuva traz as horas certas e, no painel baixo, a frase cabe numa linha ao lado
+    /// do desenho, sem "...".
+    #[test]
+    fn every_tile_has_a_drawing_and_short_phrases_fit() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let probe = Canvas::new(1, 1, 1.0);
+        let t = Tempo::sample("detalhes", 0, 0.0, Mode::G);
+        let now = t.now_tiles();
+        let day = Tempo::day_tiles(&t.day(3).unwrap());
+        for tile in now.iter().chain(day.iter()) {
+            assert!(!matches!(tile.visual, Visual::None), "{} sem desenho", tile.title);
+        }
+        // agora: as próximas 12 horas, sem as colunas do nascer e do pôr do sol
+        let Some(Visual::Rain(pops)) = now.iter().find(|t| t.title == "CHUVA").map(|t| &t.visual) else { panic!("chuva sem barras") };
+        assert_eq!(pops.len(), 12);
+        // um dia: as 24 horas dele, com a chuva da tarde (70%) no sample
+        let Some(Visual::Rain(pops)) = day.iter().find(|t| t.title == "CHUVA").map(|t| &t.visual) else { panic!("chuva do dia sem barras") };
+        assert_eq!(pops.len(), 24);
+        assert_eq!(pops.iter().max(), Some(&70));
+        assert!(matches!(day.iter().find(|t| t.title == "VENTO").unwrap().visual, Visual::Wind(d, 31) if d == 200.0));
+        // painel baixo (o mais estreito é o do pequeno)
+        let (_, _, w, _) = Tempo::tile_slots(Mode::P)[0];
+        let iw = w - 24.0;
+        for tile in &now {
+            if matches!(tile.visual, Visual::Wind(..)) {
+                continue;
+            }
+            let sub = tile.sub_short.as_deref().unwrap_or(&tile.sub);
+            assert!(probe.text_width(sub, Face::Regular, 10.5) <= iw, "{}: \"{sub}\" não cabe no painel baixo", tile.title);
+        }
+        // o clima guardado por uma versão antiga (sem a direção do vento do dia): sem bússola
+        let mut old = t.day(3).unwrap();
+        old.as_object_mut().unwrap().remove("wind_dir");
+        assert!(matches!(Tempo::day_tiles(&old)[1].visual, Visual::None));
     }
 
     /// A temperatura que mudou rola como num hodômetro e o widget pede quadros até ela parar.

@@ -23,6 +23,9 @@ const BACK_LIST_Y: f32 = 44.0;
 const BACK_N: usize = 3;
 /// grande: o cabeçalho "SISTEMA" em cima empurra o resto para baixo
 const G_TOP: f32 = 24.0;
+/// médio: as linhas descem um pouco para o rótulo "SISTEMA" caber em cima delas (a última barra
+/// termina junto com o anel de fora)
+const M_TOP: f32 = 12.0;
 const SEG_Y: f32 = 150.0 + G_TOP;
 const G_LIST_Y: f32 = 194.0 + G_TOP;
 /// rodapé (rede e tempo ligado) no pé do cartão, logo depois da lista
@@ -106,6 +109,18 @@ fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, wd: f32) 
     for k in 0..4 {
         c.fill_circle(tx, ty, wd / 2.0 + 0.6 * k as f32, Rgba(0, 0, 0, 22 - 4 * k as u8));
     }
+}
+
+/// espaço entre o nome e a porcentagem no título do pequeno virado
+const BACK_P_GAP: f32 = 5.0;
+
+/// Letra do título do pequeno virado ("Memória 68%"): 12,5, ou menor até caber em `room`.
+fn back_p_title_size(c: &Canvas, name: &str, pct: &str, room: f32) -> f32 {
+    let mut size = 12.5;
+    while size > 10.5 && c.text_width(name, Face::Semibold, size) + BACK_P_GAP + c.text_width(pct, Face::Semibold, size) > room {
+        size -= 0.5;
+    }
+    size
 }
 
 fn ease_out(t: f32) -> f32 {
@@ -366,7 +381,7 @@ impl System {
             let col = (SMALL - 16.0) / 3.0;
             (8.0 + col * i as f32, 118.0, 8.0 + col * (i + 1) as f32, SMALL - 6.0)
         } else {
-            let top = if mode == Mode::G { G_TOP } else { 0.0 };
+            let top = if mode == Mode::G { G_TOP } else { M_TOP };
             let y = 22.0 + top + 36.0 * i as f32;
             (148.0, y - 6.0, W - 10.0, y + 30.0)
         }
@@ -482,8 +497,13 @@ impl System {
         }
     }
 
-    /// Cabeçalho do grande: "SISTEMA" na cor da CPU e os núcleos à direita.
-    fn draw_header(&self, c: &mut Canvas) {
+    /// Cabeçalho: "SISTEMA" na cor da CPU; no grande, em cima de tudo e com os núcleos à
+    /// direita; no médio, no alto da coluna das medidas (os anéis ocupam a altura toda).
+    fn draw_header(&self, c: &mut Canvas, mode: Mode) {
+        if mode == Mode::M {
+            super::draw_label(c, Self::metric_rect(mode, 0).0, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+            return;
+        }
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         super::draw_label(c, PAD, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
         c.text(W - PAD, super::LABEL_Y, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
@@ -501,8 +521,7 @@ impl System {
                 let cx = (x0 + x1) / 2.0;
                 let _ = text;
                 draw_counting(c, cx, y0 + 8.0, pct, "%", Face::Semibold, 13.5, color(i), Anchor::MM);
-                let label = if i == 1 { "RAM" } else { NAMES[i] };
-                c.text(cx, y0 + 23.0, label, Face::Regular, 10.0, MUTED, Anchor::MM, None);
+                c.text(cx, y0 + 23.0, NAMES[i], Face::Regular, 10.0, MUTED, Anchor::MM, Some(x1 - x0 - 2.0));
             } else {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
@@ -574,9 +593,12 @@ impl System {
     fn draw_back_p(&self, c: &mut Canvas, which: usize) {
         let pct = format!("{}%", (self.target[which] * 100.0).round());
         c.fill_circle(17.0, 22.0, 4.0, color(which));
-        let name = if which == 1 { "RAM" } else { NAMES[which] };
-        let nw = c.text(26.0, 22.0, name, Face::Semibold, 12.5, FG, Anchor::LM, None);
-        c.text(26.0 + nw + 6.0, 22.0, &pct, Face::Semibold, 12.5, color(which), Anchor::LM, None);
+        // o nome inteiro ("Memória", como no médio e no grande) e a porcentagem antes do ✕ (a letra
+        // diminui um pouco se não couber)
+        let room = Self::close_rect(Mode::P).0 - 4.0 - 26.0;
+        let size = back_p_title_size(c, NAMES[which], &pct, room);
+        let nw = c.text(26.0, 22.0, NAMES[which], Face::Semibold, size, FG, Anchor::LM, None);
+        c.text(26.0 + nw + BACK_P_GAP, 22.0, &pct, Face::Semibold, size, color(which), Anchor::LM, None);
         self.draw_close(c, Mode::P);
         let rows = self.rows(which);
         if rows.is_empty() {
@@ -642,8 +664,11 @@ impl Kind for System {
         }
         self.draw_rings(c, mode);
         self.draw_metrics(c, mode);
+        if mode == Mode::M {
+            self.draw_header(c, mode);
+        }
         if mode == Mode::G {
-            self.draw_header(c);
+            self.draw_header(c, mode);
             let which = self.current(mode).unwrap_or(1);
             self.draw_seg(c, which);
             self.draw_list(c, which, G_LIST_Y, LIST_N, ROW_H);
@@ -778,6 +803,33 @@ mod tests {
             let d = ((nx - bx).powi(2) + (ny - by).powi(2)).sqrt();
             assert!(d > BADGE_D / 2.0 + 2.0 + 2.0, "{mode:?}: o ✕ fica a {d} do botão de tamanho");
         }
+    }
+
+    /// "Memória" em todos os tamanhos (o pequeno dizia "RAM"): o nome inteiro cabe na coluna do
+    /// pequeno e, virado, o título com 100% cabe antes do ✕; no médio, o rótulo e as três linhas
+    /// cabem na altura dos anéis.
+    #[test]
+    fn memory_has_one_name_and_fits() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let probe = Canvas::new(1, 1, 1.0);
+        assert!(!NAMES.contains(&"RAM"));
+        for i in 0..3 {
+            let (x0, _, x1, _) = System::metric_rect(Mode::P, i);
+            assert!(probe.text_width(NAMES[i], Face::Regular, 10.0) <= x1 - x0 - 2.0, "{} não cabe no pequeno", NAMES[i]);
+            let room = System::close_rect(Mode::P).0 - 4.0 - 26.0;
+            let size = back_p_title_size(&probe, NAMES[i], "100%", room);
+            assert!(size >= 11.0, "{}: letra {size} no pequeno virado", NAMES[i]);
+            assert!(probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size) <= room);
+        }
+        // médio: a primeira linha começa embaixo do rótulo e a última barra termina com os anéis
+        let (_, cy, d, _, _) = System::rings_geom(Mode::M);
+        let (_, first_top, _, _) = System::metric_rect(Mode::M, 0);
+        let (_, _, _, last_bottom) = System::metric_rect(Mode::M, 2);
+        assert!(first_top >= super::super::LABEL_Y + super::super::LABEL_SIZE + 2.0, "a CPU encosta no rótulo");
+        let last_bar = last_bottom - 30.0 + 6.0 + 19.0 + 4.0;
+        assert!(last_bar <= cy + d / 2.0 + 0.5, "a última barra passa do anel: {last_bar}");
     }
 
     /// As porcentagens contam junto com os anéis, de um inteiro ao outro, e param no número.

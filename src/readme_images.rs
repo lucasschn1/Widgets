@@ -846,6 +846,8 @@ fn sizes_sheet() {
         ("Tempo", Box::new(|m| (Box::new(Tempo::sample("inicio", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
         ("Tempo: condição longa", Box::new(|m| (Box::new(Tempo::sample_sky(1, 14.25, false, m)) as Box<dyn Kind>, empty_cfg()))),
         ("Tempo: detalhes",Box::new(|m| (Box::new(Tempo::sample("detalhes", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tempo: detalhes 2", Box::new(|m| (Box::new(Tempo::sample("detalhes", 1, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
+        ("Tempo: detalhes 6", Box::new(|m| (Box::new(Tempo::sample("detalhes", 5, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
         ("Tempo: um dia", Box::new(|m| (Box::new(Tempo::sample("dia3", 0, 0.0, m)) as Box<dyn Kind>, empty_cfg()))),
         ("Sistema", Box::new(|m| (Box::new(System::sample_flipped(None, m)) as Box<dyn Kind>, empty_cfg()))),
         ("Sistema: virado", Box::new(|m| (Box::new(System::sample_flipped(Some(1), m)) as Box<dyn Kind>, empty_cfg()))),

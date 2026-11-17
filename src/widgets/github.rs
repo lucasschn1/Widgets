@@ -405,6 +405,9 @@ const GRID_X: f32 = C_PAD;
 const P_WEEKS: i64 = 12;
 const P_STEP: f32 = (SMALL - 2.0 * PAD + GAP) / P_WEEKS as f32;
 const P_GRID_Y: f32 = SMALL - PAD - (7.0 * P_STEP - GAP);
+/// pequeno: o número grande no alto e a sequência ("5 dias seguidos") embaixo dele
+const P_NUM_Y: f32 = 8.0;
+const P_STREAK_Y: f32 = 43.0;
 // médio e grande: cabeçalho, o placar (número grande) e o mapa; no grande, as atividades
 const HEAD_Y: f32 = super::LABEL_Y;
 const NUM_Y: f32 = 29.0;
@@ -789,6 +792,17 @@ fn glyph(c: &mut Canvas, kind: &str, cx: f32, cy: f32, size: f32, color: Rgba, b
     }
 }
 
+/// A sequência no pequeno, por extenso: "5 dias seguidos", "1 dia seguido" ou, sem sequência,
+/// o que já tem hoje.
+fn small_streak(streak: i64, today: i64) -> String {
+    match (streak, today) {
+        (0, 0) => "nada hoje ainda".into(),
+        (0, n) => format!("hoje {n}"),
+        (1, _) => "1 dia seguido".into(),
+        (n, _) => format!("{n} dias seguidos"),
+    }
+}
+
 impl Kind for GitHub {
     fn key(&self) -> &'static str {
         "github"
@@ -802,8 +816,11 @@ impl Kind for GitHub {
             let h = Layout::of(mode).h;
             if self.status.loading {
                 // buscando pela primeira vez: o título e o esqueleto pulsando no lugar do resto
-                // (na mesma altura de quando os dados chegam: o título não pula)
-                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                // (na mesma altura de quando os dados chegam: o título não pula; o pequeno não
+                // tem título)
+                if mode != Mode::P {
+                    super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                }
             } else if mode == Mode::G {
                 super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
@@ -828,11 +845,11 @@ impl Kind for GitHub {
         }
         let days = if streak == 1 { "dia" } else { "dias" };
         if mode == Mode::P {
-            // cabeçalho, o placar e o mapa das últimas semanas
-            super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
-            c.text(SMALL - PAD, HEAD_Y, &format!("{streak} {days}"), Face::Regular, 10.5, MUTED, Anchor::RA, None);
+            // o placar, a sequência por extenso e o mapa das últimas semanas (sem o rótulo: no
+            // pequeno nenhum widget tem, e o mapa verde já diz o que é)
             // (o número grande começa 1 ponto antes: o espaço do lado do dígito o afastava da margem)
-            c.text(PAD - 1.0, 26.0, &grouped, Face::Light, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
+            c.text(PAD - 1.0, P_NUM_Y, &grouped, Face::Light, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
+            c.text(PAD, P_STREAK_Y, &small_streak(streak, today), Face::Regular, 10.5, MUTED, Anchor::LA, Some(SMALL - 2.0 * PAD));
             self.heatmap(c, mode);
             return;
         }
@@ -1001,7 +1018,11 @@ impl Kind for GitHub {
             return Vec::new();
         }
         match mode {
-            Mode::P => vec![(PAD, 30.0, PAD + 70.0, 54.0, 6.0), (PAD, P_GRID_Y, SMALL - PAD, SMALL - PAD, 8.0)],
+            Mode::P => vec![
+                (PAD, P_NUM_Y + 6.0, PAD + 70.0, P_NUM_Y + 28.0, 6.0),
+                (PAD, P_STREAK_Y + 3.0, PAD + 90.0, P_STREAK_Y + 11.0, 4.0),
+                (PAD, P_GRID_Y, SMALL - PAD, SMALL - PAD, 8.0),
+            ],
             Mode::M | Mode::G => {
                 // o número grande, as duas linhas ao lado dele e o mapa de contribuições
                 let mut v = vec![
