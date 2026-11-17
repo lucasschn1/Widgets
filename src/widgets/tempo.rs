@@ -73,6 +73,8 @@ fn top_desc_size(big: bool) -> f32 {
     if big { 13.5 } else { 12.5 }
 }
 const RAIN_BLUE: Rgba = CYAN;
+/// a chance de chuva escrita sobre o céu: azul bem claro (o ciano some no céu azul)
+const POP_TEXT: Rgba = Rgba::rgb(206, 238, 255);
 /// faixa do índice UV: baixo, moderado, alto, muito alto e extremo
 const UV_STOPS: [(f32, Rgba); 5] =
     [(0.0, Rgba::rgb(48, 209, 88)), (0.3, Rgba::rgb(255, 214, 10)), (0.55, Rgba::rgb(255, 159, 10)), (0.8, Rgba::rgb(255, 69, 58)), (1.0, Rgba::rgb(191, 90, 242))];
@@ -957,7 +959,7 @@ impl Tempo {
             Tile {
                 title: "CHUVA".into(),
                 value: format!("{}%", n("pop").unwrap_or(0)),
-                sub: if rain_today >= 0.1 { format!("Chance nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Chance nas próximas 12\u{a0}h.".into() },
+                sub: if rain_today >= 0.1 { format!("Nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Nas próximas 12\u{a0}h.".into() },
                 visual: Visual::None,
             },
         ]
@@ -1011,22 +1013,28 @@ impl Tempo {
             // a chance de chuva fica junto da temperatura, menor, sem encostar no ícone
             let pop = h[4].as_i64().unwrap_or(0);
             if pop >= 20 {
-                c.text(cx, y + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
+                c.text(cx, y + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
             }
             c.text(cx, y + 50.0, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
         }
         c.pop_clip();
         let max = Self::max_scroll(list.len());
         let (l, r) = Self::chevron_rects(y);
-        // setas pequenas e discretas, na margem (não ficam por cima das horas)
+        // nas pontas, uma aba alta e fina com a setinha (rolar as horas): bem diferente dos
+        // botões redondos de trocar de dia, no título
         let cy = y + 26.0;
+        let (t0, t1) = (y + 4.0, y + STRIP_H - 10.0);
         if off > 0.05 {
-            let x = (l.0 + l.2) / 2.0 + 2.0;
-            c.line(&[(x + 2.0, cy - 4.0), (x - 2.0, cy), (x + 2.0, cy + 4.0)], FG.alpha(0.55), 1.4);
+            let (a, b) = (l.0 + 4.0, l.2 - 4.0);
+            c.fill_round_rect(a, t0, b, t1, (b - a) / 2.0, WHITE.alpha(0.10));
+            let x = (a + b) / 2.0 + 1.0;
+            c.line(&[(x + 1.8, cy - 3.5), (x - 1.8, cy), (x + 1.8, cy + 3.5)], FG.alpha(0.8), 1.4);
         }
         if off < max - 0.05 {
-            let x = (r.0 + r.2) / 2.0 - 2.0;
-            c.line(&[(x - 2.0, cy - 4.0), (x + 2.0, cy), (x - 2.0, cy + 4.0)], FG.alpha(0.55), 1.4);
+            let (a, b) = (r.0 + 4.0, r.2 - 4.0);
+            c.fill_round_rect(a, t0, b, t1, (b - a) / 2.0, WHITE.alpha(0.10));
+            let x = (a + b) / 2.0 - 1.0;
+            c.line(&[(x - 1.8, cy - 3.5), (x + 1.8, cy), (x - 1.8, cy + 3.5)], FG.alpha(0.8), 1.4);
         }
     }
 
@@ -1087,7 +1095,7 @@ impl Tempo {
             c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + icon_y);
             let pop = h[4].as_i64().unwrap_or(0);
             if big && pop >= 20 {
-                c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
+                c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
             }
             match h[2].as_str() {
                 Some(name) => {
@@ -1127,7 +1135,7 @@ impl Tempo {
             let icon_cy = if pop >= 30 { cy - 5.0 } else { cy };
             c.image(&weather_art(d[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), 88.0 - icon / 2.0, icon_cy - icon / 2.0);
             if pop >= 30 {
-                c.text(88.0, icon_cy + icon / 2.0 + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, RAIN_BLUE, Anchor::MA, None);
+                c.text(88.0, icon_cy + icon / 2.0 + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
             }
             let (mn, mx) = (d[2].as_i64().unwrap_or(0) as f32, d[3].as_i64().unwrap_or(0) as f32);
             c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Regular, 13.0, MUTED, Anchor::RM, None);
@@ -2068,6 +2076,28 @@ impl Tempo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As frases dos painéis não deixam uma palavra sozinha na segunda linha (como o "12 h." da
+    /// chuva), e a chance de chuva sobre o céu não usa o ciano, que some no azul.
+    #[test]
+    fn tile_phrases_break_well_and_rain_chance_reads() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let probe = Canvas::new(1, 1, 1.0);
+        let t = Tempo::sample("detalhes", 0, 0.0, Mode::G);
+        let iw = (W - 2.0 * PAD - 8.0) / 2.0 - 24.0; // painel do grande, sem as margens de dentro
+        let tiles = t.now_tiles();
+        assert!(tiles.iter().any(|t| t.title == "CHUVA"));
+        for tile in tiles {
+            let lines = probe.wrap(&tile.sub, Face::Regular, 10.5, iw, 2);
+            if lines.len() == 2 {
+                assert!(lines[1].split_whitespace().count() >= 2, "{}: \"{}\" sozinho na segunda linha", tile.title, lines[1]);
+            }
+        }
+        assert_ne!(POP_TEXT, RAIN_BLUE);
+        assert!(POP_TEXT.0 > 190 && POP_TEXT.1 > 220, "a chance de chuva bem clara sobre o céu");
+    }
 
     /// A temperatura que mudou rola como num hodômetro e o widget pede quadros até ela parar.
     #[test]

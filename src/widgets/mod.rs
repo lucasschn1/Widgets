@@ -39,6 +39,14 @@ pub const LARGE_H: f32 = 448.0;
 /// A margem de dentro do cartão, a mesma em todos os widgets e tamanhos (como os 16 pt dos
 /// widgets do macOS): o texto e os gráficos começam e terminam a esta distância da borda.
 pub const CARD_PAD: f32 = 16.0;
+/// O rótulo do widget no cabeçalho ("GITHUB", "SISTEMA", "POMODORO"...): a mesma letra e a
+/// mesma altura em todos (lado a lado, ficam alinhados), cada um na cor de destaque dele.
+pub const LABEL_Y: f32 = 13.0;
+pub const LABEL_SIZE: f32 = 10.0;
+pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::theme::Rgba) {
+    c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, color, crate::gfx::Anchor::LA, None);
+}
+
 /// cantos de cada tamanho
 pub const SMALL_RADIUS: f32 = 24.0;
 pub const MEDIUM_RADIUS: f32 = 26.0;

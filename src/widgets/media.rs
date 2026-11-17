@@ -59,8 +59,37 @@ fn source_color(kind: &str) -> Rgba {
     match kind {
         "spotify" => Rgba::rgb(30, 215, 96),
         "youtube" => Rgba::rgb(255, 72, 72),
-        _ => MUTED,
+        // "MÍDIA": o azul do equalizador (o rótulo é sempre na cor de destaque, nunca cinza)
+        _ => Rgba::rgb(100, 170, 255),
     }
+}
+
+/// O Spotify está instalado (o endereço "spotify:" abre o app)?
+fn spotify_installed() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| !win::registry(r"Software\Classes\spotify", "").is_empty())
+}
+
+/// Sem nada tocando: o botão que abre um player (o texto e o endereço), conforme a fonte
+/// escolhida; no automático, o Spotify se estiver instalado.
+fn launcher(pref: &str) -> (&'static str, &'static str) {
+    const SPOTIFY: (&str, &str) = ("Abrir Spotify", "spotify:");
+    const YOUTUBE: (&str, &str) = ("Abrir YouTube", "https://music.youtube.com");
+    match pref {
+        "spotify" => SPOTIFY,
+        "youtube" => YOUTUBE,
+        _ if spotify_installed() => SPOTIFY,
+        _ => YOUTUBE,
+    }
+}
+
+/// O maior tamanho de letra (de `size` até `min`) em que `text` cabe em `w`.
+fn fit_size(c: &Canvas, text: &str, face: Face, size: f32, min: f32, w: f32) -> f32 {
+    let mut s = size;
+    while s > min && c.text_width(text, face, s) > w {
+        s -= 0.25;
+    }
+    s
 }
 
 fn idle_gradient(pref: &str) -> (Rgba, Rgba) {
@@ -667,6 +696,7 @@ const SHUFFLE: u32 = 6;
 const REPEAT: u32 = 7;
 const SOURCE: u32 = 10; // + índice em SOURCES
 const ISLAND: u32 = 8;
+const LAUNCH: u32 = 9;
 const SEEK: u32 = 1000; // + milésimos da música (0 a 1000)
 const VOLUME: u32 = 3000; // + volume (0 a 100)
 
@@ -1149,6 +1179,34 @@ impl Media {
         }
     }
 
+    /// Sem nada tocando, no médio e no grande: onde fica o botão "Abrir Spotify" (x0, y0, x1, y1).
+    fn launch_rect(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
+        if self.has_media() {
+            return None;
+        }
+        match mode {
+            Mode::P => None,
+            Mode::M => Some((M_TEXT_X, 104.0, M_TEXT_X + M_TEXT_W, 132.0)),
+            Mode::G => Some((TEXT_X, G_TEXT_Y + 88.0, TEXT_X + 168.0, G_TEXT_Y + 120.0)),
+        }
+    }
+
+    /// O botão "▶ Abrir Spotify": uma pílula de vidro claro com o triângulo e o nome.
+    fn draw_launch(&self, c: &mut Canvas, mode: Mode) {
+        let Some((x0, y0, x1, y1)) = self.launch_rect(mode) else { return };
+        let h = y1 - y0;
+        c.fill_round_rect(x0, y0, x1, y1, h / 2.0, WHITE.alpha(0.16));
+        let label = launcher(&self.pref()).0;
+        let size = if mode == Mode::G { 12.5 } else { 11.5 };
+        let tw = c.text_width(label, Face::Semibold, size);
+        let icon = size * 0.8;
+        let gap = 7.0;
+        let left = (x0 + x1) / 2.0 - (icon + gap + tw) / 2.0;
+        let cy = (y0 + y1) / 2.0;
+        drawing::play(c, left + icon / 2.0, cy, icon, FG);
+        c.text(left + icon + gap, cy, label, Face::Semibold, size, FG, Anchor::LM, None);
+    }
+
     fn draw_controls(&self, c: &mut Canvas, mode: Mode) {
         let dim = WHITE.alpha(0.3);
         for (ctl, cx, cy, size, enabled, circle) in self.controls(mode) {
@@ -1321,7 +1379,9 @@ impl Media {
                     self.draw_title(c, m, mode, has_bg);
                     c.text(x, 108.0, &m.artist, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
                 } else {
-                    c.text(x, 92.0, &funny_title, Face::Semibold, 12.5, FG, Anchor::LA, Some(C_TEXT_W));
+                    // a frase inteira (a letra diminui um pouco antes de cortar com "...")
+                    let size = fit_size(c, &funny_title, Face::Semibold, 12.5, 10.5, C_TEXT_W);
+                    c.text(x, 92.0, &funny_title, Face::Semibold, size, FG, Anchor::LA, Some(C_TEXT_W));
                     for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.0, C_TEXT_W, 2).iter().enumerate() {
                         c.text(x, 110.0 + 15.0 * i as f32, line, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
                     }
@@ -1333,23 +1393,24 @@ impl Media {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 28.0);
                     }
-                    c.text(x, 16.0, source_label(m.kind), Face::Semibold, 9.5, source_color(m.kind), Anchor::LA, None);
+                    super::draw_label(c, x, 16.0, source_label(m.kind), source_color(m.kind));
                     self.draw_title(c, m, mode, has_bg);
                     c.text(x, 50.0, &m.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                 } else {
                     let kind = self.pref();
-                    c.text(x, 16.0, source_label(&kind), Face::Semibold, 9.5, source_color(&kind), Anchor::LA, None);
+                    super::draw_label(c, x, 16.0, source_label(&kind), source_color(&kind));
                     c.text(x, 30.0, &funny_title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
-                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.5, w, 3).iter().enumerate() {
+                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
                         c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                     }
+                    self.draw_launch(c, mode);
                 }
             }
             Mode::G => {
                 let (x, w) = (TEXT_X, TEXT_W);
                 let kind = m.map(|m| m.kind.to_string()).unwrap_or_else(|| self.pref());
                 let y = G_TEXT_Y;
-                c.text(x, y, source_label(&kind), Face::Semibold, 10.0, source_color(&kind), Anchor::LA, None);
+                super::draw_label(c, x, y, source_label(&kind), source_color(&kind));
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
                         self.note(c, mode, 44.0);
@@ -1362,6 +1423,7 @@ impl Media {
                     for (i, line) in c.wrap(&funny_sub, Face::Regular, 12.0, w, 2).iter().enumerate() {
                         c.text(x, y + 37.0 + 17.0 * i as f32, line, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
                     }
+                    self.draw_launch(c, mode);
                 }
             }
         }
@@ -1452,6 +1514,11 @@ impl Kind for Media {
                 return Some(SEEK + (f * 1000.0).round() as u32);
             }
         }
+        if let Some((x0, y0, x1, y1)) = self.launch_rect(mode) {
+            if (x0..=x1).contains(&x) && (y0..=y1).contains(&y) {
+                return Some(LAUNCH);
+            }
+        }
         // fora dos botões: o widget vira a ilha flutuante
         let _ = env;
         self.has_media().then_some(ISLAND)
@@ -1470,6 +1537,7 @@ impl Kind for Media {
                 let _ = self.tx.send(Cmd::Prev);
             }
             OPEN_PLAYER => self.open_player(ctx),
+            LAUNCH => ctx.open(launcher(&self.pref()).1),
             ISLAND => ctx.out.push(Request::Island),
             SHUFFLE => {
                 let _ = self.tx.send(Cmd::Shuffle(m.shuffle != Some(true)));
@@ -1516,6 +1584,9 @@ impl Kind for Media {
         }
         if let Some((_, (x0, y0, x1, y1))) = self.toggle_at(x, y, mode) {
             return Some((x0, y0, x1, y1, 10.0));
+        }
+        if let Some((x0, y0, x1, y1)) = self.launch_rect(mode).filter(|r| (r.0..=r.2).contains(&x) && (r.1..=r.3).contains(&y)) {
+            return Some((x0, y0, x1, y1, (y1 - y0) / 2.0));
         }
         // a barra de progresso "engrossa" com o mouse em cima
         if let (Some(_), Some((x0, x1, by, h))) = (self.bar_at(x, y, mode), self.bar_geom(mode)) {
@@ -2130,5 +2201,31 @@ mod cover_tests {
         let small = gfx::resize(&big, 150, 83);
         assert!(youtube::same_picture(&small, &big));
         assert!(!youtube::same_picture(&small, &picture(1280, 720, 9)));
+    }
+
+    /// Sem nada tocando: as frases cabem inteiras no pequeno (a letra diminui, sem "..."), e o
+    /// médio e o grande têm o botão para abrir o player, dentro do cartão e embaixo do texto.
+    #[test]
+    fn idle_shows_whole_phrases_and_a_way_to_play() {
+        com();
+        let probe = Canvas::new(1, 1, 1.0);
+        for (title, _) in FUNNY {
+            let size = fit_size(&probe, title, Face::Semibold, 12.5, 10.5, C_TEXT_W);
+            assert!(probe.text_width(title, Face::Semibold, size) <= C_TEXT_W, "{title} não cabe no pequeno");
+        }
+        let idle = Media::sample_idle();
+        assert_eq!(idle.launch_rect(Mode::P), None);
+        for (mode, text_bottom) in [(Mode::M, 50.0 + 16.0 * 2.0), (Mode::G, G_TEXT_Y + 37.0 + 17.0 * 2.0)] {
+            let (x0, y0, x1, y1) = idle.launch_rect(mode).unwrap();
+            let lay = idle.layout_of(mode);
+            assert!(y0 >= text_bottom && x1 <= lay.w - 14.0 && y1 <= lay.h - 14.0 && x0 >= 14.0, "{mode:?}: {x0},{y0} {x1},{y1}");
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            assert_eq!(idle.hit(cx, cy, mode, &Env { cfg: &json!({}), key: "midia" }), Some(LAUNCH), "{mode:?}");
+            assert!(idle.hot_rect(cx, cy, mode, &Env { cfg: &json!({}), key: "midia" }).is_some());
+        }
+        // tocando, nada do botão
+        assert_eq!(Media::sample().launch_rect(Mode::M), None);
+        assert_eq!(launcher("spotify").1, "spotify:");
+        assert!(launcher("youtube").1.starts_with("https://"));
     }
 }

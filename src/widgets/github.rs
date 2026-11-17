@@ -406,7 +406,7 @@ const P_WEEKS: i64 = 12;
 const P_STEP: f32 = (SMALL - 2.0 * PAD + GAP) / P_WEEKS as f32;
 const P_GRID_Y: f32 = SMALL - PAD - (7.0 * P_STEP - GAP);
 // médio e grande: cabeçalho, o placar (número grande) e o mapa; no grande, as atividades
-const HEAD_Y: f32 = 13.0;
+const HEAD_Y: f32 = super::LABEL_Y;
 const NUM_Y: f32 = 29.0;
 /// o mapa fica no pé do médio, com a mesma margem dos lados
 const GRID_Y: f32 = MEDIUM_H - C_PAD - heat_h();
@@ -492,6 +492,7 @@ impl GitHub {
                 ("star", "Deu estrela", "rust-lang/rust", 20.0),
                 ("issue", "Erro ao abrir no segundo monitor", "meu-projeto  ·  #44", 30.0),
                 ("commit", "Corrige o encaixe entre monitores", "meu-projeto  ·  main", 50.0),
+                ("branch", "Criou o branch feat/tema-claro", "meu-projeto", 72.0),
             ]
                 .iter()
                 .map(|(icon, title, info, h)| Row { title: title.to_string(), info: info.to_string(), icon: icon.to_string(), when: now - h * 3600.0, url: String::new() })
@@ -801,13 +802,13 @@ impl Kind for GitHub {
             let h = Layout::of(mode).h;
             if self.status.loading {
                 // buscando pela primeira vez: o título e o esqueleto pulsando no lugar do resto
-                let (x, y) = if mode == Mode::P { (PAD, 16.0) } else { (PAD, 19.0) };
-                c.text(x, y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+                // (na mesma altura de quando os dados chegam: o título não pula)
+                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
             } else if mode == Mode::G {
-                c.text(PAD, 19.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
             } else if mode == Mode::P {
-                c.text(PAD, 16.0, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
                 for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 2.0 * PAD, 4).iter().enumerate() {
                     c.text(PAD, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
                 }
@@ -828,20 +829,20 @@ impl Kind for GitHub {
         let days = if streak == 1 { "dia" } else { "dias" };
         if mode == Mode::P {
             // cabeçalho, o placar e o mapa das últimas semanas
-            c.text(PAD, HEAD_Y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+            super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
             c.text(SMALL - PAD, HEAD_Y, &format!("{streak} {days}"), Face::Regular, 10.5, MUTED, Anchor::RA, None);
             // (o número grande começa 1 ponto antes: o espaço do lado do dígito o afastava da margem)
-            c.text(PAD - 1.0, 26.0, &grouped, Face::Semibold, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
+            c.text(PAD - 1.0, 26.0, &grouped, Face::Light, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
             self.heatmap(c, mode);
             return;
         }
-        c.text(PAD, HEAD_Y, "GITHUB", Face::Semibold, 10.0, GITHUB_GREEN, Anchor::LA, None);
+        super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
         let user = if d.user.is_empty() { env.wcfg().str_of("usuario").unwrap_or("").to_string() } else { d.user.clone() };
         if !user.is_empty() {
             c.text(W - PAD, HEAD_Y, &format!("@{user}"), Face::Regular, 10.5, MUTED, Anchor::RA, Some(180.0));
         }
         // o placar: o número grande e, ao lado, o que ele conta
-        let nw = c.text(PAD - 1.0, NUM_Y - 3.0, &grouped, Face::Semibold, 28.0, FG, Anchor::LA, None);
+        let nw = c.text(PAD - 1.0, NUM_Y - 3.0, &grouped, Face::Light, 28.0, FG, Anchor::LA, None);
         let sx = PAD + nw + 10.0;
         c.text(sx, NUM_Y + 3.0, "contribuições no último ano", Face::Regular, 11.5, MUTED, Anchor::LA, Some(W - PAD - sx));
         let today = match today {

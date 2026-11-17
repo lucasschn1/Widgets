@@ -393,9 +393,10 @@ impl Pomodoro {
         }
     }
 
+    /// Sobre o relógio (que abre o Relógio do Windows)? O pequeno não tem relógio.
     fn on_clock(x: f32, y: f32, mode: Mode) -> bool {
         let (x0, y0, x1, y1) = Self::clock_rect(mode);
-        (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
+        mode != Mode::P && (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
     }
 }
 
@@ -447,7 +448,9 @@ impl Kind for Pomodoro {
         let every = Self::every(wcfg);
 
         if mode == Mode::P {
-            // quadrado: o anel com o tempo no meio; embaixo, o relógio e a fase
+            // quadrado: o anel (o botão de começar e pausar, com o símbolo do que o clique faz)
+            // com o tempo no meio; embaixo, até quando vai a fase (rodando) ou quantos pomodoros
+            // hoje (a hora o relógio do Windows já mostra) e a fase
             let paused = self.started() && !self.running();
             if self.running() {
                 drawing::pause(c, cx, cy - 22.0, 8.0, MUTED);
@@ -455,7 +458,11 @@ impl Kind for Pomodoro {
                 drawing::play(c, cx, cy - 22.0, 8.0, MUTED);
             }
             self.timer_roll.draw(c, cx, cy + 4.0, &timer, Face::Light, 24.0, if paused { MUTED } else { FG }, Anchor::MM, None);
-            self.clock_roll.draw(c, 14.0, 136.0, &clock, Face::Semibold, 12.5, FG, Anchor::LM, None);
+            let foot = match self.end.filter(|_| self.running()) {
+                Some(end) => format!("até {}", win::clock_at(end)),
+                None => format!("hoje: {}", today(env.cfg, false).1),
+            };
+            c.text(14.0, 136.0, &foot, Face::Semibold, 12.0, FG, Anchor::LM, Some(62.0));
             let mut status = self.phase.label().to_string();
             if self.phase == Phase::Foco {
                 status += &format!(" · {}/{}", (self.cycle + 1).min(every), every);
@@ -513,8 +520,8 @@ impl Kind for Pomodoro {
             return;
         }
 
-        c.text(PAD, 19.0, "POMODORO", Face::Semibold, 10.0, focus, Anchor::LA, None);
-        c.text(W - PAD, 19.0, &util::long_date(&t), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
+        super::draw_label(c, PAD, super::LABEL_Y, "POMODORO", focus);
+        c.text(W - PAD, super::LABEL_Y, &util::long_date(&t), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
         self.clock_roll.draw(c, PAD - 2.0, 32.0, &clock, Face::Light, 40.0, FG, Anchor::LA, None);
         let n = stats.1;
         c.text(W - PAD, 46.0, &format!("{n} pomodoro{} hoje", if n != 1 { "s" } else { "" }), Face::Semibold, 13.0, FG, Anchor::RA, None);
@@ -607,8 +614,14 @@ impl Kind for Pomodoro {
                 _ => None,
             };
         }
+        // o anel é o botão de começar e pausar: a dica diz o que o clique faz
         if Self::on_ring(x, y, mode) {
-            return self.end.map(|end| format!("Termina às {}", win::clock_at(end)));
+            return Some(match (self.running(), self.end) {
+                (true, Some(end)) => format!("Pausar · termina às {}", win::clock_at(end)),
+                (true, None) => "Pausar".into(),
+                (false, _) if self.started() => "Continuar".into(),
+                _ => "Começar".into(),
+            });
         }
         None
     }
@@ -722,5 +735,39 @@ mod tests {
         let p = rolled(2000.0);
         assert!(!p.rolling());
         assert_eq!(p.next_tick(), Some(p.next));
+    }
+
+    /// O pequeno não repete a hora do Windows: rodando, mostra até quando vai a fase; parado,
+    /// quantos pomodoros hoje. E a dica do anel diz o que o clique faz.
+    #[test]
+    fn small_shows_the_end_instead_of_the_clock() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let texts = |p: &Pomodoro, cfg: &Value| -> Vec<String> {
+            let env = Env { cfg, key: "pomodoro" };
+            crate::morph::record(p, Mode::P, 1.0, 1.0, &env)
+                .ops
+                .into_iter()
+                .filter_map(|r| match r.op {
+                    crate::gfx::Op::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (cx, cy, ..) = Pomodoro::ring(Mode::P);
+        let running = serde_json::json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 0, "total": 1500.0, "fim": win::now() + 600.0}}});
+        let p = Pomodoro::new(&running);
+        let end = format!("até {}", win::clock_at(p.end.unwrap()));
+        assert!(texts(&p, &running).contains(&end), "{:?}", texts(&p, &running));
+        let env = Env { cfg: &running, key: "pomodoro" };
+        assert!(p.tooltip(cx, cy, Mode::P, &env).unwrap().starts_with("Pausar · termina às"));
+        let stopped = serde_json::json!({"pomodoro": {}});
+        let p = Pomodoro::new(&stopped);
+        assert!(texts(&p, &stopped).iter().any(|t| t.starts_with("hoje: ")), "{:?}", texts(&p, &stopped));
+        assert_eq!(p.tooltip(cx, cy, Mode::P, &Env { cfg: &stopped, key: "pomodoro" }).as_deref(), Some("Começar"));
+        // nada no pé do pequeno abre o Relógio do Windows
+        let (x0, y0, x1, y1) = Pomodoro::clock_rect(Mode::P);
+        assert!(!Pomodoro::on_clock((x0 + x1) / 2.0, (y0 + y1) / 2.0, Mode::P));
     }
 }
