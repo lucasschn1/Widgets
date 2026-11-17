@@ -574,8 +574,11 @@ const TEXT_W: f32 = W - 36.0;
 const BAR_Y: f32 = 328.0;
 const CTRL_Y: f32 = 372.0;
 const PLAY_D: f32 = 44.0;
+/// grande sem nada tocando: não há barra, controles nem volume, então a área da capa cresce e o
+/// texto e o botão descem, até o botão fechar o pé do cartão (sem um vão vazio embaixo)
+const G_IDLE_GROW: f32 = LARGE_H - 16.0 - (G_TEXT_Y + 120.0);
 // x, y, largura, altura do equalizador (no meio da capa)
-const IDLE_BOX: (f32, f32, f32, f32) = (36.0, G_ART.1 + (G_ART.3 - 100.0) / 2.0, W - 72.0, 100.0);
+const IDLE_BOX: (f32, f32, f32, f32) = (36.0, G_ART.1 + (G_ART.3 + G_IDLE_GROW - 100.0) / 2.0, W - 72.0, 100.0);
 
 // pequeno (quadrado): capa e tocar em cima, título e artista embaixo, barra fina no pé
 const C_ART: f32 = 64.0;
@@ -913,7 +916,7 @@ impl Media {
     /// grande.
     fn art_box(&self, mode: Mode) -> (f32, f32, f32, f32, f32) {
         if mode == Mode::G {
-            return G_ART;
+            return if self.has_media() { G_ART } else { (G_ART.0, G_ART.1, G_ART.2, G_ART.3 + G_IDLE_GROW, G_ART.4) };
         }
         let ((x, y), size, r) = self.art_geom(mode);
         (x, y, size, size, r)
@@ -1187,7 +1190,7 @@ impl Media {
         match mode {
             Mode::P => None,
             Mode::M => Some((M_TEXT_X, 104.0, M_TEXT_X + M_TEXT_W, 132.0)),
-            Mode::G => Some((TEXT_X, G_TEXT_Y + 88.0, TEXT_X + 168.0, G_TEXT_Y + 120.0)),
+            Mode::G => Some((TEXT_X, G_TEXT_Y + G_IDLE_GROW + 88.0, TEXT_X + 168.0, G_TEXT_Y + G_IDLE_GROW + 120.0)),
         }
     }
 
@@ -1382,7 +1385,7 @@ impl Media {
                     // a frase inteira (a letra diminui um pouco antes de cortar com "...")
                     let size = fit_size(c, &funny_title, Face::Semibold, 12.5, 10.5, C_TEXT_W);
                     c.text(x, 92.0, &funny_title, Face::Semibold, size, FG, Anchor::LA, Some(C_TEXT_W));
-                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.0, C_TEXT_W, 2).iter().enumerate() {
+                    for (i, line) in c.wrap_balanced(&funny_sub, Face::Regular, 11.0, C_TEXT_W, 2).iter().enumerate() {
                         c.text(x, 110.0 + 15.0 * i as f32, line, Face::Regular, 11.0, MUTED, Anchor::LA, Some(C_TEXT_W));
                     }
                 }
@@ -1400,7 +1403,7 @@ impl Media {
                     let kind = self.pref();
                     super::draw_label(c, x, 16.0, source_label(&kind), source_color(&kind));
                     c.text(x, 30.0, &funny_title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
-                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
+                    for (i, line) in c.wrap_balanced(&funny_sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
                         c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
                     }
                     self.draw_launch(c, mode);
@@ -1409,7 +1412,7 @@ impl Media {
             Mode::G => {
                 let (x, w) = (TEXT_X, TEXT_W);
                 let kind = m.map(|m| m.kind.to_string()).unwrap_or_else(|| self.pref());
-                let y = G_TEXT_Y;
+                let y = if m.is_some() { G_TEXT_Y } else { G_TEXT_Y + G_IDLE_GROW };
                 super::draw_label(c, x, y, source_label(&kind), source_color(&kind));
                 if let Some(m) = m {
                     if !self.paste_art(c, mode) {
@@ -1420,7 +1423,7 @@ impl Media {
                     self.draw_extras(c, m);
                 } else {
                     c.text(x, y + 15.0, &funny_title, Face::Semibold, 15.5, FG, Anchor::LA, Some(w));
-                    for (i, line) in c.wrap(&funny_sub, Face::Regular, 12.0, w, 2).iter().enumerate() {
+                    for (i, line) in c.wrap_balanced(&funny_sub, Face::Regular, 12.0, w, 2).iter().enumerate() {
                         c.text(x, y + 37.0 + 17.0 * i as f32, line, Face::Regular, 12.0, MUTED, Anchor::LA, Some(w));
                     }
                     self.draw_launch(c, mode);
@@ -2215,13 +2218,28 @@ mod cover_tests {
         }
         let idle = Media::sample_idle();
         assert_eq!(idle.launch_rect(Mode::P), None);
-        for (mode, text_bottom) in [(Mode::M, 50.0 + 16.0 * 2.0), (Mode::G, G_TEXT_Y + 37.0 + 17.0 * 2.0)] {
+        for (mode, text_bottom) in [(Mode::M, 50.0 + 16.0 * 2.0), (Mode::G, G_TEXT_Y + G_IDLE_GROW + 37.0 + 17.0 * 2.0)] {
             let (x0, y0, x1, y1) = idle.launch_rect(mode).unwrap();
             let lay = idle.layout_of(mode);
             assert!(y0 >= text_bottom && x1 <= lay.w - 14.0 && y1 <= lay.h - 14.0 && x0 >= 14.0, "{mode:?}: {x0},{y0} {x1},{y1}");
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             assert_eq!(idle.hit(cx, cy, mode, &Env { cfg: &json!({}), key: "midia" }), Some(LAUNCH), "{mode:?}");
             assert!(idle.hot_rect(cx, cy, mode, &Env { cfg: &json!({}), key: "midia" }).is_some());
+        }
+        // no grande, o botão fecha o pé do cartão (sem vão embaixo) e a área da capa vai até perto
+        // do texto
+        let (_, _, _, y1) = idle.launch_rect(Mode::G).unwrap();
+        assert!((LARGE_H - crate::widgets::CARD_PAD - y1).abs() < 0.5, "vão embaixo do botão: {}", LARGE_H - y1);
+        let (_, ay, _, ah, _) = idle.art_box(Mode::G);
+        assert!((G_TEXT_Y + G_IDLE_GROW) - (ay + ah) <= 12.0, "vão entre a capa e o texto");
+        // as frases de baixo não deixam uma palavra sozinha na segunda linha
+        for (_, sub) in FUNNY {
+            for (size, w) in [(11.0, C_TEXT_W), (11.5, M_TEXT_W), (12.0, TEXT_W)] {
+                let lines = probe.wrap_balanced(sub, Face::Regular, size, w, 2);
+                if lines.len() == 2 {
+                    assert!(lines[1].split_whitespace().count() >= 2, "\"{sub}\": \"{}\" sozinho embaixo", lines[1]);
+                }
+            }
         }
         // tocando, nada do botão
         assert_eq!(Media::sample().launch_rect(Mode::M), None);

@@ -270,6 +270,30 @@ fn header_labels_look_the_same_everywhere() {
     }
 }
 
+/// Uma regra só para os rótulos: no médio e no grande, todo widget que tem rótulo o mostra; no
+/// pequeno, nenhum (fora o aviso de um widget sem dados, que precisa dizer de quem é).
+#[test]
+fn labels_on_medium_and_large_never_on_small() {
+    use crate::gfx::Op;
+    com();
+    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let mut checked = 0;
+    for (name, kind, cfg) in cases() {
+        // as vistas de dentro (o Sistema virado) e os avisos sem dados têm o próprio título
+        if !["github", "sistema", "pomodoro", "midia"].contains(&kind.key()) || name.contains("virado") || name.contains("sem usuário") {
+            continue;
+        }
+        let env = Env { cfg: &cfg, key: kind.key() };
+        for &mode in kind.sizes() {
+            let _ = draw(kind.as_ref(), mode, &cfg);
+            let has = crate::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops.iter().any(|rec| matches!(&rec.op, Op::Text { text, .. } if labels.contains(&text.as_str())));
+            assert_eq!(has, mode != Mode::P, "{name} {mode:?}: rótulo {}", if has { "no pequeno" } else { "faltando" });
+            checked += 1;
+        }
+    }
+    assert!(checked >= 12, "poucos casos conferidos: {checked}");
+}
+
 /// O número principal de cada cartão vai em letra fina, como a temperatura do Clima, o relógio
 /// do Pomodoro e o anel do Claude: o "812" do GitHub também.
 #[test]

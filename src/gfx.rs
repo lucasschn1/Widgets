@@ -1234,6 +1234,30 @@ impl Canvas {
         lines
     }
 
+    /// Como `wrap`, mas com as linhas de larguras parecidas (o "text-wrap: balance" da web): uma
+    /// frase em duas linhas não termina com uma palavra sozinha embaixo ("O DJ saiu pra tomar um
+    /// / café" vira "O DJ saiu pra / tomar um café"). Se não couber nem assim, fica como `wrap`.
+    pub fn wrap_balanced(&self, text: &str, face: Face, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
+        let lines = self.wrap(text, face, size, max_w, max_lines);
+        let fits = |ls: &[String], w: f32| ls.iter().all(|l| self.text_width(l, face, size) <= w + 0.01);
+        if lines.len() < 2 || !fits(&lines, max_w) {
+            return lines;
+        }
+        // a menor largura que ainda dá o mesmo número de linhas, todas cabendo
+        let n = lines.len();
+        let (mut lo, mut hi) = (max_w * 0.4, max_w);
+        for _ in 0..14 {
+            let mid = (lo + hi) / 2.0;
+            let trial = self.wrap(text, face, size, mid, max_lines);
+            if trial.len() == n && fits(&trial, mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        self.wrap(text, face, size, hi, max_lines)
+    }
+
     /// Escreve um texto; (x, y) é o ponto de `anchor`. Corta com "…" se passar de `max_w`.
     /// Devolve a largura escrita (lógica).
     pub fn text(&mut self, x: f32, y: f32, text: &str, face: Face, size: f32, c: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
