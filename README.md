@@ -199,10 +199,20 @@ o volume do app que está tocando.
 
 **Ilha flutuante.** Clique no Tocando agora (fora dos botões) e ele vira uma pílula preta por
 cima de todas as janelas. Parada, ela mostra a capa e ondas que seguem o som; com o mouse em
-cima, estica e mostra a música; com um clique, abre inteira. Arraste para qualquer lugar (perto
-do alto e do meio, ela encaixa lá). Em jogo ou vídeo em tela cheia, ela se esconde. Para
-devolver o widget à área de trabalho, use **Voltar para a área de trabalho** na ilha aberta ou o
-clique direito; se nada tocar por 5 minutos, ela volta sozinha.
+cima, estica e mostra a música; com um clique, abre inteira. Ela começa na barra de tarefas, à
+esquerda do botão Iniciar (e acompanha o botão quando ele anda), e cresce para cima e para a
+esquerda, sem cobrir o Iniciar. Arraste para qualquer lugar: perto da barra ou do alto e do meio
+da tela, ela encaixa lá; no clique direito, **Na barra de tarefas** a leva de volta. Em jogo ou
+vídeo em tela cheia, ela se esconde. Para devolver o widget à área de trabalho, use **Voltar para
+a área de trabalho** na ilha aberta ou o clique direito; se nada tocar por 5 minutos, ela volta
+sozinha.
+
+Os outros widgets também passam pela ilha quando têm algo a dizer: o Pomodoro correndo, a CPU
+alta no Sistema, um pedido de revisão no GitHub, a bateria fraca (ou o carregador entrando e
+saindo, com "Carregando · cheia em 1 h 10" por alguns segundos) e o Tempo avisando de chuva
+chegando ("Chuva em 20 min"), trovoada ou uma mudança forte de temperatura amanhã. Aberta, a ilha
+do Tempo mostra as próximas horas com o céu animado ao fundo. Cada widget tem o interruptor
+**Mostrar na ilha** nas configurações.
 
 <p align="center">
   <img src="docs/images/ilha.webp" width="560" alt="O Tocando agora virando a ilha flutuante, esticando, abrindo e voltando">
@@ -210,9 +220,10 @@ clique direito; se nada tocar por 5 minutos, ela volta sozinha.
 
 ### GitHub
 
-O mapa de contribuições, a sequência de dias e as últimas atividades. Se você usa o
-[GitHub CLI](https://cli.github.com/), entram também os repositórios privados e um aviso quando
-alguém pede sua revisão.
+O mapa de contribuições do último ano, em quadrados que ocupam o cartão: quanto maior o widget,
+mais semanas e maiores os quadrados (no grande, o ano inteiro em três faixas, cada uma com quantas
+contribuições teve). Passe o mouse num quadrado para ver o dia. Se você usa o
+[GitHub CLI](https://cli.github.com/), chega um aviso quando alguém pede sua revisão.
 
 <p align="center">
   <img src="docs/images/github.png" width="620" alt="GitHub nos três tamanhos">
@@ -279,11 +290,17 @@ de cada conversa. Quem já usava o app encontra este widget na Galeria de widget
 ### Bateria
 
 A bateria do notebook e a dos dispositivos conectados: fones, mouses, teclados e controles. O
-anel do notebook diz quanto falta para acabar (ou a hora em que fica cheia, na tomada); o grande
-mostra também a saúde da bateria (a capacidade de agora contra a de fábrica), os ciclos de carga
-e as últimas 24 horas, com os períodos na tomada em verde. Cada aparelho tem a barra de carga,
-e um aviso chega quando um deles passa de 15%. Num PC de mesa, sem bateria, o widget vira só a
-lista de dispositivos.
+anel do notebook mostra a carga, e embaixo dele fica quanto falta para acabar (ou para encher,
+na tomada). O grande mostra também o estado numa pílula ao lado do título, a saúde da bateria (a
+capacidade de agora contra a de fábrica), os ciclos de carga e as últimas 24 horas, com os
+períodos na tomada em verde. Cada aparelho tem a barra de carga, e um aviso chega quando um deles
+passa de 15%. No pequeno, cada aparelho tem o seu anel; os lugares que sobram ficam com o anel
+vazio. Num PC de mesa, sem bateria, o widget vira só a lista de dispositivos.
+
+Um aparelho que conecta aparece na hora (o Windows avisa o widget assim que a conexão muda). No
+pequeno, ele ocupa o primeiro anel vazio: o ícone entra com um "pop", uma onda sai do anel e o
+arco enche do zero até a carga; ao desconectar, o caminho volta e o lugar fica vazio, sem os
+outros mudarem de lugar.
 
 As animações tocam só nos momentos que importam: ao ligar na tomada, uma onda sai do anel e o
 raio aparece; os números rolam quando a carga muda; na carga completa, um reflexo atravessa o
@@ -304,7 +321,7 @@ encosta em outro nem na ilha do Tocando agora, e ninguém sai da tela.
 
 **Pilhas.** Solte um widget no meio de outro e os dois viram uma pilha, como no iPhone: ocupam o
 lugar de um só e a roda do mouse troca entre eles (ao trocar, bolinhas ao lado do cartão dizem
-qual é qual, como no macOS). Em cima das horas do Tempo, da lista do GitHub, da barra de volume do Tocando agora e do
+qual é qual, como no macOS). Em cima das horas do Tempo, da barra de volume do Tocando agora e do
 anel do Pomodoro, a roda continua fazendo o que faz no widget. Para desfazer, clique direito →
 **Tirar da pilha**.
 
@@ -364,10 +381,13 @@ no vidro.
 ### Tudo no clique direito
 
 O app não usa atalhos de teclado globais, para não roubar combinações de outros programas (nem o
-AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no ícone da bandeja:
+AltGr do teclado ABNT2). Tudo fica no menu do clique direito, num widget ou no ícone da bandeja.
+Em cima, o nome do widget e o botão azul **Organizar widgets**; depois, o que é do widget e o que
+vale para todos:
 
 | | |
 |---|---|
+| Organizar widgets | Arruma cada monitor em colunas a partir da direita |
 | Mostrar na frente | Traz os widgets para a frente das janelas |
 | Modo edição | Fecha, redimensiona e move tudo de uma vez (e tem "Desfazer") |
 | Modo foco | Esconde os widgets por 30 min, 1 h, 2 h ou até você desligar |

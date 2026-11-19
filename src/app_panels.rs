@@ -425,9 +425,26 @@ impl App {
                     st.startup = !st.startup;
                 }
             }
+            A::Toggle(id) if id.starts_with("na_ilha:") => {
+                // "Mostrar na ilha" de um widget (na seção dele)
+                let key = &id["na_ilha:".len()..];
+                if config::setting_bool(&self.sh.cfg, "ilha_widgets") {
+                    let on = widgets::on_island(&self.sh.cfg, key);
+                    self.sh.cfg.obj_mut(key).insert("na_ilha".into(), json!(!on));
+                } else {
+                    // com a ilha dos widgets desligada em Geral, ligar um liga as duas
+                    self.sh.cfg.obj_mut(key).insert("na_ilha".into(), json!(true));
+                    self.sh.cfg.obj_mut("app").insert("ilha_widgets".into(), json!(true));
+                }
+                self.sh.save();
+                self.island_sync_at = Instant::now();
+            }
             A::Toggle(name) => {
                 let on = config::setting_bool(&self.sh.cfg, name);
                 self.set_setting(name, json!(!on));
+                if name == "ilha_widgets" {
+                    self.island_sync_at = Instant::now();
+                }
             }
             A::Notify(kind) => {
                 let mut all = config::setting(&self.sh.cfg, "notificacoes");

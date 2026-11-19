@@ -2,19 +2,27 @@
 //! para arrastar para qualquer lugar da tela. Parada, mostra a capa e ondas no ritmo do som; com
 //! o mouse em cima, estica e mostra a música, tocar e avançar; com um clique, abre inteira, com a
 //! barra de progresso. "Voltar para a área de trabalho" (ou o clique direito) devolve o widget
-//! ao lugar dele, que fica guardado enquanto isso.
+//! ao lugar dele, que fica guardado enquanto isso. O lugar padrão é a barra de tarefas, à esquerda
+//! do botão Iniciar (acompanhando o botão quando ele anda); arrastada para outro lugar, fica lá.
+//!
+//! Os outros widgets também entram na ilha, como na ilha dinâmica do iPhone: o Pomodoro
+//! correndo, a CPU alta, um pedido de revisão, um fone acabando. Quem está vivo e foi mexido por
+//! último fica na pílula; o segundo vira uma bolha ao lado (com o número dos outros que esperam).
+//! Avisos não tomam a pílula: esticam a ilha por 4 s e esperam na bolha. Sem a música, a ilha
+//! aparece sozinha quando algum widget tem o que mostrar e some quando ninguém tem.
 //! (Módulo filho de `app`: mexe direto no estado do App.)
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
 use crate::drawing;
 use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::widgets::media::{self, fmt_time};
-use crate::widgets::{island_act, IslandInfo};
+use crate::widgets::{island_act, island_ui, Env, IslandForm, IslandInfo, IslandItem};
 
 const KEY: &str = "midia";
 /// a ilha inteira (pílula, textos e botões) neste tamanho, em relação à escala da tela
@@ -38,18 +46,35 @@ const LARGE_IDLE: Duration = Duration::from_secs(6);
 const QUIET: Duration = Duration::from_secs(5 * 60);
 /// a que distância do alto e do meio da tela a ilha "puxa" para lá ao arrastar
 const SNAP: f32 = 18.0;
-/// distância do alto da tela, no lugar padrão
+/// distância do alto da tela, no "alto e no meio"
 const TOP_GAP: f32 = 10.0;
+/// na barra de tarefas: espaço até o botão Iniciar
+const DOCK_GAP: f32 = 10.0;
+/// arrastando, a que distância do lugar na barra a ilha encaixa lá
+const DOCK_SNAP: f32 = 36.0;
+/// na barra, de quanto em quanto tempo ver se o botão Iniciar andou (abrir e fechar apps mexe nele)
+const DOCK_CHECK: Duration = Duration::from_secs(1);
+/// um aviso estica a ilha por este tempo
+const BANNER_FOR: Duration = Duration::from_secs(4);
+/// espaço entre a pílula e as bolhas (e entre as bolhas)
+const BUBBLE_GAP: f32 = 7.0;
+/// de quanto em quanto tempo perguntar aos widgets o que eles têm para a ilha
+const SYNC_EVERY: Duration = Duration::from_millis(400);
+const SYNC_IDLE: Duration = Duration::from_millis(1000);
 
 pub const M_ISLAND_BACK: u32 = 300_040;
 pub const M_ISLAND_OPEN: u32 = 300_041;
 pub const M_ISLAND_CENTER: u32 = 300_042;
+pub const M_ISLAND_DOCK: u32 = 300_043;
+pub const M_ISLAND_HIDE: u32 = 300_044;
 
 const BLACK: Rgba = Rgba::rgb(0, 0, 0);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Shape {
     Compact,
+    /// esticada com um aviso, por alguns segundos
+    Banner,
     Medium,
     Large,
 }
@@ -57,10 +82,121 @@ pub enum Shape {
 impl Shape {
     /// (largura, altura, raio) em pixels lógicos
     fn size(self) -> (f32, f32, f32) {
+        island_ui::size(self.form())
+    }
+
+    fn form(self) -> IslandForm {
         match self {
-            Shape::Compact => (236.0, 42.0, 21.0),
-            Shape::Medium => (340.0, 78.0, 30.0),
-            Shape::Large => (364.0, 220.0, 38.0),
+            Shape::Compact => IslandForm::Compact,
+            Shape::Banner => IslandForm::Banner,
+            Shape::Medium => IslandForm::Medium,
+            Shape::Large => IslandForm::Large,
+        }
+    }
+}
+
+/// Um widget com algo na ilha agora.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Entry {
+    key: &'static str,
+    item: IslandItem,
+}
+
+/// Põe os itens na ordem da ilha: o primeiro fica na pílula, o segundo na bolha. Na frente, o
+/// que a pessoa escolheu (clicou na bolha, passou o mouse no aviso) e o aviso urgente ainda não
+/// visto; depois quem tem pressa (o último minuto do Pomodoro), quem está andando, quem está
+/// pausado e, por fim, os avisos. Empatados, o mexido por último.
+fn rank(entries: &mut [Entry], touched: &HashMap<&'static str, Instant>, pinned: Option<&str>, unseen: &[&'static str]) {
+    let tier = |e: &Entry| -> u8 {
+        if e.item.urgent && unseen.contains(&e.key) {
+            0
+        } else if Some(e.key) == pinned {
+            1
+        } else if e.item.hurry {
+            2
+        } else if e.item.alert {
+            5
+        } else if e.item.idle {
+            4
+        } else {
+            3
+        }
+    };
+    entries.sort_by(|a, b| tier(a).cmp(&tier(b)).then_with(|| touched.get(b.key).cmp(&touched.get(a.key))));
+}
+
+/// O que a ilha lê dos widgets para se desenhar (emprestado do App a cada quadro).
+pub(super) struct Scene<'a> {
+    /// a música, se o Tocando agora está na ilha
+    info: Option<&'a IslandInfo>,
+    kinds: Vec<&'a dyn Kind>,
+    cfg: &'a Value,
+}
+
+impl<'a> Scene<'a> {
+    fn of(info: Option<&'a IslandInfo>, cards: &'a [Card], cfg: &'a Value) -> Scene<'a> {
+        Scene { info, kinds: cards.iter().map(|c| c.kind.as_ref()).collect(), cfg }
+    }
+    /// Só a música (os quadros do README e os testes).
+    #[cfg(test)]
+    fn media(info: Option<&'a IslandInfo>) -> Scene<'a> {
+        Scene { info, kinds: Vec::new(), cfg: &Value::Null }
+    }
+    fn kind(&self, key: &str) -> Option<&'a dyn Kind> {
+        self.kinds.iter().copied().find(|k| k.key() == key)
+    }
+    fn env(&self, key: &'static str) -> Env<'a> {
+        Env { cfg: self.cfg, key }
+    }
+}
+
+/// O estado da ilha com vários widgets.
+struct Multi {
+    /// quem está na ilha, na ordem (o primeiro na pílula)
+    entries: Vec<Entry>,
+    /// o widget desenhado na pílula agora e o de antes (para trocar com um esmaecer)
+    key: &'static str,
+    prev_key: &'static str,
+    /// quando cada um entrou ou foi mexido por último
+    touched: HashMap<&'static str, Instant>,
+    /// o último aviso que esticou a ilha, de cada widget
+    bannered: HashMap<&'static str, u64>,
+    /// o aviso esticando a ilha agora, e desde quando
+    banner: Option<(&'static str, Instant)>,
+    /// avisos que ninguém viu ainda (o pontinho na bolha)
+    unseen: Vec<&'static str>,
+    /// o escolhido pela pessoa: (widget, fica até ela escolher outro)
+    pinned: Option<(&'static str, bool)>,
+    /// as bolhas todas abertas (mouse em cima da bolha com mais gente esperando)
+    strip: bool,
+    strip_out: Option<Instant>,
+    /// quando a primeira bolha apareceu (ela entra esmaecendo)
+    bubbles_at: Instant,
+    /// sem nada para mostrar: a pílula encolhe e some
+    vanish: bool,
+    /// o widget do clique direito
+    menu_key: &'static str,
+    /// a capa pequena (na bolha), já reduzida
+    bubble_art: Option<(usize, u32, Image)>,
+}
+
+impl Multi {
+    fn new(now: Instant) -> Multi {
+        Multi {
+            entries: Vec::new(),
+            key: KEY,
+            prev_key: KEY,
+            touched: HashMap::new(),
+            bannered: HashMap::new(),
+            banner: None,
+            unseen: Vec::new(),
+            pinned: None,
+            strip: false,
+            strip_out: None,
+            bubbles_at: now,
+            vanish: false,
+            menu_key: KEY,
+            bubble_art: None,
         }
     }
 }
@@ -83,6 +219,10 @@ enum Btn {
     Seek(u32),
     Open,
     Back,
+    /// um botão do widget na pílula (a ação dele)
+    Widget(u32),
+    /// a bolha `n` (0 = a primeira, ao lado da pílula)
+    Bubble(usize),
 }
 
 /// Retângulo (x, y, largura, altura) e raio, em pixels da tela.
@@ -113,11 +253,33 @@ fn inside(r: Rect4, x: f32, y: f32) -> bool {
     x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3
 }
 
+/// O lugar da pílula fechada na barra de tarefas (centro x e topo y, em pixels da tela): à esquerda
+/// do botão Iniciar, no meio da altura da barra. Sem espaço ali (barra alinhada à esquerda), fica
+/// antes da área de notificação.
+fn taskbar_slot(t: &win::Taskbar, s: f32) -> (f32, f32) {
+    let (w, h, _) = Shape::Compact.size();
+    let (w, h, gap) = (w * s, h * s, DOCK_GAP * s);
+    let bar = t.bar;
+    let right = match (t.start, t.tray) {
+        (Some(start), _) if (start.0 - bar.0) as f32 >= w + 2.0 * gap => start.0 as f32 - gap,
+        (_, Some(tray)) => tray.0 as f32 - gap,
+        _ => bar.2 as f32 - gap,
+    };
+    ((right - w / 2.0).round(), (bar.1 as f32 + ((bar.3 - bar.1) as f32 - h) / 2.0).round())
+}
+
+/// O lugar na barra de tarefas do monitor do ponto e a escala da ilha lá, se há barra à vista.
+fn dock_slot(x: i32, y: i32) -> Option<((f32, f32), f32)> {
+    let t = win::taskbar_at(x, y)?;
+    let s = island_scale((t.bar.0 + t.bar.2) / 2, (t.bar.1 + t.bar.3) / 2);
+    Some((taskbar_slot(&t, s), s))
+}
+
 /// Botões de cada forma, em pixels lógicos a partir do canto da pílula.
 fn buttons(shape: Shape, lw: f32, lh: f32) -> Vec<(Btn, Rect4)> {
     let circle = |cx: f32, cy: f32, r: f32| (cx - r, cy - r, cx + r, cy + r);
     match shape {
-        Shape::Compact => Vec::new(),
+        Shape::Compact | Shape::Banner => Vec::new(),
         Shape::Medium => vec![(Btn::Toggle, circle(lw - 74.0, lh / 2.0, 18.0)), (Btn::Next, circle(lw - 34.0, lh / 2.0, 16.0))],
         Shape::Large => vec![
             (Btn::Seek(0), (20.0, 88.0, lw - 20.0, 104.0)),
@@ -143,6 +305,10 @@ pub struct Island {
     /// centro (x) e topo (y) da pílula fechada, em pixels da tela
     anchor: (f32, f32),
     s: f32,
+    /// na barra de tarefas, ao lado do botão Iniciar (cresce para a esquerda, sem cobrir o botão)
+    docked: bool,
+    /// quando ver de novo se o botão Iniciar andou
+    dock_check: Instant,
     /// botão apertado: (x, y na tela, botão, âncora na hora)
     press: Option<(i32, i32, Option<Btn>, (f32, f32))>,
     dragging: bool,
@@ -160,6 +326,9 @@ pub struct Island {
     art_cache: Option<(usize, u32, Image)>,
     /// o cartão como aparece na tela, para a transformação (de ida e de volta)
     card_face: Option<Image>,
+    /// o Tocando agora está na ilha (o cartão dele fica escondido)
+    media: bool,
+    multi: Multi,
 }
 
 impl Island {
@@ -196,7 +365,7 @@ impl Island {
     }
 
     /// Onde fica a pílula na forma dada: centrada na âncora; na metade de baixo da tela cresce
-    /// para cima. Nunca sai da tela.
+    /// para cima; na barra de tarefas, para a esquerda. Nunca sai da tela.
     fn target(&self, shape: Shape) -> Geo {
         let s = self.s;
         let (w, h, r) = shape.size();
@@ -205,7 +374,8 @@ impl Island {
         let (scr, _) = win::monitor_at(self.anchor.0 as i32, (self.anchor.1 + compact_h / 2.0) as i32);
         let lower = self.anchor.1 + compact_h / 2.0 > (scr.1 + scr.3) as f32 / 2.0;
         let y = if lower { self.anchor.1 + compact_h - h } else { self.anchor.1 };
-        let x = self.anchor.0 - w / 2.0;
+        let compact_w = Shape::Compact.size().0 * s;
+        let x = if self.docked { self.anchor.0 + compact_w / 2.0 - w } else { self.anchor.0 - w / 2.0 };
         let (mx, my) = (6.0 * s, 4.0 * s);
         let x = x.clamp(scr.0 as f32 + mx, (scr.2 as f32 - mx - w).max(scr.0 as f32 + mx));
         let y = y.clamp(scr.1 as f32 + my, (scr.3 as f32 - my - h).max(scr.1 as f32 + my));
@@ -217,6 +387,7 @@ impl Island {
             return;
         }
         self.from = self.geo();
+        self.multi.prev_key = self.key_for(self.shape);
         self.prev_shape = self.shape;
         self.shape = shape;
         self.to = self.target(shape);
@@ -247,16 +418,112 @@ impl Island {
         }
     }
 
-    /// Botão sob (x, y) da janela (pixels), na forma atual.
-    fn btn_at(&self, x: i32, y: i32, info: Option<&IslandInfo>) -> Option<Btn> {
-        if self.morph != Morph::None || info.is_none() {
+    /// O widget desenhado na pílula numa forma (esticada, o do aviso).
+    fn key_for(&self, shape: Shape) -> &'static str {
+        match (shape, self.multi.banner) {
+            (Shape::Banner, Some((k, _))) => k,
+            _ => self.multi.key,
+        }
+    }
+
+    /// Troca o widget da pílula (o de antes some enquanto o novo aparece).
+    fn switch_key(&mut self, key: &'static str) {
+        if key == self.multi.key {
+            return;
+        }
+        self.multi.prev_key = self.key_for(self.shape);
+        self.multi.key = key;
+        self.prev_shape = self.shape;
+        self.shape_at = Instant::now();
+        self.next_frame = Instant::now();
+    }
+
+    /// Na metade de baixo da tela (cresce para cima)?
+    fn lower(&self) -> bool {
+        let compact_h = Shape::Compact.size().1 * self.s;
+        let (scr, _) = win::monitor_at(self.anchor.0 as i32, (self.anchor.1 + compact_h / 2.0) as i32);
+        self.anchor.1 + compact_h / 2.0 > (scr.1 + scr.3) as f32 / 2.0
+    }
+
+    /// Quem vai nas bolhas: todos menos o da pílula (esticada com um aviso, a pílula mostra o
+    /// aviso e o de sempre vai para a primeira bolha).
+    fn bubble_entries(&self) -> Vec<Entry> {
+        let shown = self.key_for(self.shape);
+        let mut list: Vec<Entry> = self.multi.entries.iter().copied().filter(|e| e.key != shown).collect();
+        if shown != self.multi.key {
+            if let Some(k) = list.iter().position(|e| e.key == self.multi.key) {
+                let e = list.remove(k);
+                list.insert(0, e);
+            }
+        }
+        list
+    }
+
+    /// Quantas bolhas aparecem: a primeira; com o mouse em cima, todas.
+    fn bubble_count(&self) -> usize {
+        let extra = self.bubble_entries().len();
+        if self.morph != Morph::None || self.multi.vanish {
+            0
+        } else if self.multi.strip {
+            extra
+        } else {
+            extra.min(1)
+        }
+    }
+
+    /// As bolhas na tela: (centro x, centro y, raio), em pixels, da pílula para a esquerda, na
+    /// altura da pílula fechada.
+    fn bubbles(&self) -> Vec<(f32, f32, f32)> {
+        let g = self.geo();
+        let s = self.s;
+        let d = island_ui::size(IslandForm::Bubble).0 * s;
+        let gap = BUBBLE_GAP * s;
+        let compact_h = Shape::Compact.size().1 * s;
+        let cy = if self.lower() { g.y + g.h - compact_h / 2.0 } else { g.y + compact_h / 2.0 };
+        (0..self.bubble_count()).map(|k| (g.x - gap - d / 2.0 - k as f32 * (d + gap), cy, d / 2.0)).collect()
+    }
+
+    /// A bolha sob o ponto da tela.
+    fn bubble_at(&self, sx: i32, sy: i32) -> Option<usize> {
+        self.bubbles().iter().position(|&(cx, cy, r)| (sx as f32 - cx).hypot(sy as f32 - cy) <= r)
+    }
+
+    /// O mouse está perto das bolhas abertas (no espaço entre elas também)?
+    fn near_bubbles(&self, sx: i32, sy: i32) -> bool {
+        let b = self.bubbles();
+        let (Some(first), Some(last)) = (b.first(), b.last()) else { return false };
+        let r = first.2 + BUBBLE_GAP * self.s;
+        (sx as f32) >= last.0 - r && (sx as f32) <= first.0 + r && (sy as f32 - first.1).abs() <= r
+    }
+
+    /// O mouse está perto da ilha (para responder rápido quando ele chegar)?
+    fn near(&self, sx: i32, sy: i32) -> bool {
+        let g = self.geo();
+        let m = 120.0 * self.s;
+        let left = self.bubbles().last().map_or(g.x, |b| b.0 - b.2);
+        (sx as f32) >= left - m && (sx as f32) <= g.x + g.w + m && (sy as f32) >= g.y - m && (sy as f32) <= g.y + g.h + m
+    }
+
+    /// Botão sob o ponto (sx, sy) da tela, na forma atual.
+    fn btn_at(&self, sx: i32, sy: i32, scene: &Scene) -> Option<Btn> {
+        if self.morph != Morph::None {
             return None;
         }
+        if let Some(k) = self.bubble_at(sx, sy) {
+            return Some(Btn::Bubble(k));
+        }
         let g = self.geo();
-        let pad = (PAD * self.s).round();
-        let (lx, ly) = ((x as f32 - pad) / self.s, (y as f32 - pad) / self.s);
+        let (lx, ly) = ((sx as f32 - g.x) / self.s, (sy as f32 - g.y) / self.s);
         let (lw, lh) = (g.w / self.s, g.h / self.s);
-        let info = info?;
+        if !(0.0..=lw).contains(&lx) || !(0.0..=lh).contains(&ly) {
+            return None;
+        }
+        let key = self.key_for(self.shape);
+        if key != KEY {
+            let kind = scene.kind(key)?;
+            return kind.island_hit(self.shape.form(), lx, ly, lw, lh, &scene.env(key)).map(Btn::Widget);
+        }
+        let info = scene.info?;
         buttons(self.shape, lw, lh).into_iter().find(|(_, r)| inside(*r, lx, ly)).and_then(|(b, r)| match b {
             Btn::Seek(_) if !info.can_seek || info.duration <= 0.0 => None,
             Btn::Seek(_) => Some(Btn::Seek((((lx - r.0) / (r.2 - r.0)).clamp(0.0, 1.0) * 1000.0) as u32)),
@@ -267,6 +534,64 @@ impl Island {
         })
     }
 
+    /// Os widgets que o App achou para a ilha agora: avisos novos esticam a ilha; a ordem decide
+    /// quem fica na pílula.
+    fn update_entries(&mut self, found: Vec<Entry>, now: Instant) {
+        let had_bubble = self.multi.entries.len() > 1;
+        let m = &mut self.multi;
+        let present = |k: &str| found.iter().any(|e| e.key == k);
+        m.touched.retain(|k, _| present(k));
+        m.unseen.retain(|k| present(k));
+        m.bannered.retain(|k, _| present(k));
+        if m.pinned.is_some_and(|(k, _)| !present(k)) {
+            m.pinned = None;
+        }
+        if m.banner.is_some_and(|(k, _)| !present(k)) {
+            m.banner = None;
+        }
+        for e in &found {
+            m.touched.entry(e.key).or_insert(now);
+            if e.item.alert && m.bannered.get(e.key) != Some(&e.item.alert_id) {
+                m.bannered.insert(e.key, e.item.alert_id);
+                if !m.unseen.contains(&e.key) {
+                    m.unseen.push(e.key);
+                }
+                if m.banner.is_none() {
+                    m.banner = Some((e.key, now));
+                }
+            }
+        }
+        m.entries = found;
+        rank(&mut m.entries, &m.touched, m.pinned.map(|p| p.0), &m.unseen);
+        if !had_bubble && m.entries.len() > 1 {
+            m.bubbles_at = now;
+        }
+        if m.entries.len() <= 2 {
+            m.strip = false;
+        }
+        let first = m.entries.first().map_or(m.key, |e| e.key);
+        self.switch_key(first);
+    }
+
+    /// A pessoa escolheu este widget (clicou na bolha ou passou o mouse no aviso): ele vai para
+    /// a pílula. `sticky`: fica lá até ela escolher outro.
+    fn choose(&mut self, key: &'static str, sticky: bool) {
+        let m = &mut self.multi;
+        m.pinned = Some((key, sticky));
+        m.touched.insert(key, Instant::now());
+        m.unseen.retain(|k| *k != key);
+        if m.banner.is_some_and(|(k, _)| k == key) {
+            m.banner = None;
+        }
+        rank(&mut m.entries, &m.touched, m.pinned.map(|p| p.0), &m.unseen);
+        m.strip = false;
+        self.switch_key(key);
+    }
+
+    fn accent_of(&self, key: &str) -> Rgba {
+        self.multi.entries.iter().find(|e| e.key == key).map_or(WHITE, |e| e.item.accent)
+    }
+
     fn art(&mut self, art: &Arc<Image>, px: u32) -> Image {
         let key = Arc::as_ptr(art) as usize;
         if self.art_cache.as_ref().map(|c| (c.0, c.1)) != Some((key, px)) {
@@ -275,14 +600,23 @@ impl Island {
         self.art_cache.as_ref().unwrap().2.clone()
     }
 
-    /// A pílula desenhada e onde fica a janela.
-    fn render(&mut self, info: Option<&IslandInfo>) -> (Image, (i32, i32)) {
+    /// A pílula (e as bolhas) desenhada e onde fica a janela.
+    fn render(&mut self, scene: &Scene) -> (Image, (i32, i32)) {
         let g = self.geo();
         let s = self.s;
         let pad = (PAD * s).round();
-        let (ww, wh) = ((g.w + 2.0 * pad).round() as u32, (g.h + 2.0 * pad).round() as u32);
+        let bubbles = self.bubbles();
+        let (mut x0, mut y0, mut x1, mut y1) = (g.x, g.y, g.x + g.w, g.y + g.h);
+        for &(cx, cy, r) in &bubbles {
+            x0 = x0.min(cx - r);
+            y0 = y0.min(cy - r);
+            x1 = x1.max(cx + r);
+            y1 = y1.max(cy + r);
+        }
+        let (wx, wy) = ((x0 - pad).round(), (y0 - pad).round());
+        let (ww, wh) = ((x1 + pad - wx).round().max(1.0) as u32, (y1 + pad - wy).round().max(1.0) as u32);
         let mut c = Canvas::new(ww, wh, s);
-        let (ox, oy, lw, lh, lr) = (pad / s, pad / s, g.w / s, g.h / s, g.r / s);
+        let (ox, oy, lw, lh, lr) = ((g.x - wx) / s, (g.y - wy) / s, g.w / s, g.h / s, g.r / s);
         // sombra curta (a ilha fica por cima das janelas: nada de capturar cliques longe dela)
         for (e, a) in [(4.0, 22u8), (2.0, 40)] {
             c.fill_round_rect(ox - e, oy - e + 2.0, ox + lw + e, oy + lh + e + 2.0, lr + e, Rgba(0, 0, 0, a));
@@ -297,13 +631,14 @@ impl Island {
         c.stroke_round_rect(ox, oy, ox + lw, oy + lh, lr, WHITE.with_a(26), 1.0 / s);
         c.push_round_clip(ox, oy, ox + lw, oy + lh, lr);
         let (a_prev, a_cur) = self.layer_alpha();
-        if a_prev > 0.01 && self.prev_shape != self.shape {
-            self.draw_layer(&mut c, self.prev_shape, info, ox, oy, lw, lh, a_prev);
+        let (prev_key, cur_key) = (self.multi.prev_key, self.key_for(self.shape));
+        if a_prev > 0.01 && (self.prev_shape != self.shape || prev_key != cur_key) {
+            self.draw_layer(&mut c, self.prev_shape, prev_key, scene, ox, oy, lw, lh, a_prev);
         }
         if a_cur > 0.01 {
-            self.draw_layer(&mut c, self.shape, info, ox, oy, lw, lh, a_cur);
+            self.draw_layer(&mut c, self.shape, cur_key, scene, ox, oy, lw, lh, a_cur);
         }
-        if let (Some(i), Morph::None) = (info, self.morph) {
+        if let (Some(i), Morph::None, true) = (scene.info, self.morph, cur_key == KEY) {
             self.draw_volume(&mut c, i, ox, oy, lw, lh);
         }
         // o cartão de verdade, esticado na forma de agora: na volta, termina exatamente como o
@@ -317,13 +652,87 @@ impl Island {
             c.image_px(face, (ox * s + (bw - fw) / 2.0).round(), (oy * s + (bh - fh) / 2.0).round(), fw.round(), fh.round(), fa);
         }
         c.pop_clip();
-        (c.finish(), ((g.x - pad).round() as i32, (g.y - pad).round() as i32))
+        // esticada com um aviso: um contorno na cor dele
+        if self.shape == Shape::Banner || self.prev_shape == Shape::Banner {
+            let a = if self.shape == Shape::Banner { a_cur } else { a_prev };
+            let col = self.accent_of(self.key_for(Shape::Banner));
+            c.stroke_round_rect(ox + 0.75, oy + 0.75, ox + lw - 0.75, oy + lh - 0.75, lr - 0.75, col.alpha(0.75 * a), 1.5);
+        }
+        self.draw_bubbles(&mut c, &bubbles, scene, wx, wy);
+        (c.finish(), (wx as i32, wy as i32))
+    }
+
+    /// As bolhas: o widget em miniatura, o pontinho do aviso não visto e quantos mais esperam.
+    fn draw_bubbles(&mut self, c: &mut Canvas, bubbles: &[(f32, f32, f32)], scene: &Scene, wx: f32, wy: f32) {
+        let s = self.s;
+        let fade = (self.multi.bubbles_at.elapsed().as_secs_f32() / 0.28).clamp(0.0, 1.0);
+        let list = self.bubble_entries();
+        let waiting = list.len().saturating_sub(1);
+        for (k, &(cx, cy, r)) in bubbles.iter().enumerate() {
+            let Some(e) = list.get(k).copied() else { continue };
+            let (bx, by, br) = ((cx - wx) / s, (cy - wy) / s, r / s);
+            // as de trás (abertas com o mouse) entram uma depois da outra
+            let a = if k == 0 { ease_in_out(fade) } else { 1.0 };
+            c.push_opacity(a);
+            c.fill_circle(bx, by + 2.0, br + 3.0, Rgba(0, 0, 0, 30));
+            c.fill_circle(bx, by + 1.0, br + 1.5, Rgba(0, 0, 0, 44));
+            c.fill_circle(bx, by, br, BLACK);
+            let hot = self.hot == Some(Btn::Bubble(k));
+            c.stroke_circle(bx, by, br - 0.5, WHITE.with_a(if hot { 70 } else { 26 }), if hot { 1.5 } else { 1.0 / s });
+            if e.key == KEY {
+                if let Some(art) = scene.info.and_then(|i| i.art.clone()) {
+                    let d = br * 2.0 - 12.0;
+                    let px = (d * s).round() as u32;
+                    let id = Arc::as_ptr(&art) as usize;
+                    if self.multi.bubble_art.as_ref().map(|c| (c.0, c.1)) != Some((id, px)) {
+                        self.multi.bubble_art = Some((id, px, media::cover_image(&art, px, px)));
+                    }
+                    c.push_round_clip(bx - d / 2.0, by - d / 2.0, bx + d / 2.0, by + d / 2.0, d / 2.0);
+                    c.image_px(&self.multi.bubble_art.as_ref().unwrap().2, ((bx - d / 2.0) * s).round(), ((by - d / 2.0) * s).round(), px as f32, px as f32, 1.0);
+                    c.pop_clip();
+                } else {
+                    let col = scene.info.map_or(WHITE, |i| i.colors[0]);
+                    c.fill_circle(bx, by, br - 6.0, col);
+                }
+            } else if let Some(kind) = scene.kind(e.key) {
+                kind.island_draw(c, IslandForm::Bubble, (bx - br, by - br, br * 2.0, br * 2.0), None, &scene.env(e.key));
+            }
+            // um aviso que ninguém viu: o pontinho na cor dele
+            if self.multi.unseen.contains(&e.key) {
+                let (dx, dy) = (bx + br * 0.72, by - br * 0.72);
+                c.fill_circle(dx, dy, 5.5, BLACK);
+                c.fill_circle(dx, dy, 4.0, e.item.accent);
+            }
+            // quantos mais esperam (com o mouse em cima, todos abrem)
+            if k == 0 && waiting > 0 && !self.multi.strip {
+                let (dx, dy) = (bx - br * 0.72, by - br * 0.72);
+                let label = format!("+{waiting}");
+                let w = c.text_width(&label, Face::Semibold, 10.0).max(9.0) + 8.0;
+                c.fill_round_rect(dx - w / 2.0 - 1.5, dy - 9.0, dx + w / 2.0 + 1.5, dy + 9.0, 9.0, BLACK);
+                c.fill_round_rect(dx - w / 2.0, dy - 7.5, dx + w / 2.0, dy + 7.5, 7.5, ACCENT);
+                c.text(dx, dy, &label, Face::Semibold, 10.0, WHITE, Anchor::MM, None);
+            }
+            c.pop_clip();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_layer(&mut self, c: &mut Canvas, shape: Shape, info: Option<&IslandInfo>, ox: f32, oy: f32, lw: f32, lh: f32, a: f32) {
+    fn draw_layer(&mut self, c: &mut Canvas, shape: Shape, key: &'static str, scene: &Scene, ox: f32, oy: f32, lw: f32, lh: f32, a: f32) {
+        if key != KEY {
+            let Some(kind) = scene.kind(key) else { return };
+            let hot = match self.hot {
+                Some(Btn::Widget(n)) if shape == self.shape => Some(n),
+                _ => None,
+            };
+            c.push_opacity(a);
+            kind.island_draw(c, shape.form(), (ox, oy, lw, lh), hot, &scene.env(key));
+            c.pop_clip();
+            return;
+        }
+        // a música não tem forma de aviso: esticada, fica como fechada
+        let shape = if shape == Shape::Banner { Shape::Compact } else { shape };
         let fade = |col: Rgba| Rgba(col.0, col.1, col.2, (col.3 as f32 * a) as u8);
-        let Some(info) = info else {
+        let Some(info) = scene.info else {
             c.text(ox + lw / 2.0, oy + lh / 2.0, "Nada tocando", Face::Regular, 12.0, fade(MUTED), Anchor::MM, None);
             return;
         };
@@ -343,7 +752,7 @@ impl Island {
         let hot_btn = self.hot;
         let hot = |b: Btn| hot_btn.is_some_and(|h| std::mem::discriminant(&h) == std::mem::discriminant(&b));
         match shape {
-            Shape::Compact => {
+            Shape::Compact | Shape::Banner => {
                 art(c, ox + 8.0, oy + (lh - 26.0) / 2.0, 26.0, 7.0, self);
                 self.draw_eq(c, ox + lw - 14.0 - 27.0, oy + lh / 2.0, 18.0, info, a);
             }
@@ -413,7 +822,7 @@ impl Island {
                             c.line(&[(ax, cy - 5.0), (ax, cy + 4.0)], fade(FG), 1.5);
                             c.line(&[(ax - 3.5, cy + 0.5), (ax, cy + 4.0), (ax + 3.5, cy + 0.5)], fade(FG), 1.5);
                         }
-                        Btn::Seek(_) => {}
+                        Btn::Seek(_) | Btn::Widget(_) | Btn::Bubble(_) => {}
                     }
                 }
             }
@@ -429,7 +838,7 @@ impl Island {
         }
         // (de onde a onde vai a barra, a altura dela e o bloco de texto que ela cobre)
         let (x0, x1, cy, top, bottom) = match self.shape {
-            Shape::Compact => (ox + 42.0, ox + lw - 50.0, oy + lh / 2.0, oy + lh / 2.0 - 11.0, oy + lh / 2.0 + 11.0),
+            Shape::Compact | Shape::Banner => (ox + 42.0, ox + lw - 50.0, oy + lh / 2.0, oy + lh / 2.0 - 11.0, oy + lh / 2.0 + 11.0),
             Shape::Medium => (ox + 76.0, ox + lw - 104.0, oy + lh / 2.0, oy + 8.0, oy + lh - 8.0),
             Shape::Large => (ox + 92.0, ox + lw - 64.0, oy + 58.0, oy + 40.0, oy + 76.0),
         };
@@ -475,18 +884,22 @@ impl App {
         self.island.as_ref().is_some_and(|i| i.hwnd.0 as isize == hwnd)
     }
 
+    /// O Tocando agora está na ilha (e o cartão dele, escondido)?
+    pub(super) fn media_in_island(&self) -> bool {
+        self.island.as_ref().is_some_and(|i| i.media)
+    }
+
     fn media_index(&self) -> Option<usize> {
         self.find(KEY)
     }
 
     fn island_info(&self) -> (Option<IslandInfo>, Option<f32>) {
         match self.media_index() {
-            Some(j) => (self.cards[j].kind.island(), self.cards[j].kind.sound_level()),
-            None => (None, None),
+            Some(j) if self.media_in_island() => (self.cards[j].kind.island(), self.cards[j].kind.sound_level()),
+            _ => (None, None),
         }
     }
 
-    /// Lugar padrão: no alto e no meio do monitor onde o widget está.
     /// O espaço que a ilha ocupa aberta (do tamanho grande), para a arrumação deixar livre.
     pub(super) fn island_keep_clear(&self) -> Option<Rect> {
         let isl = self.island.as_ref().filter(|i| !i.hidden)?;
@@ -494,42 +907,64 @@ impl App {
         Some((g.x.floor() as i32, g.y.floor() as i32, (g.x + g.w).ceil() as i32, (g.y + g.h).ceil() as i32))
     }
 
+    /// No alto e no meio do monitor onde está o retângulo.
     fn island_default_anchor(&self, near: Rect, s: f32) -> (f32, f32) {
         let work = win::area_for(near);
         ((work.0 + work.2) as f32 / 2.0, work.1 as f32 + TOP_GAP * s)
     }
 
-    /// O Tocando agora vira a ilha (`animate`: a transformação a partir do cartão).
-    pub(super) fn open_island(&mut self, animate: bool) {
-        if self.island.is_some() {
-            return;
+    /// O lugar padrão (âncora, na barra?): na barra de tarefas do monitor onde está o retângulo;
+    /// sem barra à vista (escondida sozinha), no alto e no meio.
+    fn island_home(&self, near: Rect, s: f32) -> ((f32, f32), bool) {
+        let work = win::area_for(near);
+        match dock_slot((work.0 + work.2) / 2, work.3 - 1) {
+            Some((anchor, _)) => (anchor, true),
+            None => (self.island_default_anchor(near, s), false),
         }
-        let Some(j) = self.media_index() else { return };
-        let card_rect = self.cards[j].card_rect();
-        let s0 = self.cards[j].s;
+    }
+
+    /// Onde a ilha abre: o lugar guardado (se ainda está numa tela) ou o padrão perto de `near`.
+    fn island_start(&self, near: Rect, s: f32) -> ((f32, f32), bool) {
         let saved = self.sh.cfg[KEY]["ilha_pos"].as_array().and_then(|a| Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32)));
-        let anchor = match saved {
-            Some((x, y)) if win::on_screen(x as i32, (y + 10.0) as i32) => (x, y),
-            _ => self.island_default_anchor(card_rect, s0),
-        };
+        match saved {
+            Some((x, y)) if win::on_screen(x as i32, (y + 10.0) as i32) => ((x, y), false),
+            _ => self.island_home(near, s),
+        }
+    }
+
+    /// Leva a ilha (animando) para a âncora dada e guarda o lugar.
+    fn move_island(&mut self, anchor: (f32, f32), docked: bool) {
+        if let Some(isl) = &mut self.island {
+            isl.from = isl.geo();
+            isl.anchor = anchor;
+            isl.docked = docked;
+            isl.s = island_scale(anchor.0 as i32, anchor.1 as i32 + 10);
+            isl.to = isl.target(isl.shape);
+            isl.anim_at = Instant::now();
+            isl.anim_ms = STATE_MS;
+            isl.next_frame = Instant::now();
+        }
+        self.save_island_pos();
+    }
+
+    /// Uma ilha nova (sem janela na tela ainda), fechada, na âncora dada.
+    fn new_island(&self, anchor: (f32, f32), docked: bool, media: bool) -> Island {
         let s = island_scale(anchor.0 as i32, (anchor.1 + 10.0) as i32);
-        let info = self.cards[j].kind.island();
-        let card_color = info.as_ref().map(|i| i.colors[0].mix(BLACK, 0.55)).unwrap_or(Rgba::rgb(40, 30, 60));
-        let card_face = (animate && self.sh.animations).then(|| self.cards[j].face(&self.sh));
-        let hwnd = events::create_layered(CARD_CLASS, false);
         let now = Instant::now();
         let mut isl = Island {
-            hwnd,
+            hwnd: events::create_layered(CARD_CLASS, false),
             shape: Shape::Compact,
             prev_shape: Shape::Compact,
             shape_at: now - Duration::from_secs(1),
             from: Geo { x: 0.0, y: 0.0, w: 1.0, h: 1.0, r: 0.0 },
             to: Geo { x: 0.0, y: 0.0, w: 1.0, h: 1.0, r: 0.0 },
             anim_at: now,
-            anim_ms: if animate && self.sh.animations { MORPH_MS } else { 0.0 },
-            morph: if animate && self.sh.animations { Morph::In } else { Morph::None },
+            anim_ms: 0.0,
+            morph: Morph::None,
             anchor,
             s,
+            docked,
+            dock_check: now,
             press: None,
             dragging: false,
             hot: None,
@@ -540,19 +975,55 @@ impl App {
             levels: [0.1; 5],
             started: now,
             next_frame: now,
-            card_color,
+            card_color: Rgba::rgb(40, 30, 60),
             art_cache: None,
-            card_face,
+            card_face: None,
+            media,
+            multi: Multi::new(now),
         };
         isl.to = isl.target(Shape::Compact);
-        isl.from = if animate {
+        isl.from = isl.to;
+        isl
+    }
+
+    /// O Tocando agora vira a ilha (`animate`: a transformação a partir do cartão). Com a ilha
+    /// já na tela (com outros widgets), a música entra nela.
+    pub(super) fn open_island(&mut self, animate: bool) {
+        let Some(j) = self.media_index() else { return };
+        if let Some(isl) = &mut self.island {
+            if !isl.media {
+                isl.media = true;
+                isl.quiet_since = None;
+                isl.multi.touched.insert(KEY, Instant::now());
+                isl.multi.pinned = Some((KEY, true));
+                self.tooltip.hide();
+                events::show(self.cards[j].hwnd, false);
+                self.sh.cfg.obj_mut(KEY).insert("ilha".into(), json!(true));
+                self.sh.save();
+                self.island_sync_at = Instant::now();
+                self.island_sync();
+            }
+            return;
+        }
+        let card_rect = self.cards[j].card_rect();
+        let (anchor, docked) = self.island_start(card_rect, self.cards[j].s);
+        let info = self.cards[j].kind.island();
+        let animate = animate && self.sh.animations;
+        let mut isl = self.new_island(anchor, docked, true);
+        isl.card_color = info.as_ref().map(|i| i.colors[0].mix(BLACK, 0.55)).unwrap_or(Rgba::rgb(40, 30, 60));
+        if animate {
+            isl.card_face = Some(self.cards[j].face(&self.sh));
+            isl.anim_ms = MORPH_MS;
+            isl.morph = Morph::In;
             let r = self.cards[j].radius_px(self.cards[j].mode);
-            Geo { x: card_rect.0 as f32, y: card_rect.1 as f32, w: (card_rect.2 - card_rect.0) as f32, h: (card_rect.3 - card_rect.1) as f32, r }
-        } else {
-            isl.to
-        };
-        let (img, pos) = isl.render(info.as_ref());
-        win::blit(hwnd, &img, Some(pos), 255);
+            isl.from = Geo { x: card_rect.0 as f32, y: card_rect.1 as f32, w: (card_rect.2 - card_rect.0) as f32, h: (card_rect.3 - card_rect.1) as f32, r };
+        }
+        let hwnd = isl.hwnd;
+        {
+            let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
+            let (img, pos) = isl.render(&scene);
+            win::blit(hwnd, &img, Some(pos), 255);
+        }
         win::set_z(hwnd, Z::Topmost);
         events::show(hwnd, !self.sh.focus);
         // o cartão fica guardado (escondido) no lugar dele
@@ -561,14 +1032,42 @@ impl App {
         self.island = Some(isl);
         self.sh.cfg.obj_mut(KEY).insert("ilha".into(), json!(true));
         self.sh.save();
+        self.island_sync_at = Instant::now();
+        self.island_sync();
     }
 
-    /// A ilha volta a ser o cartão (`animate`: voando de volta para o lugar dele).
+    /// A ilha aparece sozinha (sem a música), porque algum widget tem o que mostrar: nasce
+    /// como uma bolinha e estica até a pílula.
+    fn open_bare_island(&mut self) {
+        let near = self.cards.first().map(|c| c.card_rect()).unwrap_or_else(|| {
+            let a = win::work_areas()[0];
+            (a.0, a.1, a.0 + 1, a.1 + 1)
+        });
+        let s0 = win::scale_at(near.0, near.1);
+        let (anchor, docked) = self.island_start(near, s0);
+        let mut isl = self.new_island(anchor, docked, false);
+        if self.sh.animations {
+            let to = isl.to;
+            isl.from = Geo { x: to.x + to.w - to.h, y: to.y, w: to.h, h: to.h, r: to.h / 2.0 };
+            isl.anim_ms = STATE_MS;
+        }
+        win::set_z(isl.hwnd, Z::Topmost);
+        events::show(isl.hwnd, !self.sh.focus);
+        self.island = Some(isl);
+    }
+
+    /// A ilha volta a ser o cartão (`animate`: voando de volta para o lugar dele). Com outros
+    /// widgets na ilha, só a música sai: o cartão reaparece e a ilha continua.
     pub(super) fn close_island(&mut self, animate: bool) {
         let Some(j) = self.media_index() else {
             self.drop_island();
             return;
         };
+        let others = self.island.as_ref().is_some_and(|i| i.multi.entries.iter().any(|e| e.key != KEY));
+        if others {
+            self.release_media();
+            return;
+        }
         let card_rect = self.cards[j].card_rect();
         let r = self.cards[j].radius_px(self.cards[j].mode);
         if !animate || !self.sh.animations || self.island.as_ref().is_some_and(|i| i.hidden) {
@@ -580,6 +1079,7 @@ impl App {
         }
         let face = self.cards[j].face(&self.sh);
         let Some(isl) = &mut self.island else { return };
+        isl.multi.strip = false;
         isl.card_face = Some(face);
         isl.from = isl.geo();
         isl.to = Geo { x: card_rect.0 as f32, y: card_rect.1 as f32, w: (card_rect.2 - card_rect.0) as f32, h: (card_rect.3 - card_rect.1) as f32, r };
@@ -591,16 +1091,41 @@ impl App {
         isl.next_frame = Instant::now();
     }
 
-    fn finish_close(&mut self) {
-        self.drop_island();
+    /// A música sai da ilha (que fica com os outros widgets) e o cartão volta ao lugar dele.
+    fn release_media(&mut self) {
+        if let Some(isl) = &mut self.island {
+            isl.media = false;
+            isl.multi.entries.retain(|e| e.key != KEY);
+            if isl.multi.pinned.is_some_and(|p| p.0 == KEY) {
+                isl.multi.pinned = None;
+            }
+            if isl.shape != Shape::Compact {
+                isl.set_shape(Shape::Compact);
+            }
+        }
         self.sh.cfg.obj_mut(KEY).insert("ilha".into(), json!(false));
         self.sh.save();
+        self.show_media_card();
+        self.island_sync_at = Instant::now();
+        self.island_sync();
+    }
+
+    fn show_media_card(&mut self) {
         if let Some(j) = self.media_index() {
             events::show(self.cards[j].hwnd, !self.sh.focus && !self.cards[j].stacked);
             self.cards[j].refresh(&self.sh);
             self.cards[j].present(&self.sh, true);
             self.send_to_back(j);
         }
+    }
+
+    fn finish_close(&mut self) {
+        self.drop_island();
+        self.sh.cfg.obj_mut(KEY).insert("ilha".into(), json!(false));
+        self.sh.save();
+        self.show_media_card();
+        // os outros widgets podem pedir a ilha de novo
+        self.island_sync_at = Instant::now();
     }
 
     /// Some com a ilha sem animação (o widget foi fechado, o app vai sair...).
@@ -610,37 +1135,140 @@ impl App {
         }
     }
 
-    pub(super) fn island_deadline(&self) -> Option<Instant> {
-        self.island.as_ref().map(|i| i.next_frame)
+    /// O Tocando agora foi fechado: com outros widgets na ilha, ela continua sem a música.
+    pub(super) fn island_forget_media(&mut self) {
+        let others = self.island.as_ref().is_some_and(|i| i.multi.entries.iter().any(|e| e.key != KEY));
+        match &mut self.island {
+            Some(isl) if others => {
+                isl.media = false;
+                isl.multi.entries.retain(|e| e.key != KEY);
+            }
+            _ => self.drop_island(),
+        }
     }
 
+    pub(super) fn island_deadline(&self) -> Option<Instant> {
+        let frame = self.island.as_ref().map(|i| i.next_frame);
+        // perguntar aos widgets só se algum pode aparecer na ilha
+        let sync = config::setting_bool(&self.sh.cfg, "ilha_widgets").then_some(self.island_sync_at);
+        [frame, sync].into_iter().flatten().min()
+    }
+
+    /// Mexeram no widget `key` (no cartão): se ele está na ilha, ele vai para a pílula.
+    pub(super) fn island_touch(&mut self, key: &'static str) {
+        if let Some(isl) = &mut self.island {
+            isl.multi.touched.insert(key, Instant::now());
+            if isl.multi.pinned.is_some_and(|p| p.0 != key) {
+                isl.multi.pinned = None;
+            }
+        }
+        self.island_sync_at = Instant::now();
+    }
+
+    /// Pergunta aos widgets o que eles têm para a ilha: abre a ilha quando alguém tem, fecha
+    /// quando ninguém tem (e a música não está nela), e acerta quem fica na pílula.
+    pub(super) fn island_sync(&mut self) {
+        let now = Instant::now();
+        if now < self.island_sync_at {
+            return;
+        }
+        self.island_sync_at = now + if self.island.is_some() { SYNC_EVERY } else { SYNC_IDLE };
+        let mut found: Vec<Entry> = Vec::new();
+        if config::setting_bool(&self.sh.cfg, "ilha_widgets") {
+            for c in &self.cards {
+                let key = c.key();
+                if key == KEY || !widgets::on_island(&self.sh.cfg, key) {
+                    continue;
+                }
+                let env = Env { cfg: &self.sh.cfg, key };
+                if let Some(item) = c.kind.island_item(&env) {
+                    found.push(Entry { key, item });
+                }
+            }
+        }
+        if self.media_in_island() {
+            let (info, _) = self.island_info();
+            let mut item = IslandItem::live(info.as_ref().map_or(WHITE, |i| i.colors[0]));
+            item.idle = !info.as_ref().is_some_and(|i| i.playing);
+            found.push(Entry { key: KEY, item });
+        }
+        if self.island.is_none() {
+            if found.is_empty() {
+                return;
+            }
+            self.open_bare_island();
+        }
+        let Some(isl) = &mut self.island else { return };
+        if found.is_empty() && !isl.media {
+            // ninguém mais: a pílula encolhe até uma bolinha e some
+            if !isl.multi.vanish && isl.morph == Morph::None {
+                isl.multi.vanish = true;
+                isl.multi.strip = false;
+                isl.from = isl.geo();
+                let g = isl.target(Shape::Compact);
+                isl.to = Geo { x: g.x + g.w - g.h, y: g.y, w: g.h, h: g.h, r: g.h / 2.0 };
+                isl.anim_at = now;
+                isl.anim_ms = if self.sh.animations { STATE_MS * 0.6 } else { 0.0 };
+                isl.next_frame = now;
+            }
+            return;
+        }
+        if isl.multi.vanish {
+            // voltou alguém enquanto ela sumia
+            isl.multi.vanish = false;
+            isl.from = isl.geo();
+            isl.to = isl.target(isl.shape);
+            isl.anim_at = now;
+            isl.anim_ms = STATE_MS;
+        }
+        isl.update_entries(found, now);
+    }
+
+    /// Guarda onde a ilha está; na barra de tarefas não guarda nada (é o lugar padrão, e o
+    /// botão Iniciar muda de lugar).
     fn save_island_pos(&mut self) {
         if let Some(isl) = &self.island {
             let (x, y) = isl.anchor;
-            self.sh.cfg.obj_mut(KEY).insert("ilha_pos".into(), json!([x.round(), y.round()]));
+            if isl.docked {
+                self.sh.cfg.obj_mut(KEY).remove("ilha_pos");
+            } else {
+                self.sh.cfg.obj_mut(KEY).insert("ilha_pos".into(), json!([x.round(), y.round()]));
+            }
             self.sh.save();
         }
     }
 
-    pub(super) fn island_mouse(&mut self, kind: MouseKind, x: i32, y: i32, sx: i32, sy: i32) {
+    pub(super) fn island_mouse(&mut self, kind: MouseKind, _x: i32, _y: i32, sx: i32, sy: i32) {
         let (info, _) = self.island_info();
+        let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
         let Some(isl) = &mut self.island else { return };
-        if isl.morph == Morph::Out {
+        if isl.morph == Morph::Out || isl.multi.vanish {
             return;
         }
         match kind {
             MouseKind::Down => {
-                isl.press = Some((sx, sy, isl.btn_at(x, y, info.as_ref()), isl.anchor));
+                isl.press = Some((sx, sy, isl.btn_at(sx, sy, &scene), isl.anchor));
             }
             MouseKind::Move => {
                 if let Some((px, py, btn, start)) = isl.press {
                     let far = (((sx - px).pow(2) + (sy - py).pow(2)) as f32).sqrt() >= DRAG_START * isl.s;
-                    if !isl.dragging && far && btn.is_none() {
+                    // arrasta pela pílula ou pelas bolhas (fora dos botões da pílula)
+                    let grabbable = matches!(btn, None | Some(Btn::Bubble(_)));
+                    if !isl.dragging && far && grabbable {
                         isl.dragging = true;
+                        isl.multi.strip = false;
                         events::set_cursor(isl.hwnd, Cursor::Move);
                     }
                     if isl.dragging {
                         let mut anchor = (start.0 + (sx - px) as f32, start.1 + (sy - py) as f32);
+                        // perto do lugar na barra de tarefas, encaixa lá
+                        let dock = dock_slot(sx, sy).filter(|&((dx, dy), s)| (anchor.0 - dx).abs() < DOCK_SNAP * s && (anchor.1 - dy).abs() < DOCK_SNAP * s);
+                        isl.docked = dock.is_some();
+                        if let Some((slot, _)) = dock {
+                            isl.anchor = slot;
+                            isl.snap_to_target();
+                            return;
+                        }
                         // perto do alto e do meio do monitor, encaixa lá
                         let (_, work) = win::monitor_at(anchor.0 as i32, anchor.1 as i32 + 10);
                         let center = (work.0 + work.2) as f32 / 2.0;
@@ -656,8 +1284,13 @@ impl App {
                         return;
                     }
                 }
-                let hot = isl.btn_at(x, y, info.as_ref());
-                if hot.as_ref().map(std::mem::discriminant) != isl.hot.as_ref().map(std::mem::discriminant) {
+                let hot = isl.btn_at(sx, sy, &scene);
+                // na barra de progresso, o ponto exato não muda o desenho
+                let changed = match (hot, isl.hot) {
+                    (Some(Btn::Seek(_)), Some(Btn::Seek(_))) => false,
+                    (a, b) => a != b,
+                };
+                if changed {
                     isl.hot = hot;
                     isl.next_frame = Instant::now();
                 }
@@ -683,13 +1316,26 @@ impl App {
                 }
             }
             MouseKind::Right => {
-                let app = info.as_ref().map(|i| i.app.clone()).unwrap_or_else(|| "player".into());
-                let items = vec![
-                    MenuItem::Cmd("Voltar para a área de trabalho".into(), M_ISLAND_BACK),
-                    MenuItem::Cmd(format!("Abrir no {app}"), M_ISLAND_OPEN),
-                    MenuItem::Sep,
-                    MenuItem::Cmd("Pôr no alto, no meio da tela".into(), M_ISLAND_CENTER),
-                ];
+                // o menu de quem está debaixo do mouse (a bolha ou a pílula)
+                let key = match isl.bubble_at(sx, sy) {
+                    Some(k) => isl.bubble_entries().get(k).map_or(isl.multi.key, |e| e.key),
+                    None => isl.key_for(isl.shape),
+                };
+                isl.multi.menu_key = key;
+                let mut items = Vec::new();
+                if isl.media {
+                    let app = info.as_ref().map(|i| i.app.clone()).unwrap_or_else(|| "player".into());
+                    items.push(MenuItem::Cmd("Voltar para a área de trabalho".into(), M_ISLAND_BACK).icon("pilha"));
+                    if key == KEY {
+                        items.push(MenuItem::Cmd(format!("Abrir no {app}"), M_ISLAND_OPEN).icon("midia"));
+                    }
+                }
+                if key != KEY {
+                    items.push(MenuItem::Cmd(format!("Não mostrar {} na ilha", widgets::title(key)), M_ISLAND_HIDE).icon("close"));
+                }
+                items.push(MenuItem::Sep);
+                items.push(MenuItem::Check("Na barra de tarefas".into(), isl.docked, M_ISLAND_DOCK).icon("pin"));
+                items.push(MenuItem::Cmd("Pôr no alto, no meio da tela".into(), M_ISLAND_CENTER).icon("mover"));
                 self.menu.popup(items, sx, sy, Some(KEY));
             }
             MouseKind::Leave => {
@@ -702,9 +1348,38 @@ impl App {
     }
 
     fn island_button(&mut self, btn: Btn) {
-        if btn == Btn::Back {
-            self.close_island(true);
-            return;
+        match btn {
+            Btn::Back => {
+                self.close_island(true);
+                return;
+            }
+            Btn::Bubble(k) => {
+                if let Some(isl) = &mut self.island {
+                    let list = isl.bubble_entries();
+                    match list.get(k).map(|e| e.key) {
+                        // com mais gente esperando, o primeiro clique abre todas as bolhas
+                        Some(_) if k == 0 && !isl.multi.strip && list.len() > 1 => isl.multi.strip = true,
+                        Some(key) => isl.choose(key, true),
+                        None => {}
+                    }
+                    isl.next_frame = Instant::now();
+                }
+                return;
+            }
+            Btn::Widget(action) => {
+                let Some(isl) = &self.island else { return };
+                let key = isl.key_for(isl.shape);
+                let Some(j) = self.find(key) else { return };
+                self.with_kind(j, |k, ctx| k.act(action, ctx));
+                self.cards[j].refresh(&self.sh);
+                self.island_touch(key);
+                self.island_sync();
+                if let Some(isl) = &mut self.island {
+                    isl.next_frame = Instant::now();
+                }
+                return;
+            }
+            _ => {}
         }
         let Some(j) = self.media_index() else { return };
         let action = match btn {
@@ -713,9 +1388,10 @@ impl App {
             Btn::Prev => island_act::PREV,
             Btn::Open => island_act::OPEN_PLAYER,
             Btn::Seek(f) => island_act::SEEK + f.min(1000),
-            Btn::Back => return,
+            _ => return,
         };
         self.with_kind(j, |k, ctx| k.act(action, ctx));
+        self.island_touch(KEY);
         if let Some(isl) = &mut self.island {
             isl.next_frame = Instant::now();
         }
@@ -726,20 +1402,19 @@ impl App {
         match id {
             M_ISLAND_BACK => self.close_island(true),
             M_ISLAND_OPEN => self.island_button(Btn::Open),
-            M_ISLAND_CENTER => {
+            M_ISLAND_HIDE => {
+                let Some(key) = self.island.as_ref().map(|i| i.multi.menu_key) else { return true };
+                self.sh.cfg.obj_mut(key).insert("na_ilha".into(), json!(false));
+                self.sh.save();
+                self.island_sync_at = Instant::now();
+                self.island_sync();
+            }
+            M_ISLAND_CENTER | M_ISLAND_DOCK => {
                 let Some(isl) = &self.island else { return true };
                 let g = isl.geo();
                 let near = (g.x as i32, g.y as i32, (g.x + g.w) as i32, (g.y + g.h) as i32);
-                let anchor = self.island_default_anchor(near, isl.s);
-                if let Some(isl) = &mut self.island {
-                    isl.anchor = anchor;
-                    isl.from = isl.geo();
-                    isl.to = isl.target(isl.shape);
-                    isl.anim_at = Instant::now();
-                    isl.anim_ms = STATE_MS;
-                    isl.next_frame = Instant::now();
-                }
-                self.save_island_pos();
+                let (anchor, docked) = if id == M_ISLAND_DOCK { self.island_home(near, isl.s) } else { (self.island_default_anchor(near, isl.s), false) };
+                self.move_island(anchor, docked);
             }
             _ => return false,
         }
@@ -747,6 +1422,10 @@ impl App {
     }
 
     pub(super) fn island_wheel(&mut self, delta: i32) {
+        // a roda mexe no volume só com a música na pílula
+        if !self.island.as_ref().is_some_and(|i| i.media && i.key_for(i.shape) == KEY) {
+            return;
+        }
         let Some(j) = self.media_index() else { return };
         let steps = delta as f32 / 120.0;
         self.with_kind(j, |k, ctx| k.wheel(0.0, 0.0, steps, Mode::M, ctx));
@@ -761,19 +1440,23 @@ impl App {
         let card = self.media_index().map(|j| (self.cards[j].card_rect(), self.cards[j].s));
         let Some(isl) = &self.island else { return };
         let visible = win::on_screen(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10);
-        let anchor = match (visible, card) {
-            (true, _) => isl.anchor,
-            (false, Some((rect, s))) => self.island_default_anchor(rect, s),
-            (false, None) => isl.anchor,
+        let slot = if isl.docked { dock_slot(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10) } else { None };
+        let (anchor, docked) = match (slot, visible, card) {
+            (Some((slot, _)), _, _) => (slot, true),
+            (None, true, _) => (isl.anchor, false),
+            (None, false, Some((rect, s))) => self.island_home(rect, s),
+            (None, false, None) => (isl.anchor, false),
         };
         if let Some(isl) = &mut self.island {
             isl.anchor = anchor;
+            isl.docked = docked;
             isl.s = island_scale(anchor.0 as i32, anchor.1 as i32 + 10);
             isl.snap_to_target();
         }
     }
 
-    /// Um quadro da ilha: forma (mouse em cima, clique fora), ondas, esconder em tela cheia.
+    /// Um quadro da ilha: forma (mouse em cima, clique fora, aviso chegando), bolhas, ondas,
+    /// esconder em tela cheia.
     pub(super) fn island_tick(&mut self) {
         let now = Instant::now();
         if !self.island.as_ref().is_some_and(|i| now >= i.next_frame) {
@@ -788,11 +1471,17 @@ impl App {
             self.finish_close();
             return;
         }
+        // terminou de sumir (ninguém mais na ilha)
+        if isl.multi.vanish && isl.progress() >= 1.0 {
+            self.drop_island();
+            self.island_sync_at = now + SYNC_IDLE;
+            return;
+        }
         if isl.morph == Morph::In && isl.progress() >= 1.0 {
             isl.morph = Morph::None;
         }
-        // nada tocando por um bom tempo: volta para a área de trabalho
-        if info.as_ref().is_some_and(|i| i.playing) {
+        // nada tocando por um bom tempo: a música volta para a área de trabalho
+        if !isl.media || info.as_ref().is_some_and(|i| i.playing) {
             isl.quiet_since = None;
         } else if isl.quiet_since.get_or_insert(now).elapsed() >= QUIET {
             self.close_island(true);
@@ -809,39 +1498,120 @@ impl App {
                 win::set_z(isl.hwnd, Z::Topmost);
             }
         }
-        // o mouse em cima estica; longe, recolhe
-        if isl.morph == Morph::None && !isl.dragging {
-            let (px, py) = win::pointer();
-            let over = g.contains(px, py);
-            if over {
-                isl.outside_since = None;
-                let since = *isl.inside_since.get_or_insert(now);
-                if isl.shape == Shape::Compact && since.elapsed() >= HOVER_IN {
-                    isl.set_shape(Shape::Medium);
+        if !isl.hidden {
+            // clicada, a barra de tarefas sobe por cima de tudo: a ilha volta para cima dela
+            win::stay_over_taskbar(isl.hwnd);
+        }
+        // na barra, acompanha o botão Iniciar (ele anda quando abrem e fecham apps)
+        if isl.docked && isl.morph == Morph::None && !isl.dragging && now >= isl.dock_check {
+            isl.dock_check = now + DOCK_CHECK;
+            if let Some((slot, s)) = dock_slot(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10) {
+                if (slot.0 - isl.anchor.0).abs() >= 1.0 || (slot.1 - isl.anchor.1).abs() >= 1.0 || (s - isl.s).abs() > 0.01 {
+                    isl.from = isl.geo();
+                    isl.anchor = slot;
+                    isl.s = s;
+                    isl.to = isl.target(isl.shape);
+                    isl.anim_at = now;
+                    isl.anim_ms = STATE_MS;
                 }
+            }
+        }
+        let (px, py) = win::pointer();
+        if isl.morph == Morph::None && !isl.dragging && !isl.multi.vanish {
+            // o mouse nas bolhas: com mais gente esperando, todas abrem
+            let on_bubbles = isl.bubble_at(px, py).is_some() || (isl.multi.strip && isl.near_bubbles(px, py));
+            if on_bubbles {
+                isl.multi.strip_out = None;
+                if !isl.multi.strip && isl.bubble_entries().len() > 1 && isl.inside_since.is_some_and(|t| t.elapsed() >= HOVER_IN) {
+                    isl.multi.strip = true;
+                }
+            } else if isl.multi.strip && isl.multi.strip_out.get_or_insert(now).elapsed() >= HOVER_OUT {
+                isl.multi.strip = false;
+                isl.multi.strip_out = None;
+            }
+            // o mouse na pílula estica; longe, recolhe
+            let over = g.contains(px, py);
+            if over || on_bubbles {
+                isl.outside_since = None;
+                isl.inside_since.get_or_insert(now);
             } else {
                 isl.inside_since = None;
+            }
+            if over {
+                let since = isl.inside_since.unwrap_or(now);
+                if matches!(isl.shape, Shape::Compact | Shape::Banner) && since.elapsed() >= HOVER_IN {
+                    // passou o mouse no aviso: ele fica na pílula enquanto ela está aberta
+                    if isl.shape == Shape::Banner {
+                        if let Some((k, _)) = isl.multi.banner {
+                            isl.choose(k, false);
+                        }
+                    }
+                    isl.set_shape(Shape::Medium);
+                }
+                // o que está na pílula aberta foi visto
+                if matches!(isl.shape, Shape::Medium | Shape::Large) {
+                    let key = isl.multi.key;
+                    isl.multi.unseen.retain(|k| *k != key);
+                }
+            } else {
                 let since = *isl.outside_since.get_or_insert(now);
                 let clicked_away = win::key_down(0x01) || win::key_down(0x02);
-                match isl.shape {
-                    Shape::Medium if since.elapsed() >= HOVER_OUT => isl.set_shape(Shape::Compact),
-                    Shape::Large if clicked_away || since.elapsed() >= LARGE_IDLE => isl.set_shape(Shape::Compact),
-                    _ => {}
+                let collapse = match isl.shape {
+                    Shape::Medium => since.elapsed() >= HOVER_OUT,
+                    Shape::Large => clicked_away || since.elapsed() >= LARGE_IDLE,
+                    _ => false,
+                };
+                if collapse {
+                    isl.set_shape(Shape::Compact);
+                    // a escolha só por passar o mouse vale enquanto ela estava aberta
+                    if isl.multi.pinned.is_some_and(|p| !p.1) {
+                        isl.multi.pinned = None;
+                        self.island_sync_at = now;
+                    }
                 }
+            }
+            // um aviso chegando estica a ilha por alguns segundos
+            match isl.multi.banner {
+                Some((_, at)) if at.elapsed() < BANNER_FOR => {
+                    if isl.shape == Shape::Compact && !over {
+                        isl.set_shape(Shape::Banner);
+                    }
+                }
+                Some(_) => {
+                    isl.multi.banner = None;
+                    if isl.shape == Shape::Banner {
+                        isl.set_shape(Shape::Compact);
+                    }
+                }
+                None if isl.shape == Shape::Banner => isl.set_shape(Shape::Compact),
+                None => {}
             }
         }
         isl.step_levels(info.as_ref(), peak);
         if !isl.hidden {
-            let (img, pos) = isl.render(info.as_ref());
+            let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
+            let (img, pos) = isl.render(&scene);
             win::blit(isl.hwnd, &img, Some(pos), 255);
         }
-        let playing = info.as_ref().is_some_and(|i| i.playing);
-        let wait = if isl.animating() || isl.dragging {
+        let shown = isl.key_for(isl.shape);
+        let playing = info.as_ref().is_some_and(|i| i.playing) && shown == KEY;
+        // o widget na pílula pode pedir quadros (a chuva caindo na ilha aberta do Tempo)
+        let fps = match (shown, isl.morph) {
+            (KEY, _) | (_, Morph::In | Morph::Out) => 0,
+            _ => self.cards.iter().find(|c| c.key() == shown).map_or(0, |c| c.kind.island_fps(isl.shape.form())),
+        };
+        let near = isl.near(px, py);
+        let wait = if isl.animating() || isl.dragging || isl.multi.bubbles_at.elapsed() < Duration::from_millis(300) {
             16
+        } else if fps > 0 && !isl.hidden {
+            (1000 / fps.min(60)) as u64
         } else if playing && !isl.hidden {
             33
+        } else if near && !isl.hidden {
+            60
         } else {
-            90
+            // parada e o mouse longe: só o relógio do Pomodoro e os avisos mudam
+            250
         };
         isl.next_frame = now + Duration::from_millis(wait);
     }
@@ -865,6 +1635,8 @@ pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), 
         morph: Morph::In,
         anchor,
         s,
+        docked: false,
+        dock_check: now,
         press: None,
         dragging: false,
         hot: None,
@@ -877,6 +1649,8 @@ pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), 
         next_frame: now,
         card_color: info.colors[0].mix(BLACK, 0.55),
         art_cache: None,
+        media: true,
+        multi: Multi::new(now),
         card_face: Some(face.clone()),
     };
     isl.to = isl.target(Shape::Compact);
@@ -891,7 +1665,7 @@ pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), 
         isl.started = base - Duration::from_millis(clock);
         let peak = 0.45 + 0.35 * ((clock as f32) / 170.0).sin().abs();
         isl.step_levels(Some(info), Some(peak));
-        let (img, pos) = isl.render(Some(info));
+        let (img, pos) = isl.render(&Scene::media(Some(info)));
         out.push((Some((img, pos)), ms));
     };
     let anim = |isl: &mut Island, total: f32, out: &mut Vec<_>, frame: &mut dyn FnMut(&mut Island, u64, u32, &mut Vec<(Option<(Image, (i32, i32))>, u32)>)| {
@@ -944,6 +1718,8 @@ pub(crate) fn readme_shapes(info: &IslandInfo, s: f32) -> Vec<Image> {
                 morph: Morph::None,
                 anchor: (0.0, 0.0),
                 s,
+                docked: false,
+                dock_check: now,
                 press: None,
                 dragging: false,
                 hot: None,
@@ -956,9 +1732,11 @@ pub(crate) fn readme_shapes(info: &IslandInfo, s: f32) -> Vec<Image> {
                 next_frame: now,
                 card_color: BLACK,
                 art_cache: None,
+                media: true,
+                multi: Multi::new(now),
                 card_face: None,
             };
-            isl.render(Some(info)).0
+            isl.render(&Scene::media(Some(info))).0
         })
         .collect()
 }
@@ -981,6 +1759,8 @@ mod tests {
             morph,
             anchor: (600.0, 20.0),
             s: 1.25,
+            docked: false,
+            dock_check: now,
             press: None,
             dragging: false,
             hot: if shape == Shape::Large { Some(Btn::Back) } else { None },
@@ -993,6 +1773,8 @@ mod tests {
             next_frame: now,
             card_color: Rgba::rgb(110, 30, 70),
             art_cache: None,
+            media: true,
+            multi: Multi::new(now),
             card_face: None,
         };
         let card = Geo { x: 500.0, y: 300.0, w: 400.0, h: 188.0, r: 32.0 };
@@ -1000,6 +1782,239 @@ mod tests {
         isl.from = if morph == Morph::None { pill } else { card };
         isl.to = pill;
         isl
+    }
+
+    /// Na barra de tarefas: à esquerda do Iniciar, no meio da altura da barra; com a barra
+    /// alinhada à esquerda (sem espaço antes do Iniciar), antes da área de notificação.
+    #[test]
+    fn taskbar_slot_sits_left_of_start() {
+        let s = 1.25 * SIZE;
+        let (w, h, _) = Shape::Compact.size();
+        let (w, h) = (w * s, h * s);
+        let centered = win::Taskbar { bar: (0, 1020, 1920, 1080), start: Some((684, 1020, 740, 1080)), tray: Some((1524, 1020, 1920, 1080)) };
+        let (cx, top) = taskbar_slot(&centered, s);
+        assert!((cx + w / 2.0 - (684.0 - DOCK_GAP * s)).abs() <= 1.0, "a borda direita encosta no espaço antes do Iniciar: {cx}");
+        assert!((top - (1020.0 + (60.0 - h) / 2.0)).abs() <= 1.0 && top >= 1020.0 && top + h <= 1080.0, "{top}");
+        let left = win::Taskbar { start: Some((12, 1020, 68, 1080)), ..centered };
+        let (cx, _) = taskbar_slot(&left, s);
+        assert!((cx + w / 2.0 - (1524.0 - DOCK_GAP * s)).abs() <= 1.0, "antes da área de notificação: {cx}");
+        let bare = win::Taskbar { bar: (1920, 1020, 3840, 1080), start: None, tray: None };
+        let (cx, top) = taskbar_slot(&bare, s);
+        assert!(cx + w / 2.0 <= 3840.0 && cx - w / 2.0 >= 1920.0 && top >= 1020.0, "{cx} {top}");
+    }
+
+    /// Na barra, a ilha cresce para a esquerda e para cima: a borda direita (perto do Iniciar) e
+    /// a de baixo ficam onde estavam, e nada cobre o botão.
+    #[test]
+    fn docked_island_grows_away_from_start() {
+        let scr = win::monitors()[0];
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        isl.docked = true;
+        isl.anchor = (((scr.0 + scr.2) / 2) as f32, scr.3 as f32 - 44.0);
+        let compact = isl.target(Shape::Compact);
+        for shape in [Shape::Medium, Shape::Large] {
+            let g = isl.target(shape);
+            assert!((g.x + g.w - (compact.x + compact.w)).abs() < 0.5, "{shape:?}: a direita andou");
+            assert!((g.y + g.h - (compact.y + compact.h)).abs() < 0.5, "{shape:?}: o fundo andou");
+        }
+        // solta (fora da barra), continua crescendo a partir do meio
+        isl.docked = false;
+        let (c, m) = (isl.target(Shape::Compact), isl.target(Shape::Medium));
+        assert!((c.x + c.w / 2.0 - (m.x + m.w / 2.0)).abs() < 0.5);
+    }
+
+    /// A barra de tarefas deste PC, se ela está à vista (só para conferir à mão):
+    /// cargo test --release taskbar_here -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn taskbar_here() {
+        let scr = win::monitors()[0];
+        let t = win::taskbar_at((scr.0 + scr.2) / 2, scr.3 - 2);
+        println!("{t:?}");
+        println!("{:?}", dock_slot((scr.0 + scr.2) / 2, scr.3 - 2));
+    }
+
+    fn entry(key: &'static str, item: IslandItem) -> Entry {
+        Entry { key, item }
+    }
+
+    fn keys(e: &[Entry]) -> Vec<&'static str> {
+        e.iter().map(|e| e.key).collect()
+    }
+
+    /// Quem fica na pílula: o mexido por último entre os que andam; pausado atrás de quem toca;
+    /// o último minuto do Pomodoro na frente; aviso nunca toma a pílula de quem anda (só o
+    /// urgente ainda não visto); a escolha da pessoa vale mais que tudo isso.
+    #[test]
+    fn rank_puts_the_right_one_in_the_pill() {
+        let now = Instant::now();
+        let live = IslandItem::live(WHITE);
+        let paused = IslandItem { idle: true, ..live };
+        let hurry = IslandItem { hurry: true, ..live };
+        let alert = IslandItem::alert(WHITE, 1);
+        let urgent = IslandItem { urgent: true, ..alert };
+        let mut touched = HashMap::new();
+        touched.insert("midia", now - Duration::from_secs(10));
+        touched.insert("pomodoro", now);
+        touched.insert("github", now + Duration::from_secs(5));
+        touched.insert("bateria", now + Duration::from_secs(5));
+
+        let mut e = vec![entry("midia", live), entry("pomodoro", live)];
+        rank(&mut e, &touched, None, &[]);
+        assert_eq!(keys(&e), ["pomodoro", "midia"], "o mexido por último");
+
+        let mut e = vec![entry("pomodoro", paused), entry("midia", live)];
+        rank(&mut e, &touched, None, &[]);
+        assert_eq!(keys(&e), ["midia", "pomodoro"], "pausado fica atrás de quem toca");
+
+        let mut t2 = touched.clone();
+        t2.insert("midia", now + Duration::from_secs(60));
+        let mut e = vec![entry("midia", live), entry("pomodoro", hurry)];
+        rank(&mut e, &t2, None, &[]);
+        assert_eq!(keys(&e), ["pomodoro", "midia"], "o último minuto passa na frente");
+
+        let mut e = vec![entry("github", alert), entry("midia", live)];
+        rank(&mut e, &touched, None, &["github"]);
+        assert_eq!(keys(&e), ["midia", "github"], "aviso não toma a pílula");
+
+        let mut e = vec![entry("midia", live), entry("bateria", urgent)];
+        rank(&mut e, &touched, None, &["bateria"]);
+        assert_eq!(e[0].key, "bateria", "urgente e ninguém viu");
+        rank(&mut e, &touched, None, &[]);
+        assert_eq!(e[0].key, "midia", "urgente já visto volta para a bolha");
+
+        let mut e = vec![entry("midia", live), entry("github", alert)];
+        rank(&mut e, &touched, Some("github"), &[]);
+        assert_eq!(e[0].key, "github", "a escolha da pessoa");
+
+        let mut e = vec![entry("github", alert)];
+        rank(&mut e, &touched, None, &[]);
+        assert_eq!(e[0].key, "github", "sozinho, o aviso fica na pílula");
+    }
+
+    /// Um aviso novo estica a ilha uma vez só (o mesmo aviso não estica de novo; outro estica) e
+    /// ganha o pontinho; quem sai da ilha é esquecido.
+    #[test]
+    fn new_alert_banners_once() {
+        let now = Instant::now();
+        let live = IslandItem::live(WHITE);
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        isl.update_entries(vec![entry("midia", live), entry("github", IslandItem::alert(WHITE, 7))], now);
+        assert_eq!(isl.multi.key, "midia");
+        assert_eq!(isl.multi.banner.map(|b| b.0), Some("github"));
+        assert_eq!(isl.multi.unseen, ["github"]);
+        assert_eq!(isl.bubble_count(), 1);
+        isl.multi.banner = None;
+        isl.update_entries(vec![entry("midia", live), entry("github", IslandItem::alert(WHITE, 7))], now);
+        assert!(isl.multi.banner.is_none(), "o mesmo aviso não estica de novo");
+        isl.update_entries(vec![entry("midia", live), entry("github", IslandItem::alert(WHITE, 8))], now);
+        assert_eq!(isl.multi.banner.map(|b| b.0), Some("github"), "um aviso novo estica");
+        isl.update_entries(vec![entry("midia", live)], now);
+        assert!(isl.multi.unseen.is_empty() && isl.multi.banner.is_none() && isl.bubble_count() == 0);
+    }
+
+    /// Com três ou mais, só uma bolha aparece (com o "+N"); abertas, todas, da pílula para a
+    /// esquerda, sem se encostar; clicar numa leva o widget dela para a pílula.
+    #[test]
+    fn bubbles_line_up_and_choose() {
+        let now = Instant::now();
+        let live = IslandItem::live(WHITE);
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        isl.update_entries(vec![entry("midia", live), entry("pomodoro", IslandItem { idle: true, ..live }), entry("github", IslandItem::alert(WHITE, 1)), entry("bateria", IslandItem::alert(WHITE, 2))], now);
+        assert_eq!(isl.bubble_count(), 1);
+        isl.multi.strip = true;
+        let b = isl.bubbles();
+        assert_eq!(b.len(), 3);
+        let g = isl.geo();
+        assert!(b[0].0 + b[0].2 < g.x, "a primeira bolha à esquerda da pílula");
+        for w in b.windows(2) {
+            assert!(w[1].0 + w[1].2 < w[0].0 - w[0].2, "bolhas encostadas: {w:?}");
+            assert_eq!(w[0].1, w[1].1, "na mesma altura");
+        }
+        let target = isl.bubble_entries()[1].key;
+        isl.choose(target, true);
+        assert_eq!(isl.multi.key, target);
+        assert_eq!(isl.multi.entries[0].key, target);
+        assert!(!isl.multi.strip);
+    }
+
+    /// A ilha com vários widgets num PNG (para conferir):
+    /// cargo test --release island_multi -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn draw_island_multi() {
+        use crate::widgets::{battery::Battery, github::GitHub, pomodoro::Pomodoro, system::System};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let cfg = json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 1, "total": 1500.0, "fim": win::now() + 1122.0}}, "github": {}, "app": {}});
+        let pomodoro = Pomodoro::new(&cfg);
+        let github = GitHub::sample_reviews(&cfg);
+        let battery = Battery::sample();
+        let system = System::sample_alarm();
+        let mut art = Canvas::new(200, 200, 1.0);
+        art.gradient_round_rect(0.0, 0.0, 200.0, 200.0, 0.0, &[(0.0, Rgba::rgb(58, 24, 112)), (0.6, Rgba::rgb(214, 64, 120)), (1.0, Rgba::rgb(255, 140, 66))], 0.0, 200.0);
+        let info = IslandInfo {
+            title: "Sunset Drive".into(),
+            artist: "Neon Avenue".into(),
+            app: "Spotify".into(),
+            art: Some(Arc::new(art.finish())),
+            colors: [Rgba::rgb(255, 160, 80), Rgba::rgb(240, 90, 150)],
+            playing: true,
+            position: 96.0,
+            duration: 231.0,
+            can_prev: true,
+            can_toggle: true,
+            can_next: true,
+            can_seek: true,
+            volume: None,
+            volume_hud: 0.0,
+        };
+        let scene = Scene { info: Some(&info), kinds: vec![&pomodoro, &github, &battery, &system], cfg: &cfg };
+        let env = |k: &'static str| Env { cfg: &cfg, key: k };
+        let found = |keys: &[&'static str]| -> Vec<Entry> {
+            keys.iter()
+                .map(|&k| match k {
+                    "midia" => entry(k, IslandItem::live(info.colors[0])),
+                    k => entry(k, scene.kind(k).unwrap().island_item(&env(k)).unwrap()),
+                })
+                .collect()
+        };
+        let shots: Vec<(&str, Shape, Vec<&'static str>, &'static str, bool, bool)> = vec![
+            ("musica_e_pomodoro", Shape::Compact, vec!["midia", "pomodoro"], "pomodoro", false, false),
+            ("quatro", Shape::Compact, vec!["midia", "pomodoro", "github", "bateria"], "midia", false, false),
+            ("quatro_abertas", Shape::Compact, vec!["midia", "pomodoro", "github", "bateria"], "midia", true, false),
+            ("aviso", Shape::Banner, vec!["midia", "bateria"], "midia", false, true),
+            ("pomodoro_media", Shape::Medium, vec!["pomodoro", "midia"], "pomodoro", false, false),
+            ("pomodoro_grande", Shape::Large, vec!["pomodoro"], "pomodoro", false, false),
+            ("sistema_media", Shape::Medium, vec!["sistema"], "sistema", false, false),
+            ("sistema_grande", Shape::Large, vec!["sistema"], "sistema", false, false),
+            ("github_media", Shape::Medium, vec!["github"], "github", false, false),
+            ("github_grande", Shape::Large, vec!["github"], "github", false, false),
+            ("bateria_media", Shape::Medium, vec!["bateria"], "bateria", false, false),
+            ("bateria_grande", Shape::Large, vec!["bateria"], "bateria", false, false),
+            ("sistema_aviso", Shape::Banner, vec!["sistema"], "sistema", false, true),
+        ];
+        for (name, shape, list, first, strip, banner) in shots {
+            let mut isl = island(shape, Morph::None, 1.0);
+            isl.hot = None;
+            isl.multi.entries = found(&list);
+            let k = isl.multi.entries.iter().position(|e| e.key == first).unwrap();
+            let e = isl.multi.entries.remove(k);
+            isl.multi.entries.insert(0, e);
+            isl.multi.key = first;
+            isl.multi.prev_key = first;
+            isl.multi.strip = strip;
+            isl.multi.bubbles_at = Instant::now() - Duration::from_secs(5);
+            if banner {
+                isl.multi.banner = Some((list[1.min(list.len() - 1)], Instant::now()));
+            }
+            isl.multi.unseen = list.iter().copied().filter(|k| *k == "github" || *k == "bateria").collect();
+            let (img, _) = isl.render(&scene);
+            let path = std::env::temp_dir().join(format!("ilha_multi_{name}.png"));
+            crate::gfx::save_png(&img, &path).unwrap();
+            println!("{}", path.display());
+        }
     }
 
     /// Desenha as formas da ilha num PNG: cargo test island -- --ignored
@@ -1031,7 +2046,7 @@ mod tests {
         let with_volume = IslandInfo { volume_hud: 1.0, ..info.clone() };
         for shape in [Shape::Compact, Shape::Medium, Shape::Large] {
             let mut isl = island(shape, Morph::None, 1.0);
-            let (img, _) = isl.render(Some(&with_volume));
+            let (img, _) = isl.render(&Scene::media(Some(&with_volume)));
             let path = std::env::temp_dir().join(format!("ilha_volume_{shape:?}.png"));
             crate::gfx::save_png(&img, &path).unwrap();
             println!("{}", path.display());
@@ -1043,7 +2058,7 @@ mod tests {
             (Shape::Compact, Morph::In, 0.35, "virando"),
         ] {
             let mut isl = island(shape, morph, p);
-            let (img, _) = isl.render(Some(&info));
+            let (img, _) = isl.render(&Scene::media(Some(&info)));
             let path = std::env::temp_dir().join(format!("ilha_{name}.png"));
             crate::gfx::save_png(&img, &path).unwrap();
             println!("{}", path.display());

@@ -8,9 +8,13 @@
 //!   Dispositivos; se cada um está conectado agora, o próprio aparelho responde, pelo endereço
 //!   Bluetooth (WinRT). A lista de pareados do Windows também diria, mas demora meio minuto.
 //!
-//! Ler os dispositivos leva uns 100 ms e chama o WinRT: é feito num fio à parte.
+//! Ler os dispositivos leva uns 100 ms e chama o WinRT: é feito num fio à parte (`watch_devices`),
+//! que lê de novo a cada meio minuto (a carga) e logo depois de um aparelho conectar ou
+//! desconectar: o Windows avisa na hora, por aparelho.
 
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -46,6 +50,18 @@ pub struct Power {
     pub left_mwh: Option<u32>,
     /// o consumo agora, na bateria, em mW (do driver; varia muito de um segundo para outro)
     pub drain_mw: Option<u32>,
+}
+
+/// Só se está na tomada (None: não sabe). Barato (sem perguntar ao driver): dá para conferir a
+/// cada segundo e ler o resto (`power`) só quando muda.
+pub fn on_ac() -> Option<bool> {
+    let mut st = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut st).ok()? };
+    match st.ACLineStatus {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 /// A bateria do notebook (None: o PC não tem bateria).
@@ -388,18 +404,145 @@ fn connected_at(address: u64) -> Option<bool> {
 /// Os dispositivos que informam a bateria (conectados ou não; desconectados, com a última
 /// carga), cada um perguntado pelo endereço se está conectado agora. Conectados primeiro, e entre
 /// eles a carga mais baixa primeiro (o que vai acabar antes aparece antes).
+#[cfg(test)]
 pub fn devices() -> Vec<Device> {
-    let mut out: Vec<Device> = battery_parts()
+    devices_from(battery_parts(), &Watched::default())
+}
+
+/// A lista a partir das partes; conectado ou não pelos aparelhos já vigiados (sem perguntar de
+/// novo) ou, os outros, perguntando pelo endereço.
+fn devices_from(parts: HashMap<GUID, Part>, watched: &Watched) -> Vec<Device> {
+    let mut out: Vec<Device> = parts
         .into_values()
         .filter(|p| !p.name.is_empty())
         .map(|p| {
             let name = clean_name(&p.name);
-            let connected = p.address.and_then(connected_at).unwrap_or(true);
+            let connected = p.address.and_then(|a| watched.connected(a).or_else(|| connected_at(a))).unwrap_or(true);
             Device { kind: kind_of(&p.category, p.cod, &name), name, level: Some(p.level), connected }
         })
         .collect();
     sort(&mut out);
     out
+}
+
+/// De quanto em quanto tempo ler os dispositivos de novo (a carga deles muda devagar; conectar e
+/// desconectar chegam na hora, pelos avisos).
+pub const DEVICES_EVERY: Duration = Duration::from_secs(30);
+/// Depois de um aviso, espera os outros do mesmo momento (um fone avisa pelo perfil de áudio e
+/// pelo de chamada) e lê; lê de novo depois, porque a carga de quem acabou de conectar chega uns
+/// segundos depois da conexão.
+const SETTLE: Duration = Duration::from_millis(250);
+const AFTER_EVENT: [Duration; 3] = [Duration::ZERO, Duration::from_secs(4), Duration::from_secs(12)];
+
+/// Os aparelhos Bluetooth vigiados (pelo endereço): o objeto do Windows de cada um e o registro
+/// do aviso de conexão.
+#[derive(Default)]
+struct Watched {
+    by_address: HashMap<u64, Vec<Watch>>,
+}
+
+enum Watch {
+    Le(windows::Devices::Bluetooth::BluetoothLEDevice, i64),
+    Classic(windows::Devices::Bluetooth::BluetoothDevice, i64),
+}
+
+impl Watched {
+    /// Passa a vigiar os endereços novos: cada conexão ou desconexão manda um aviso em `wake`.
+    fn add(&mut self, parts: &HashMap<GUID, Part>, wake: &Sender<()>) {
+        use windows::Devices::Bluetooth::{BluetoothDevice, BluetoothLEDevice};
+        use windows::Foundation::TypedEventHandler;
+        for a in parts.values().filter_map(|p| p.address) {
+            if self.by_address.contains_key(&a) {
+                continue;
+            }
+            let mut list = Vec::new();
+            if let Some(d) = BluetoothLEDevice::FromBluetoothAddressAsync(a).ok().and_then(|op| op.join().ok()) {
+                let tx = wake.clone();
+                if let Ok(token) = d.ConnectionStatusChanged(&TypedEventHandler::new(move |_, _| {
+                    let _ = tx.send(());
+                    Ok(())
+                })) {
+                    list.push(Watch::Le(d, token));
+                }
+            }
+            if let Some(d) = BluetoothDevice::FromBluetoothAddressAsync(a).ok().and_then(|op| op.join().ok()) {
+                let tx = wake.clone();
+                if let Ok(token) = d.ConnectionStatusChanged(&TypedEventHandler::new(move |_, _| {
+                    let _ = tx.send(());
+                    Ok(())
+                })) {
+                    list.push(Watch::Classic(d, token));
+                }
+            }
+            // (sem nenhum dos dois: fica a lista vazia, para não tentar de novo a cada leitura)
+            self.by_address.insert(a, list);
+        }
+    }
+
+    /// Conectado agora, pelo objeto vigiado (None: não vigiado).
+    fn connected(&self, address: u64) -> Option<bool> {
+        use windows::Devices::Bluetooth::BluetoothConnectionStatus as S;
+        let list = self.by_address.get(&address).filter(|l| !l.is_empty())?;
+        let states: Vec<bool> = list
+            .iter()
+            .filter_map(|w| match w {
+                Watch::Le(d, _) => d.ConnectionStatus().ok(),
+                Watch::Classic(d, _) => d.ConnectionStatus().ok(),
+            })
+            .map(|s| s == S::Connected)
+            .collect();
+        // (um fone que fala os dois: conectado por qualquer um)
+        (!states.is_empty()).then(|| states.contains(&true))
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        for w in self.by_address.values().flatten() {
+            let _ = match w {
+                Watch::Le(d, t) => d.RemoveConnectionStatusChanged(*t),
+                Watch::Classic(d, t) => d.RemoveConnectionStatusChanged(*t),
+            };
+        }
+    }
+}
+
+/// Lê os dispositivos num fio à parte, agora, a cada `DEVICES_EVERY` e logo depois de um aparelho
+/// conectar ou desconectar: cada lista chega no canal. O fio acaba quando o canal é largado.
+pub fn watch_devices() -> Option<Receiver<Vec<Device>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("bateria-dispositivos".into())
+        .spawn(move || {
+            unsafe {
+                let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);
+            }
+            let (wake_tx, wake_rx) = mpsc::channel::<()>();
+            let mut watched = Watched::default();
+            let mut next = Instant::now();
+            let mut soon: Vec<Instant> = Vec::new();
+            loop {
+                let now = Instant::now();
+                if now >= next || soon.iter().any(|&t| now >= t) {
+                    soon.retain(|&t| t > now);
+                    let parts = battery_parts();
+                    watched.add(&parts, &wake_tx);
+                    if tx.send(devices_from(parts, &watched)).is_err() {
+                        break;
+                    }
+                    next = Instant::now() + DEVICES_EVERY;
+                }
+                let until = soon.iter().copied().fold(next, Instant::min);
+                if wake_rx.recv_timeout(until.saturating_duration_since(Instant::now())).is_ok() {
+                    std::thread::sleep(SETTLE);
+                    while wake_rx.try_recv().is_ok() {}
+                    let t = Instant::now();
+                    soon = AFTER_EVENT.iter().map(|d| t + *d).collect();
+                }
+            }
+        })
+        .ok()?;
+    Some(rx)
 }
 
 /// Conectados primeiro; entre eles, a carga mais baixa primeiro (sem carga, no fim).
@@ -443,6 +586,14 @@ mod tests {
         sort(&mut list);
         let names: Vec<_> = list.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["c", "a", "d", "b"]);
+    }
+
+    /// O fio dos dispositivos manda a primeira lista sozinho e acaba quando o widget larga o canal.
+    #[test]
+    fn the_watcher_sends_a_list_right_away() {
+        let rx = watch_devices().expect("o fio");
+        assert!(rx.recv_timeout(Duration::from_secs(20)).is_ok());
+        drop(rx);
     }
 
     #[test]

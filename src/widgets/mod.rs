@@ -8,12 +8,14 @@ pub mod battery;
 pub mod claude;
 pub mod clawd;
 pub mod github;
+pub mod island_ui;
 pub mod media;
 pub mod odometer;
 pub mod pomodoro;
 pub mod sky;
 pub mod system;
 pub mod tempo;
+pub mod vector;
 
 use std::time::Instant;
 
@@ -92,7 +94,7 @@ pub fn description(key: &str) -> &'static str {
         "tempo" => "O céu de agora, as próximas horas e os próximos dias.",
         "sistema" => "CPU, memória e disco em anéis, com os apps que mais usam.",
         "midia" => "A música ou o vídeo tocando no Windows, com capa e controles.",
-        "github" => "Mapa de contribuições, sequência de dias e atividades recentes.",
+        "github" => "Mapa de contribuições do último ano.",
         "pomodoro" => "Relógio com timer de foco e pausas, ciclos e o total do dia.",
         "claude" => "Quanto você já usou da sessão de 5 horas e da semana no Claude Code.",
         "bateria" => "A bateria do notebook e a dos fones, mouses e teclados conectados.",
@@ -328,6 +330,19 @@ pub enum MenuItem {
     Radio(String, bool, u32),
     Sub(String, Vec<MenuItem>),
     Sep,
+    /// o título do menu (o widget que o abriu): ícone e nome, sem clique
+    Title(String, &'static str),
+    /// a ação em destaque, num botão azul: texto, número e ícone
+    Primary(String, u32, &'static str),
+    /// um item com um ícone (de `theme::icon`) à esquerda
+    Icon(&'static str, Box<MenuItem>),
+}
+
+impl MenuItem {
+    /// O mesmo item, com um ícone à esquerda.
+    pub fn icon(self, name: &'static str) -> MenuItem {
+        MenuItem::Icon(name, Box::new(self))
+    }
 }
 
 pub trait Kind {
@@ -447,6 +462,75 @@ pub trait Kind {
     fn sound_level(&self) -> Option<f32> {
         None
     }
+    /// O que o widget tem para mostrar na ilha agora (None: nada). A ilha escolhe quem fica
+    /// na pílula; os outros viram bolhas ao lado.
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        None
+    }
+    /// Desenha o widget na ilha, na forma dada, dentro de `r` (x, y, largura, altura, em pixels
+    /// lógicos da ilha); `hot` é a ação do botão sob o mouse.
+    fn island_draw(&self, _c: &mut Canvas, _form: IslandForm, _r: Rect4, _hot: Option<u32>, _env: &Env) {}
+    /// A ação (de `act`) do botão da ilha no ponto (x, y) relativo ao canto de `r`.
+    fn island_hit(&self, _form: IslandForm, _x: f32, _y: f32, _w: f32, _h: f32, _env: &Env) -> Option<u32> {
+        None
+    }
+    /// Quadros por segundo que o widget quer na ilha, nesta forma (0: só quando algo muda; a
+    /// chuva caindo na ilha aberta do Tempo, por exemplo).
+    fn island_fps(&self, _form: IslandForm) -> u32 {
+        0
+    }
+}
+
+/// Retângulo (x, y, largura, altura).
+pub type Rect4 = (f32, f32, f32, f32);
+
+/// A forma em que um widget aparece na ilha: bolha ao lado da pílula, pílula fechada, pílula
+/// esticada com um aviso, com o mouse em cima ou aberta.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IslandForm {
+    Bubble,
+    Compact,
+    Banner,
+    Medium,
+    Large,
+}
+
+/// O que um widget mostra na ilha agora.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct IslandItem {
+    /// um aviso: estica a ilha por um instante e espera na bolha, sem tomar a pílula
+    pub alert: bool,
+    /// aviso que toma a pílula até alguém ver (a bateria quase no fim)
+    pub urgent: bool,
+    /// passa na frente de quem está tocando (o Pomodoro no último minuto)
+    pub hurry: bool,
+    /// parado (pausado): fica atrás de quem está andando
+    pub idle: bool,
+    /// muda quando o aviso é outro (a ilha estica de novo)
+    pub alert_id: u64,
+    /// a cor do widget (o contorno do aviso, o pontinho na bolha)
+    pub accent: crate::theme::Rgba,
+}
+
+impl IslandItem {
+    /// Algo andando (o Pomodoro correndo, a música tocando).
+    pub fn live(accent: crate::theme::Rgba) -> IslandItem {
+        IslandItem { alert: false, urgent: false, hurry: false, idle: false, alert_id: 0, accent }
+    }
+    /// Um aviso, com o número que o identifica.
+    pub fn alert(accent: crate::theme::Rgba, alert_id: u64) -> IslandItem {
+        IslandItem { alert: true, alert_id, ..IslandItem::live(accent) }
+    }
+}
+
+/// Um número estável para um texto (o `alert_id` de um aviso).
+pub fn alert_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// Se o widget `key` pode aparecer na ilha (Configurações → o widget → "Mostrar na ilha").
+pub fn on_island(cfg: &Value, key: &str) -> bool {
+    config::setting_bool(cfg, "ilha_widgets") && cfg[key].bool_of("na_ilha").unwrap_or(true)
 }
 
 /// Grava o tamanho do widget na seção dele do config.json, junto com a altura que ele tem nesse

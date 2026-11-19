@@ -90,6 +90,7 @@ pub(crate) fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     }
     out.push(("sistema no limite".into(), Box::new(System::sample_values([1.0, 1.0, 1.0])), cfg.clone()));
     out.push(("sistema zerado".into(), Box::new(System::sample_values([0.0, 0.0, 0.0])), cfg.clone()));
+    out.push(("sistema com a CPU alta".into(), Box::new(System::sample_alarm()), cfg.clone()));
     out.push(("música".into(), Box::new(Media::sample()), cfg.clone()));
     out.push(("música parada".into(), Box::new(Media::sample_idle()), cfg.clone()));
     out.push(("música com capa quadrada".into(), Box::new(Media::sample_art("spotify", 300, 300)), cfg.clone()));
@@ -98,6 +99,7 @@ pub(crate) fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("github".into(), Box::new(GitHub::sample(&cfg, &json!({}))), cfg.clone()));
     out.push(("github sem usuário".into(), Box::new(GitHub::new(&cfg, &json!({}))), cfg.clone()));
     out.push(("github buscando pela primeira vez".into(), Box::new(GitHub::sample_loading(&cfg)), cfg.clone()));
+    out.push(("github com revisões".into(), Box::new(GitHub::sample_reviews(&cfg)), cfg.clone()));
     for fase in ["foco", "pausa", "longa"] {
         for running in [true, false] {
             let c = pomodoro_cfg(fase, running);
@@ -137,11 +139,17 @@ pub(crate) fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     out.push(("bateria pc de mesa".into(), Box::new(Battery::sample_desktop()), cfg.clone()));
     out.push(("bateria só o notebook".into(), Box::new(Battery::sample_alone()), cfg.clone()));
     out.push(("bateria sem nada".into(), Box::new(Battery::sample_nothing()), cfg.clone()));
+    for alert in ["chuva", "trovoada", "frio"] {
+        out.push((format!("tempo aviso {alert}"), Box::new(Tempo::sample_island(alert)), cfg.clone()));
+    }
+    out.push(("bateria entrou na tomada".into(), Box::new(Battery::sample_plug_event(true)), cfg.clone()));
+    out.push(("bateria saiu da tomada".into(), Box::new(Battery::sample_plug_event(false)), cfg.clone()));
     for ms in [0, 150, 400, 800] {
         out.push((format!("bateria ligando na tomada {ms}"), Box::new(Battery::sample_plugging(ms)), cfg.clone()));
         out.push((format!("bateria cheia {ms}"), Box::new(Battery::sample_full(ms)), cfg.clone()));
         out.push((format!("bateria aparelhos mudando {ms}"), Box::new(Battery::sample_changing(ms)), cfg.clone()));
         out.push((format!("bateria números rolando {ms}"), Box::new(Battery::sample_rolling(ms)), cfg.clone()));
+        out.push((format!("bateria aparelho conectando {ms}"), Box::new(Battery::sample_connecting(ms)), cfg.clone()));
     }
     out.push(("claude de Sherlock".into(), Box::new(Claude::sample_sherlock()), cfg.clone()));
     out.push(("claude subindo".into(), Box::new(Claude::sample_growing(0.2, 300)), cfg));
@@ -294,26 +302,21 @@ fn labels_on_medium_and_large_never_on_small() {
     assert!(checked >= 12, "poucos casos conferidos: {checked}");
 }
 
-/// O número principal de cada cartão vai em letra fina, como a temperatura do Clima, o relógio
-/// do Pomodoro e o anel do Claude: o "812" do GitHub também.
+/// O GitHub é só o mapa: em todos os tamanhos, nenhum texto grande disputa com os quadrados (o
+/// total vai pequeno, em cima), e os quadrados ocupam a maior parte do cartão.
 #[test]
-fn hero_numbers_are_light() {
-    use crate::gfx::{Face, Op};
+fn github_is_just_the_map() {
+    use crate::gfx::Op;
     com();
     let cfg = json!({});
     let kind = GitHub::sample(&cfg, &json!({}));
     let env = Env { cfg: &cfg, key: kind.key() };
     for &mode in kind.sizes() {
-        let big: Vec<_> = crate::morph::record(&kind, mode, 1.0, 1.0, &env)
-            .ops
-            .into_iter()
-            .filter_map(|r| match r.op {
-                Op::Text { face, size, text, .. } if size >= 24.0 => Some((face, text)),
-                _ => None,
-            })
-            .collect();
-        assert!(!big.is_empty(), "{mode:?}: sem número grande");
-        assert!(big.iter().all(|(f, _)| *f == Face::Light), "{mode:?}: {big:?}");
+        let ops = crate::morph::record(&kind, mode, 1.0, 1.0, &env).ops;
+        let big: Vec<_> = ops.iter().filter_map(|r| match &r.op { Op::Text { size, text, .. } if *size > 13.0 => Some(text.clone()), _ => None }).collect();
+        assert!(big.is_empty(), "{mode:?}: texto grande {big:?}");
+        let shapes = ops.iter().filter(|r| !matches!(r.op, Op::Text { .. })).count();
+        assert!(shapes >= 50, "{mode:?}: só {shapes} quadrados"); // o pequeno: 7 semanas cheias e a de hoje
     }
 }
 
@@ -343,6 +346,54 @@ fn every_widget_answers_the_mouse_everywhere() {
         let _ = kind.status();
         let _ = kind.island();
         let _ = name;
+    }
+}
+
+/// Os widgets que entram na ilha: aparecem quando devem (o Pomodoro correndo, a CPU alta, um
+/// pedido de revisão, um aparelho quase sem bateria) e, ali, desenham alguma coisa em todas as
+/// formas e respondem ao mouse em toda a área, sem pânico. Botão da ilha é sempre uma ação do
+/// próprio widget.
+#[test]
+fn island_widgets_draw_and_answer_in_every_form() {
+    use crate::widgets::island_ui;
+    use crate::widgets::IslandForm;
+    com();
+    let forms = [IslandForm::Bubble, IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
+    let mut on_island = Vec::new();
+    for (name, kind, cfg) in cases() {
+        let env = Env { cfg: &cfg, key: kind.key() };
+        let Some(item) = kind.island_item(&env) else { continue };
+        on_island.push(name.clone());
+        assert!(item.alert || !item.urgent, "{name}: só aviso é urgente");
+        for form in forms {
+            let (w, h, _) = island_ui::size(form);
+            let mut c = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
+            c.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
+            let before = ink(&{
+                let mut b = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
+                b.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
+                b.finish()
+            });
+            kind.island_draw(&mut c, form, (0.0, 0.0, w, h), None, &env);
+            let img = c.finish();
+            let lit = img.px.chunks_exact(4).filter(|p| p[0] > 40 || p[1] > 40 || p[2] > 40).count();
+            assert!(lit > 20, "{name} {form:?}: nada desenhado na ilha ({before})");
+            let mut y = -2.0;
+            while y <= h + 2.0 {
+                let mut x = -2.0;
+                while x <= w + 2.0 {
+                    let _ = kind.island_hit(form, x, y, w, h, &env);
+                    x += 3.0;
+                }
+                y += 3.0;
+            }
+        }
+    }
+    for expected in ["pomodoro foco rodando", "sistema com a CPU alta", "github com revisões", "bateria", "bateria entrou na tomada", "bateria saiu da tomada", "tempo aviso chuva", "tempo aviso trovoada", "tempo aviso frio"] {
+        assert!(on_island.iter().any(|n| n == expected), "{expected} devia estar na ilha: {on_island:?}");
+    }
+    for never in ["pomodoro novo", "sistema", "github", "bateria sem nada", "tempo início m", "tempo chovendo m"] {
+        assert!(!on_island.iter().any(|n| n == never), "{never} não tem nada para a ilha");
     }
 }
 
@@ -386,7 +437,7 @@ fn widgets_say_where_they_use_the_wheel() {
     assert!(pomodoro.uses_wheel(77.0, 62.0, Mode::P), "no anel");
     assert!(!pomodoro.uses_wheel(4.0, 150.0, Mode::P), "no canto");
     let github = GitHub::sample(&cfg, &json!({}));
-    assert!(!github.uses_wheel(160.0, 60.0, Mode::G) && github.uses_wheel(160.0, 300.0, Mode::G), "só na lista do grande");
+    assert!(!github.uses_wheel(160.0, 300.0, Mode::G), "o GitHub não tem mais lista para rolar");
     assert!(!Media::sample().uses_wheel(160.0, 100.0, Mode::M), "o volume pela roda só na barra do grande");
 }
 

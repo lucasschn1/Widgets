@@ -451,8 +451,28 @@ impl Ui<'_> {
     pub fn wrap(&self, text: &str, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
         self.c.wrap(text, Face::Regular, size, max_w, max_lines)
     }
+    /// Cartão das configurações: uma sombra curta embaixo, o fundo e a borda que brilha mais em
+    /// cima (como vidro pegando luz).
     pub fn card(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
-        self.rect(x0, y0, x1, y1, 10.0, Some(SURFACE), Some(WHITE.with_a(16)), 1.0 / self.s());
+        let (ox, oy) = (self.ox, self.oy);
+        let r = 12.0;
+        self.c.fill_round_rect(x0 + ox, y0 + oy + 2.0, x1 + ox, y1 + oy + 3.0, r, Rgba(0, 0, 0, 34));
+        self.c.fill_round_rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy, r, SURFACE);
+        let w = 1.0 / self.s();
+        self.c.gradient_stroke_round_rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy, r, WHITE.with_a(30), WHITE.with_a(10), w);
+    }
+
+    /// Quadradinho colorido com um ícone branco (a barra lateral e o título das páginas), com um
+    /// degradê leve de cima para baixo.
+    pub fn tile(&mut self, x: f32, y: f32, size: f32, color: Rgba, icon_name: &str, dim: bool) {
+        let (ox, oy) = (self.ox, self.oy);
+        let r = size * 0.27;
+        let a = if dim { 0.38 } else { 1.0 };
+        let top = color.mix(WHITE, 0.18).alpha(a);
+        let bottom = color.mix(Rgba::rgb(0, 0, 0), 0.08).alpha(a);
+        self.c.gradient_round_rect(x + ox, y + oy, x + ox + size, y + oy + size, r, &[(0.0, top), (1.0, bottom)], y + oy, y + oy + size);
+        self.c.stroke_round_rect(x + ox, y + oy, x + ox + size, y + oy + size, r, WHITE.with_a((28.0 * a) as u8), 1.0 / self.s());
+        self.icon(x + size / 2.0, y + size / 2.0, icon_name, size * 0.54, WHITE.alpha(if dim { 0.6 } else { 1.0 }));
     }
     pub fn divider(&mut self, x0: f32, x1: f32, y: f32) {
         self.c.hline_px(x0 + self.ox, x1 + self.ox, y + self.oy, WHITE.with_a(18));

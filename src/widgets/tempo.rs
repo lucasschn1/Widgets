@@ -10,7 +10,7 @@
 //! - clicar num dia (no grande) ou numa hora abre o dia: as horas dele, chuva, vento, UV e o sol,
 //!   com setas para o dia anterior e o seguinte.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
@@ -18,10 +18,11 @@ use serde_json::{json, Value};
 
 use super::odometer::Odometer;
 use super::sky::{self, Weather};
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Status, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
+use super::island_ui as iu;
+use super::{alert_hash, Ctx, Env, Hot, IslandForm, IslandItem, Kind, Layout, MenuItem, Mode, NotifyAction, Status, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing::weather_art;
-use crate::gfx::{Anchor, Canvas, Face};
+use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::theme::*;
 use crate::util;
 use crate::win;
@@ -90,11 +91,23 @@ const RAIN_FPS: u32 = 30;
 const SKY_EVERY: Duration = Duration::from_secs(60);
 /// ventania: vento médio ou rajadas a partir destes km/h (a previsão não tem código para isso)
 const WINDY_KMH: f64 = 40.0;
+/// chuva a partir disto (mm em 15 minutos) avisa que vai chover
+const RAIN_MM: f64 = 0.2;
+/// a ilha avisa da trovoada que chega nestas próximas horas
+const STORM_SOON: usize = 3;
+/// a máxima de amanhã longe assim da de hoje é uma mudança forte (uma frente fria, um calorão)
+const TEMP_JUMP: i64 = 6;
+/// as cores dos avisos na ilha
+const STORM_COLOR: Rgba = Rgba::rgb(255, 214, 10);
+const COLD: Rgba = Rgba::rgb(90, 200, 250);
+const WARM: Rgba = Rgba::rgb(255, 140, 60);
 const WINDY_GUSTS: f64 = 65.0;
 
 // ações
 const OPEN_FORECAST: u32 = 3;
 pub const UPDATE_WEATHER: u32 = 4;
+/// na ilha: "OK" (não mostrar mais este aviso)
+const ISLAND_OK: u32 = 7;
 pub const ASK_CITY: u32 = 5;
 const BACK: u32 = 20;
 const DETAILS: u32 = 21;
@@ -350,6 +363,22 @@ fn with_sun(hours: Vec<Value>, first: &str, now: &str, daily: &Value) -> Vec<Val
     out
 }
 
+/// Em quantos minutos começa a chover (na próxima hora), pela previsão de 15 em 15 minutos. Nada
+/// se já está chovendo ou se não vem chuva.
+fn rain_in(data: &Value) -> Option<f64> {
+    let cur = &data["current"];
+    if is_rain(cur.i64_of("weather_code").unwrap_or(0)) || cur.f64_of("precipitation").unwrap_or(0.0) > 0.0 {
+        return None;
+    }
+    let now = cur.str_of("time").and_then(local_minutes)?;
+    let steps = &data["minutely_15"];
+    let (times, amounts) = (steps["time"].as_array()?, steps["precipitation"].as_array()?);
+    times.iter().zip(amounts).find_map(|(stamp, amount)| {
+        let minutes = stamp.as_str().and_then(local_minutes)? - now;
+        (minutes > 0.0 && minutes <= 60.0 && amount.as_f64().unwrap_or(0.0) >= RAIN_MM).then_some(minutes)
+    })
+}
+
 /// Tudo que o widget mostra, a partir da resposta da Open-Meteo. As horas são
 /// [rótulo, ícone, temperatura, código, chance de chuva %, dia (0 = hoje), hora do dia].
 fn process(data: &Value, place: &str) -> Value {
@@ -442,6 +471,7 @@ fn process(data: &Value, place: &str) -> Value {
         "details": format!("Sensação {}°  ·  Umidade {}%  ·  Vento {} km/h",
             round(&cur["apparent_temperature"]), round(&cur["relative_humidity_2m"]), round(&cur["wind_speed_10m"])),
         "rain_line": line.as_ref().map(|l| l.0.clone()),
+        "rain_in": rain_in(data),
         "line_icon": line.map(|l| l.1),
         "hours": hours,
         "days": days(data),
@@ -561,6 +591,31 @@ pub struct Tempo {
     fixed_hour: Option<f32>,
     /// a temperatura, rolando como num hodômetro quando muda
     temp_roll: Odometer,
+    /// a chuva chegando (o aviso da ilha): o aviso e quando ela começa (segundos desde 1970)
+    rain_alert: Option<(String, f64)>,
+    /// os avisos da ilha dispensados ("OK")
+    island_ok: Vec<String>,
+    /// os raios da ilha aberta (os do cartão são do tamanho dele)
+    island_storm: sky::Storm,
+    /// o céu da ilha aberta, guardado: (largura e altura em pixels, clima, minuto) e a imagem
+    island_sky: RefCell<Option<((u32, u32, Weather, i64), Image)>>,
+}
+
+/// Um aviso do Tempo na ilha: trovoada, chuva chegando ou uma mudança forte de temperatura.
+struct Alert {
+    key: String,
+    /// a pílula fechada: o nome e o valor forte ("Chuva", "20 min")
+    short: String,
+    value: String,
+    /// a pílula esticada com o aviso (com o mesmo valor à direita)
+    banner: String,
+    /// a ilha aberta: o título e a linha de baixo
+    title: String,
+    sub: String,
+    /// o céu do aviso (a chuva que vem, a trovoada) e o ícone
+    weather: Weather,
+    icon: String,
+    color: Rgba,
 }
 
 impl Tempo {
@@ -570,7 +625,7 @@ impl Tempo {
         // abre com o último clima guardado, enquanto busca o atual
         let cached = cache.get("weather").filter(|w| place.is_some() && w.str_of("place") == place && w.get("code").is_some()).cloned();
         let updated = if cached.is_some() { cache.f64_of("weather_time") } else { None };
-        Tempo {
+        let mut t = Tempo {
             weather: cached,
             weather_msg: "Carregando…".into(),
             next_weather: None,
@@ -593,7 +648,15 @@ impl Tempo {
             shake_on: Cell::new(true),
             fixed_hour: None,
             temp_roll: Odometer::default(),
+            rain_alert: None,
+            island_ok: Vec::new(),
+            island_storm: sky::Storm::default(),
+            island_sky: RefCell::new(None),
+        };
+        if let Some(fetched) = updated {
+            t.refresh_rain(fetched);
         }
+        t
     }
 
     pub fn update_weather(&mut self, ctx: &mut Ctx) {
@@ -674,6 +737,7 @@ impl Tempo {
                 ctx.cache["weather_time"] = json!(self.status.updated);
                 ctx.out.push(super::Request::SaveCache);
                 self.weather = Some(weather);
+                self.refresh_rain(win::now());
                 // a faixa começa de novo na hora de agora
                 if self.view.get() == View::Main {
                     self.main_scroll = Scroll::at(0.0);
@@ -689,26 +753,157 @@ impl Tempo {
 
     /// Avisa quando vai começar a chover na próxima hora (e ainda não está chovendo).
     fn check_rain(&self, data: &Value, ctx: &mut Ctx) {
-        let cur = &data["current"];
-        if is_rain(cur.i64_of("weather_code").unwrap_or(0)) || cur.f64_of("precipitation").unwrap_or(0.0) > 0.0 {
-            return;
+        let Some(minutes) = rain_in(data) else { return };
+        let place = self.place_short();
+        let query = format!("https://www.google.com/search?q={}", util::urlencode(&format!("previsão do tempo {place}")));
+        ctx.notify("chuva", "Chuva chegando", format!("Deve começar a chover em cerca de {} min em {place}.", minutes.round()), Some(NotifyAction::Open(query)));
+    }
+
+    /// A chuva chegando, da previsão buscada em `fetched` (segundos desde 1970). A mesma chuva,
+    /// com a previsão nova mexendo uns minutos, continua o mesmo aviso (a ilha não estica de novo).
+    fn refresh_rain(&mut self, fetched: f64) {
+        let at = self.weather.as_ref().and_then(|w| w.f64_of("rain_in")).map(|m| fetched + m * 60.0);
+        self.rain_alert = match (at, self.rain_alert.take()) {
+            (None, _) => None,
+            (Some(at), Some((key, old))) if (at - old).abs() < 45.0 * 60.0 => Some((key, at)),
+            (Some(at), _) => Some((format!("chuva|{}", at.round() as i64), at)),
+        };
+    }
+
+    /// Os avisos para a ilha agora, do mais importante ao menos: trovoada (agora ou nas próximas
+    /// horas), chuva começando na próxima hora, amanhã bem mais frio ou mais quente.
+    fn island_alerts(&self) -> Vec<Alert> {
+        let Some(w) = self.weather.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        let place = self.place_short();
+        let in_place = if place.is_empty() { String::new() } else { format!(" em {place}") };
+        let now_line = format!("Agora {} · {}", self.temp_text(), w.str_of("desc").unwrap_or(""));
+        let code = self.code();
+        let date = w["now"].str_of("time").and_then(|t| t.get(..10)).unwrap_or("");
+        // trovoada: agora (None) ou a hora em que chega
+        let storm_at = if is_storm(code) {
+            Some(None)
+        } else {
+            let hours = w["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            hours.iter().skip(1).take(STORM_SOON).find(|h| is_storm(h[3].as_i64().unwrap_or(0))).map(|h| Some(h[0].as_str().unwrap_or("").to_string()))
+        };
+        if let Some(at) = storm_at {
+            let (value, banner, title, sub) = match at {
+                None => ("agora".to_string(), format!("Trovoada{in_place}"), "Trovoada agora".to_string(), w.str_of("rain_line").map(String::from).unwrap_or_else(|| now_line.clone())),
+                Some(h) => (h.clone(), format!("Trovoada chegando{in_place}"), format!("Trovoada às {h}"), now_line.clone()),
+            };
+            let weather = if is_storm(code) { self.sky_weather() } else { Weather::Storm };
+            out.push(Alert { key: format!("trovoada|{date}"), short: "Trovoada".into(), value, banner, title, sub, weather, icon: "thunder".into(), color: STORM_COLOR });
         }
-        let now = cur.str_of("time").and_then(local_minutes);
-        let steps = &data["minutely_15"];
-        let (Some(times), Some(amounts), Some(now)) = (steps["time"].as_array(), steps["precipitation"].as_array(), now) else { return };
-        for (stamp, amount) in times.iter().zip(amounts) {
-            let Some(t) = stamp.as_str().and_then(local_minutes) else { continue };
-            let minutes = t - now;
-            if minutes > 0.0 && minutes <= 60.0 && amount.as_f64().unwrap_or(0.0) >= 0.2 {
-                let place = self.place_short();
-                let query = format!("https://www.google.com/search?q={}", util::urlencode(&format!("previsão do tempo {place}")));
-                ctx.notify(
-                    "chuva",
-                    "Chuva chegando",
-                    format!("Deve começar a chover em cerca de {} min em {place}.", minutes.round()),
-                    Some(NotifyAction::Open(query)),
-                );
-                return;
+        // chuva chegando (até um minuto depois da hora prevista: "agora")
+        if let Some((key, at)) = &self.rain_alert {
+            let mins = (at - win::now()) / 60.0;
+            if mins > -1.0 && mins <= 60.0 && !is_rain(code) {
+                let m = mins.max(0.0).round() as i64;
+                let (value, title) = if m < 1 { ("agora".to_string(), "Chuva começando".to_string()) } else { (format!("{m} min"), format!("Chuva em {m} min")) };
+                out.push(Alert { key: key.clone(), short: "Chuva".into(), value, banner: format!("Chuva chegando{in_place}"), title, sub: now_line.clone(), weather: Weather::Rain, icon: "rain".into(), color: RAIN_BLUE });
+            }
+        }
+        // amanhã bem mais frio ou mais quente que hoje
+        let days = w["day_info"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if let (Some(today), Some(tomorrow)) = (days.first(), days.get(1)) {
+            if let (Some(a), Some(b)) = (today.i64_of("max"), tomorrow.i64_of("max")) {
+                let d = b - a;
+                if d.abs() >= TEMP_JUMP {
+                    let verb = if d < 0 { "esfria" } else { "esquenta" };
+                    out.push(Alert {
+                        key: format!("temperatura|{}|{d}", tomorrow.str_of("date").unwrap_or("")),
+                        short: "Amanhã".into(),
+                        value: format!("{}{}°", if d < 0 { "−" } else { "+" }, d.abs()),
+                        banner: format!("Amanhã {verb}: máxima de {b}°"),
+                        title: format!("Amanhã {verb} {}°", d.abs()),
+                        sub: format!("Máxima de {b}° (hoje, {a}°)"),
+                        weather: self.sky_weather(),
+                        icon: tomorrow.str_of("icon").unwrap_or("clouds").to_string(),
+                        color: if d < 0 { COLD } else { WARM },
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// O aviso que a ilha mostra (o mais importante que ninguém dispensou).
+    fn island_alert(&self) -> Option<Alert> {
+        self.island_alerts().into_iter().find(|a| !self.island_ok.contains(&a.key))
+    }
+
+    /// O céu da ilha aberta no clima `weather`, guardado (refeito quando muda o minuto ou o clima).
+    fn island_sky(&self, s: f32, weather: Weather) -> std::cell::Ref<'_, Option<((u32, u32, Weather, i64), Image)>> {
+        let (w, h, r) = iu::size(IslandForm::Large);
+        let clock = self.clock();
+        let key = ((w * s).round() as u32, (h * s).round() as u32, weather, (clock.now * 60.0) as i64);
+        if self.island_sky.borrow().as_ref().is_none_or(|(k, _)| *k != key) {
+            let mut c = Canvas::new(key.0, key.1, s);
+            sky::draw_back(&mut c, w, h, r, weather, &clock);
+            *self.island_sky.borrow_mut() = Some((key, c.finish()));
+        }
+        self.island_sky.borrow()
+    }
+
+    /// O aviso na ilha, em cada forma. Aberta: o céu do aviso (com a chuva caindo), o aviso e as
+    /// próximas horas.
+    fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
+        let Some(a) = self.island_alert() else { return };
+        let (x, y, w, h) = r;
+        let cy = y + h / 2.0;
+        let art = |c: &mut Canvas, cx: f32, cy: f32, size: f32| {
+            let px = (size * c.s).round() as u32;
+            c.image(&weather_art(&a.icon, px), cx - size / 2.0, cy - size / 2.0);
+        };
+        match form {
+            IslandForm::Bubble => art(c, x + w / 2.0, cy, 28.0),
+            IslandForm::Compact | IslandForm::Banner => {
+                art(c, x + 26.0, cy, 26.0);
+                let label = if form == IslandForm::Banner { &a.banner } else { &a.short };
+                iu::compact_text(c, x + 46.0, r, label, &a.value, a.color);
+            }
+            IslandForm::Medium => {
+                art(c, x + 39.0, cy, 46.0);
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &a.title, &a.sub, a.color);
+                for (act, b) in island_buttons(form, w, h) {
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(act));
+                }
+            }
+            IslandForm::Large => {
+                let (lw, lh, lr) = iu::size(IslandForm::Large);
+                {
+                    let sky = self.island_sky(c.s, a.weather);
+                    if let Some((_, img)) = sky.as_ref() {
+                        c.image_px(img, (x * c.s).round(), (y * c.s).round(), img.w as f32, img.h as f32, 1.0);
+                    }
+                }
+                // a chuva, a neve, os raios (calculados pelo tempo: sem estado)
+                let t = self.started.elapsed().as_secs_f32() % 3600.0;
+                sky::draw_front(c, x, y, lw, lh, lr, a.weather, t, &self.island_storm);
+                iu::header(c, r, "TEMPO", WHITE, &self.place_short(), MUTED);
+                c.text(x + 22.0, y + 58.0, &a.title, Face::Semibold, 20.0, FG, Anchor::LM, Some(w - 44.0));
+                c.text(x + 22.0, y + 82.0, &a.sub, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
+                // as próximas horas (sem o nascer e o pôr do sol)
+                let hours: Vec<&Value> = self.weather.as_ref().and_then(|w| w["hours"].as_array()).map(|l| l.iter().filter(|h| h[2].is_i64()).take(6).collect()).unwrap_or_default();
+                let (x0, x1) = (x + 14.0, x + w - 14.0);
+                let col = (x1 - x0) / 6.0;
+                let hy = y + 102.0;
+                for (i, hr) in hours.iter().enumerate() {
+                    let hx = x0 + col * (i as f32 + 0.5);
+                    c.text(hx, hy, hr[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
+                    let px = (22.0 * c.s).round() as u32;
+                    c.image(&weather_art(hr[1].as_str().unwrap_or("clouds"), px), hx - 11.0, hy + 15.0);
+                    let pop = hr[4].as_i64().unwrap_or(0);
+                    if pop >= 20 {
+                        c.text(hx, hy + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
+                    }
+                    c.text(hx, hy + 50.0, &format!("{}°", hr[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
+                }
+                for (act, b) in island_buttons(form, w, h) {
+                    let label = if act == ISLAND_OK { "OK" } else { "Previsão" };
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), label, act == ISLAND_OK, hot == Some(act));
+                }
             }
         }
     }
@@ -1702,7 +1897,38 @@ fn inside(r: Rect4, x: f32, y: f32) -> bool {
     x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3
 }
 
+/// Os botões da ilha do Tempo: "OK" e, aberta, "Previsão".
+fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, Rect4)> {
+    match form {
+        IslandForm::Medium => vec![(ISLAND_OK, (w - 74.0, h / 2.0 - 16.0, w - 18.0, h / 2.0 + 16.0))],
+        IslandForm::Large => vec![(OPEN_FORECAST, (w - 186.0, h - 46.0, w - 92.0, h - 14.0)), (ISLAND_OK, (w - 82.0, h - 46.0, w - 22.0, h - 14.0))],
+        _ => Vec::new(),
+    }
+}
+
 impl Kind for Tempo {
+    /// Na ilha com trovoada, chuva chegando ou amanhã bem mais frio ou mais quente (um aviso).
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        let a = self.island_alert()?;
+        Some(IslandItem::alert(a.color, alert_hash(&a.key)))
+    }
+
+    fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
+        self.draw_island(c, form, r, hot);
+    }
+
+    fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
+        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    }
+
+    /// Aberta, com chuva, neve ou raios no céu do aviso: os quadros da camada de cima.
+    fn island_fps(&self, form: IslandForm) -> u32 {
+        match (form, self.island_alert()) {
+            (IslandForm::Large, Some(a)) if a.weather.moves() => RAIN_FPS,
+            _ => 0,
+        }
+    }
+
     fn key(&self) -> &'static str {
         "tempo"
     }
@@ -1819,6 +2045,11 @@ impl Kind for Tempo {
                 ctx.open(url);
             }
             UPDATE_WEATHER => self.update_weather(ctx),
+            ISLAND_OK => {
+                if let Some(a) = self.island_alert() {
+                    self.island_ok.push(a.key);
+                }
+            }
             ASK_CITY => ctx.out.push(super::Request::Ask("city")),
             BACK => self.view.set(View::Main),
             DETAILS => {
@@ -2138,6 +2369,22 @@ impl Tempo {
         t
     }
 
+    /// Com um aviso na ilha: "chuva" (começa em 30 min), "trovoada" (às 16h) ou "frio" (amanhã
+    /// 8° mais frio).
+    pub fn sample_island(alert: &str) -> Tempo {
+        let mut data = sample_data();
+        match alert {
+            "chuva" => data["minutely_15"] = json!({"time": ["2026-11-01T14:15", "2026-11-01T14:30", "2026-11-01T14:45"], "precipitation": [0.0, 0.0, 0.8]}),
+            "trovoada" => data["hourly"]["weather_code"][16] = json!(95),
+            "frio" => data["daily"]["temperature_2m_max"][1] = json!(19.0),
+            _ => {}
+        }
+        let mut t = Tempo::sample("inicio", 0, 0.0, Mode::M);
+        t.weather = Some(process(&data, "Florianópolis, Santa Catarina"));
+        t.refresh_rain(win::now());
+        t
+    }
+
     /// Num clima (código da Open-Meteo) e numa hora quaisquer; `windy`: ventando forte. Na
     /// trovoada, com um raio caindo agora.
     pub fn sample_sky(code: i64, hour: f32, windy: bool, mode: Mode) -> Tempo {
@@ -2161,6 +2408,64 @@ impl Tempo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Os avisos da ilha: a chuva chegando conta os minutos, a trovoada diz a hora, a mudança
+    /// de temperatura diz quanto; o dia comum não avisa nada; o "OK" some com o aviso.
+    #[test]
+    fn island_alerts_say_what_is_coming() {
+        assert!(Tempo::sample("inicio", 0, 0.0, Mode::M).island_alert().is_none(), "dia comum: nada na ilha");
+        let rain = Tempo::sample_island("chuva").island_alert().expect("chuva");
+        assert_eq!((rain.title.as_str(), rain.value.as_str(), rain.weather), ("Chuva em 30 min", "30 min", Weather::Rain));
+        let storm = Tempo::sample_island("trovoada").island_alert().expect("trovoada");
+        assert_eq!((storm.title.as_str(), storm.value.as_str()), ("Trovoada às 16h", "16h"));
+        let cold = Tempo::sample_island("frio").island_alert().expect("frio");
+        assert_eq!((cold.title.as_str(), cold.value.as_str()), ("Amanhã esfria 8°", "−8°"));
+        assert_eq!(cold.color, COLD);
+        // trovoada agora: na frente de tudo, com o céu dela
+        let now = Tempo::sample_sky(95, 15.0, false, Mode::M).island_alert().expect("trovoada agora");
+        assert_eq!((now.title.as_str(), now.weather), ("Trovoada agora", Weather::Storm));
+        // chovendo agora: não avisa que vai chover
+        assert!(Tempo::sample_raining(0.0, Mode::M).island_alert().is_none());
+        // dispensado: some (e o próximo aviso, se houver, aparece)
+        let mut t = Tempo::sample_island("chuva");
+        t.island_ok.push(rain.key.clone());
+        assert!(t.island_alert().is_none());
+    }
+
+    /// A previsão nova mexendo uns minutos na mesma chuva não é um aviso novo (a ilha não estica
+    /// de novo); outra chuva, bem depois, é.
+    #[test]
+    fn the_same_rain_keeps_its_alert() {
+        let mut t = Tempo::sample_island("chuva");
+        let (key, at) = t.rain_alert.clone().expect("chuva");
+        t.refresh_rain(win::now() + 10.0 * 60.0);
+        let (key2, at2) = t.rain_alert.clone().expect("ainda chuva");
+        assert_eq!(key, key2);
+        assert!((at2 - at - 600.0).abs() < 5.0);
+        t.refresh_rain(win::now() + 3.0 * 3600.0);
+        assert_ne!(t.rain_alert.expect("outra chuva").0, key);
+    }
+
+    /// A ilha aberta só pede quadros com algo caindo no céu do aviso.
+    #[test]
+    fn island_animates_only_open_with_rain() {
+        let rain = Tempo::sample_island("chuva");
+        assert_eq!(rain.island_fps(IslandForm::Large), RAIN_FPS);
+        assert_eq!(rain.island_fps(IslandForm::Medium), 0);
+        assert_eq!(rain.island_fps(IslandForm::Compact), 0);
+        assert_eq!(Tempo::sample_island("frio").island_fps(IslandForm::Large), 0, "céu limpo: parado");
+    }
+
+    /// Os minutos até a chuva, pela previsão de 15 em 15 minutos.
+    #[test]
+    fn rain_in_reads_the_next_hour() {
+        let mut data = sample_data();
+        assert_eq!(rain_in(&data), None);
+        data["minutely_15"] = json!({"time": ["2026-11-01T14:30", "2026-11-01T14:45"], "precipitation": [0.1, 0.5]});
+        assert_eq!(rain_in(&data), Some(30.0));
+        data["current"]["weather_code"] = json!(61);
+        assert_eq!(rain_in(&data), None, "já chovendo");
+    }
 
     /// As frases dos painéis não deixam uma palavra sozinha na segunda linha (como o "12 h." da
     /// chuva), e a chance de chuva sobre o céu não usa o ciano, que some no azul.

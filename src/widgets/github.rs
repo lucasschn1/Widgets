@@ -1,12 +1,14 @@
-//! Widget do GitHub: mapa de contribuições, sequência de dias e atividades recentes.
+//! Widget do GitHub: o mapa de contribuições do último ano, em quadrados que ocupam o cartão (e o
+//! aviso quando alguém pede sua revisão).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, Kind, Layout, MenuItem, Mode, NotifyAction, Request, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
+use super::island_ui::{self as iu, SOFT};
+use super::{alert_hash, Ctx, Env, Hot, IslandForm, IslandItem, Kind, Layout, MenuItem, Mode, NotifyAction, Rect4, Request, Status, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::gfx::{Anchor, Canvas, Face};
 use crate::theme::*;
@@ -14,39 +16,6 @@ use crate::util::{self, MONTHS, WEEKDAYS};
 use crate::win;
 
 const GITHUB_GREEN: Rgba = Rgba::rgb(63, 185, 80);
-// níveis do mapa de calor, nas cores do tema escuro do GitHub
-const HEAT: [Rgba; 5] = [Rgba(255, 255, 255, 26), Rgba::rgb(20, 88, 50), Rgba::rgb(0, 109, 50), Rgba::rgb(38, 166, 65), Rgba::rgb(57, 211, 83)];
-
-fn kind_color(icon: &str) -> Rgba {
-    match icon {
-        "commit" | "tag" => Rgba::rgb(88, 166, 255),
-        "pr_open" | "issue" => Rgba::rgb(63, 185, 80),
-        "pr_merged" => Rgba::rgb(163, 113, 247),
-        "pr_closed" | "delete" => Rgba::rgb(248, 81, 73),
-        "star" => Rgba::rgb(227, 179, 65),
-        _ => Rgba::rgb(176, 186, 200),
-    }
-}
-
-fn pr_state(action: &str) -> &str {
-    match action {
-        "opened" => "aberto",
-        "closed" => "fechado",
-        "merged" => "mesclado",
-        "reopened" => "reaberto",
-        a => a,
-    }
-}
-
-#[derive(Clone)]
-pub struct Row {
-    title: String,
-    info: String,
-    icon: String,
-    /// segundos desde 1970
-    when: f64,
-    url: String,
-}
 
 #[derive(Clone)]
 pub struct Data {
@@ -54,7 +23,6 @@ pub struct Data {
     /// (dia desde 1970, nível 0–4, quantidade), em ordem
     days: Vec<(i64, i64, i64)>,
     total: i64,
-    rows: Vec<Row>,
 }
 
 impl Data {
@@ -67,40 +35,17 @@ impl Data {
                 json!([format!("{y:04}-{m:02}-{day:02}"), level, count])
             })
             .collect();
-        let rows: Vec<Value> = self
-            .rows
-            .iter()
-            .map(|r| {
-                let secs = r.when as i64;
-                let (y, m, d) = util::civil_from_days(secs.div_euclid(86400));
-                let t = secs.rem_euclid(86400);
-                let when = format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00", t / 3600, t / 60 % 60, t % 60);
-                json!({"title": r.title, "info": r.info, "icon": r.icon, "when": when, "url": r.url})
-            })
-            .collect();
-        json!({"user": self.user, "days": days, "total": self.total, "rows": rows})
+        json!({"user": self.user, "days": days, "total": self.total})
     }
 
+    /// (o cache das versões com a lista de atividades também tem "rows": fica de fora)
     fn from_json(v: &Value) -> Option<Data> {
         let days = v["days"]
             .as_array()?
             .iter()
             .map(|d| Some((util::parse_date(d[0].as_str()?)?, d[1].as_i64()?, d[2].as_i64()?)))
             .collect::<Option<Vec<_>>>()?;
-        let rows = v["rows"]
-            .as_array()?
-            .iter()
-            .map(|r| {
-                Some(Row {
-                    title: r.str_of("title")?.into(),
-                    info: r.str_of("info").unwrap_or("").into(),
-                    icon: r.str_of("icon").unwrap_or("generic").into(),
-                    when: util::parse_iso_utc(r.str_of("when")?)?,
-                    url: r.str_of("url").unwrap_or("").into(),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(Data { user: v.str_of("user")?.into(), days, total: v.i64_of("total").unwrap_or(0), rows })
+        Some(Data { user: v.str_of("user")?.into(), days, total: v.i64_of("total").unwrap_or(0) })
     }
 }
 
@@ -187,123 +132,7 @@ fn contributions(user: &str) -> Result<(Vec<(i64, i64, i64)>, i64), Failure> {
     Ok((days, total))
 }
 
-/// Texto, ícone e link de um evento da API do GitHub.
-fn describe(e: &Value, user: &str, lookup: &mut dyn FnMut(&str) -> Option<Value>) -> Row {
-    let kind = e.str_of("type").unwrap_or("");
-    let p = &e["payload"];
-    let repo = e["repo"].str_of("name").unwrap_or("").to_string();
-    let short = if repo.to_lowercase().starts_with(&(user.to_lowercase() + "/")) { repo.split_once('/').unwrap().1.to_string() } else { repo.clone() };
-    let mut url = format!("https://github.com/{repo}");
-    let mut info = short.clone();
-    let (title, icon): (String, &str);
-    match kind {
-        "PushEvent" => {
-            let branch = p.str_of("ref").unwrap_or("").trim_start_matches("refs/heads/").to_string();
-            let head = p.str_of("head").map(String::from);
-            // a API deixou de mandar os commits no evento; o texto vem do commit de cima
-            let mut message = p["commits"].as_array().and_then(|c| c.last()).and_then(|c| c.str_of("message")).map(String::from);
-            if message.is_none() {
-                if let Some(h) = &head {
-                    message = lookup(&format!("/repos/{repo}/commits/{h}")).and_then(|c| c["commit"].str_of("message").map(String::from));
-                }
-            }
-            title = message.and_then(|m| m.lines().next().map(String::from)).unwrap_or_else(|| format!("Push em {branch}"));
-            icon = "commit";
-            info = format!("{short}  ·  {branch}");
-            if let Some(h) = head {
-                url += &format!("/commit/{h}");
-            }
-        }
-        "PullRequestEvent" => {
-            let number = p.i64_of("number").unwrap_or(0);
-            let pr = &p["pull_request"];
-            let action = if p.str_of("action") == Some("closed") && pr.bool_of("merged").unwrap_or(false) {
-                "merged".to_string()
-            } else {
-                p.str_of("action").unwrap_or("").to_string()
-            };
-            title = pr
-                .str_of("title")
-                .map(String::from)
-                .or_else(|| lookup(&format!("/repos/{repo}/pulls/{number}")).and_then(|v| v.str_of("title").map(String::from)))
-                .unwrap_or_else(|| format!("Pull request #{number}"));
-            icon = match action.as_str() {
-                "merged" => "pr_merged",
-                "closed" => "pr_closed",
-                _ => "pr_open",
-            };
-            info = format!("{short}  ·  #{number} {}", pr_state(&action));
-            url += &format!("/pull/{number}");
-        }
-        "CreateEvent" | "DeleteEvent" => {
-            let r = p.str_of("ref").unwrap_or("");
-            let verb = if kind == "CreateEvent" { "Criou" } else { "Apagou" };
-            match p.str_of("ref_type") {
-                Some("repository") => {
-                    title = format!("{verb} o repositório");
-                    icon = "generic";
-                }
-                Some("tag") => {
-                    title = format!("{verb} a tag {r}");
-                    icon = "tag";
-                }
-                _ => {
-                    title = format!("{verb} o branch {r}");
-                    icon = if kind == "CreateEvent" { "branch" } else { "delete" };
-                    if kind == "CreateEvent" {
-                        url += &format!("/tree/{r}");
-                    }
-                }
-            }
-        }
-        "WatchEvent" => {
-            title = format!("Deu estrela em {repo}");
-            icon = "star";
-            info = String::new();
-        }
-        "ForkEvent" => {
-            title = format!("Fez fork de {repo}");
-            icon = "branch";
-            info = String::new();
-        }
-        "IssuesEvent" | "IssueCommentEvent" => {
-            let issue = &p["issue"];
-            let number = issue.i64_of("number").or(p.i64_of("number")).unwrap_or(0);
-            let text = issue.str_of("title").map(String::from).unwrap_or_else(|| format!("#{number}"));
-            if kind == "IssuesEvent" {
-                title = text;
-                icon = "issue";
-                info = format!("{short}  ·  issue {}", if p.str_of("action") == Some("closed") { "fechada" } else { "aberta" });
-            } else {
-                title = format!("Comentou em {text}");
-                icon = "comment";
-            }
-            url += &format!("/issues/{number}");
-        }
-        "PullRequestReviewEvent" | "PullRequestReviewCommentEvent" => {
-            let number = p["pull_request"].i64_of("number").or(p.i64_of("number")).unwrap_or(0);
-            title = format!("Revisou o PR #{number}");
-            icon = "comment";
-            url += &format!("/pull/{number}");
-        }
-        "ReleaseEvent" => {
-            let r = &p["release"];
-            title = format!("Publicou {}", r.str_of("name").filter(|n| !n.is_empty()).or(r.str_of("tag_name")).unwrap_or("uma versão"));
-            icon = "tag";
-        }
-        "PublicEvent" => {
-            title = "Tornou o repositório público".into();
-            icon = "generic";
-        }
-        other => {
-            title = other.trim_end_matches("Event").to_string();
-            icon = "generic";
-        }
-    }
-    let when = e.str_of("created_at").and_then(util::parse_iso_utc).unwrap_or_else(win::now);
-    Row { title, info, icon: icon.into(), when, url }
-}
-
+#[derive(Clone, Debug)]
 struct Review {
     id: i64,
     title: String,
@@ -311,7 +140,7 @@ struct Review {
     repo: String,
 }
 
-fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookups: &mut HashMap<String, Option<Value>>, max_rows: usize) -> Result<(Data, Option<Vec<Review>>, String), Failure> {
+fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>) -> Result<(Data, Option<Vec<Review>>, String), Failure> {
     let token = token.or_else(gh_token).unwrap_or_default();
     let user = match user.filter(|u| !u.is_empty()) {
         Some(u) => u,
@@ -323,46 +152,6 @@ fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookup
         }
     };
     let (days, total) = contributions(&user)?;
-    // com o token, a lista inclui os eventos dos repositórios privados do próprio usuário
-    let path = format!("/users/{user}/events{}?per_page=60", if token.is_empty() { "/public" } else { "" });
-    let mut events = api(&path, &token).map_err(Failure::Offline)?.as_array().cloned().unwrap_or_default();
-    events.sort_by(|a, b| b.str_of("created_at").cmp(&a.str_of("created_at")));
-    let mut lookup = |p: &str| -> Option<Value> {
-        if !lookups.contains_key(p) {
-            match api(p, &token) {
-                Ok(v) => {
-                    lookups.insert(p.to_string(), Some(v));
-                }
-                Err(_) => return None, // tenta de novo na próxima atualização
-            }
-        }
-        lookups.get(p).cloned().flatten()
-    };
-    let mut rows = Vec::new();
-    let mut seen = HashSet::new();
-    // sem token o limite da API é baixo (60 pedidos por hora): carrega menos
-    let limit = if token.is_empty() { 10 } else { max_rows };
-    for e in &events {
-        let p = &e["payload"];
-        let kind = e.str_of("type").unwrap_or("");
-        // de cada PR ou issue, só o evento mais recente (ex.: "mesclado" no lugar de "aberto")
-        let grouped = matches!(kind, "PullRequestEvent" | "IssuesEvent");
-        let key = format!(
-            "{kind}|{}|{}|{}|{}|{}",
-            e["repo"].str_of("name").unwrap_or(""),
-            if grouped { "" } else { p.str_of("action").unwrap_or("") },
-            p.i64_of("number").or(p["issue"].i64_of("number")).unwrap_or(-1),
-            p.str_of("ref").unwrap_or(""),
-            p.str_of("head").unwrap_or("")
-        );
-        if !seen.insert(key) {
-            continue;
-        }
-        rows.push(describe(e, &user, &mut lookup));
-        if rows.len() == limit {
-            break;
-        }
-    }
     let mut reviews = None;
     if want_reviews && !token.is_empty() {
         let q = util::urlencode(&format!("is:pr is:open review-requested:{user}"));
@@ -383,69 +172,174 @@ fn fetch(user: Option<String>, want_reviews: bool, token: Option<String>, lookup
             );
         }
     }
-    Ok((Data { user, days, total, rows }, reviews, token))
+    Ok((Data { user, days, total }, reviews, token))
 }
 
 // ---------- o widget ----------
+//
+// Só o mapa de contribuições, em quadrados de cantos arredondados que ocupam o cartão: quanto
+// maior o widget, mais semanas e maiores os quadrados. Pequeno: 8 semanas e o total em cima.
+// Médio: 18 semanas, com o rótulo e o total. Grande: o ano inteiro em três faixas de 18 semanas,
+// cada uma com o período e quantas contribuições teve.
 
 const W: f32 = WIDE;
 const PAD: f32 = super::CARD_PAD;
-const ROW_H: f32 = 40.0;
-/// atividades no grande (a roda do mouse rola as outras)
-const ROWS: usize = 7;
-const MAX_ROWS: usize = 20; // carregadas; a roda do mouse rola a lista
-const ICON_D: f32 = 26.0;
-// médio e grande: as últimas 28 semanas, na largura toda
-const WEEKS: i64 = 28;
-const GAP: f32 = 2.0;
-const C_PAD: f32 = PAD;
-const STEP: f32 = (W - 2.0 * C_PAD + GAP) / WEEKS as f32;
-const GRID_X: f32 = C_PAD;
-// pequeno (quadrado): cabeçalho, o número de contribuições e as últimas 12 semanas embaixo
-const P_WEEKS: i64 = 12;
-const P_STEP: f32 = (SMALL - 2.0 * PAD + GAP) / P_WEEKS as f32;
-const P_GRID_Y: f32 = SMALL - PAD - (7.0 * P_STEP - GAP);
-/// pequeno: o número grande no alto e a sequência ("5 dias seguidos") embaixo dele
-const P_NUM_Y: f32 = 8.0;
-const P_STREAK_Y: f32 = 43.0;
-// médio e grande: cabeçalho, o placar (número grande) e o mapa; no grande, as atividades
 const HEAD_Y: f32 = super::LABEL_Y;
-const NUM_Y: f32 = 29.0;
-/// o mapa fica no pé do médio, com a mesma margem dos lados
-const GRID_Y: f32 = MEDIUM_H - C_PAD - heat_h();
+/// espaço entre os quadrados
+const GAP: f32 = 3.0;
+/// linha de base do texto de cima (o total), alinhada ao rótulo "GITHUB"
+const TOP_BASE: f32 = HEAD_Y + 9.5;
 
-const fn heat_h() -> f32 {
-    7.0 * STEP - GAP
+const P_WEEKS: i64 = 8;
+const P_STEP: f32 = (SMALL - 2.0 * PAD + GAP) / P_WEEKS as f32;
+const P_GRID_Y: f32 = SMALL - PAD - grid_h(P_STEP);
+
+/// no médio e no grande, onde os quadrados podem começar (embaixo do rótulo)
+const GRID_TOP: f32 = 28.0;
+const M_WEEKS: i64 = 18;
+/// o médio é baixo: os quadrados crescem até encostar na altura, e o bloco fica centrado
+const M_STEP: f32 = {
+    let by_width = (W - 2.0 * PAD + GAP) / M_WEEKS as f32;
+    let by_height = (MEDIUM_H - PAD - GRID_TOP + GAP) / 7.0;
+    if by_width < by_height { by_width } else { by_height }
+};
+const M_GRID_X: f32 = (W - (M_WEEKS as f32 * M_STEP - GAP)) / 2.0;
+const M_GRID_Y: f32 = MEDIUM_H - PAD - grid_h(M_STEP);
+
+const BANDS: i64 = 3;
+const BAND_WEEKS: i64 = 18;
+const G_STEP: f32 = (W - 2.0 * PAD + GAP) / BAND_WEEKS as f32;
+/// onde começa a primeira faixa (embaixo do rótulo)
+const G_BANDS_Y: f32 = 34.0;
+/// a linha de cada faixa (período e total) até os quadrados dela
+const BAND_HEAD: f32 = 17.0;
+/// espaço entre as faixas: o que sobra, dividido igual
+const BAND_GAP: f32 = (LARGE_H - PAD - G_BANDS_Y - BANDS as f32 * (BAND_HEAD + grid_h(G_STEP))) / (BANDS - 1) as f32;
+const _: () = assert!(BAND_GAP >= 8.0, "as três faixas não cabem no grande");
+
+const fn grid_h(step: f32) -> f32 {
+    7.0 * step - GAP
 }
-/// as atividades do grande ocupam o que sobra embaixo do mapa
-const fn list_y() -> f32 {
-    LARGE_H - ROW_H * ROWS as f32 - 4.0
-}
-const _: () = assert!(list_y() >= GRID_Y + heat_h() + 20.0, "as atividades não cabem embaixo do mapa");
+
+/// os cinco níveis do mapa: o dia vazio, quase apagado, e o verde cada vez mais forte
+const GREEN: Rgba = Rgba::rgb(48, 209, 88);
+const LEVELS: [Rgba; 5] = [Rgba(255, 255, 255, 18), Rgba(GREEN.0, GREEN.1, GREEN.2, 71), Rgba(GREEN.0, GREEN.1, GREEN.2, 128), Rgba(GREEN.0, GREEN.1, GREEN.2, 191), Rgba::rgb(76, 224, 122)];
 
 const FETCH_EVERY: Duration = Duration::from_secs(10 * 60);
 const RETRY: Duration = Duration::from_secs(2 * 60);
-const CLOCK: Duration = Duration::from_secs(60); // atualiza o "há 5 min"
 
 // ações
-const OPEN_ROW: u32 = 100; // + índice da linha visível
 const OPEN_PROFILE: u32 = 1;
 pub const UPDATE: u32 = 2;
 pub const ASK_USER: u32 = 3;
+/// na ilha: abrir o pedido mais novo, abrir todos, deixar para depois
+const OPEN_REVIEW: u32 = 4;
+const OPEN_REVIEWS: u32 = 5;
+const DISMISS_REVIEWS: u32 = 6;
+const REVIEWS_URL: &str = "https://github.com/pulls/review-requested";
 
-type Result3 = Result<(Data, Option<Vec<Review>>, String, HashMap<String, Option<Value>>), Failure>;
+type Result3 = Result<(Data, Option<Vec<Review>>, String), Failure>;
+
+/// Um bloco de quadrados: colunas são semanas (domingo em cima), a partir do dia `start`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Grid {
+    start: i64,
+    weeks: i64,
+    x: f32,
+    y: f32,
+    step: f32,
+}
+
+impl Grid {
+    fn cell(&self) -> f32 {
+        self.step - GAP
+    }
+
+    /// Canto de cima à esquerda do quadrado do dia, se ele está neste bloco.
+    fn spot(&self, day: i64) -> Option<(f32, f32)> {
+        let offset = day - self.start;
+        (0..self.weeks * 7).contains(&offset).then(|| (self.x + (offset / 7) as f32 * self.step, self.y + (offset % 7) as f32 * self.step))
+    }
+
+    /// O dia do quadrado no ponto (x, y), se há um quadrado ali.
+    fn day_at(&self, x: f32, y: f32) -> Option<i64> {
+        let (col, row) = (((x - self.x) / self.step).floor(), ((y - self.y) / self.step).floor());
+        let inside = x - self.x - col * self.step <= self.cell() && y - self.y - row * self.step <= self.cell();
+        ((0.0..self.weeks as f32).contains(&col) && (0.0..7.0).contains(&row) && inside).then(|| self.start + col as i64 * 7 + row as i64)
+    }
+}
+
+/// Dia de hoje (dias desde 1970, no horário local).
+fn today() -> i64 {
+    let t = win::local_time();
+    util::days_from_civil(t.year as i64, t.month as u32, t.day as u32)
+}
+
+/// Primeiro dia (um domingo) de um mapa de `weeks` semanas cuja última coluna é a semana de
+/// `today`.
+fn grid_start(today: i64, weeks: i64) -> i64 {
+    let weekday = (today + 3).rem_euclid(7); // 0 = segunda (1970-01-01 foi quinta)
+    today - ((weekday + 1) % 7 + 7 * (weeks - 1))
+}
+
+/// Os blocos de quadrados do tamanho dado (no grande, as três faixas, da mais antiga à de agora).
+fn grids(mode: Mode, today: i64) -> Vec<Grid> {
+    match mode {
+        Mode::P => vec![Grid { start: grid_start(today, P_WEEKS), weeks: P_WEEKS, x: PAD, y: P_GRID_Y, step: P_STEP }],
+        Mode::M => vec![Grid { start: grid_start(today, M_WEEKS), weeks: M_WEEKS, x: M_GRID_X, y: M_GRID_Y, step: M_STEP }],
+        Mode::G => {
+            let first = grid_start(today, BANDS * BAND_WEEKS);
+            (0..BANDS).map(|k| Grid { start: first + k * BAND_WEEKS * 7, weeks: BAND_WEEKS, x: PAD, y: band_top(k) + BAND_HEAD, step: G_STEP }).collect()
+        }
+    }
+}
+
+/// Topo da faixa `k` do grande (a linha do período).
+fn band_top(k: i64) -> f32 {
+    G_BANDS_Y + k as f32 * (BAND_HEAD + grid_h(G_STEP) + BAND_GAP)
+}
+
+/// "812" com o ponto dos milhares ("1.234").
+fn grouped(n: i64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// O período de uma faixa: "nov 2025 – mar" (o ano do fim só quando muda).
+fn band_range(first: i64, last: i64) -> String {
+    let (y0, m0, _) = util::civil_from_days(first);
+    let (y1, m1, _) = util::civil_from_days(last);
+    let end = if y0 == y1 { MONTHS[m1 as usize - 1].to_string() } else { format!("{} {y1}", MONTHS[m1 as usize - 1]) };
+    format!("{} {y0} – {end}", MONTHS[m0 as usize - 1])
+}
+
+fn amount(n: i64) -> String {
+    match n {
+        0 => "Nenhuma contribuição".to_string(),
+        1 => "1 contribuição".to_string(),
+        n => format!("{} contribuições", grouped(n)),
+    }
+}
 
 pub struct GitHub {
     data: Option<Data>,
     msg: String,
-    scroll: usize,
     token: Option<String>,
-    lookups: HashMap<String, Option<Value>>,
     pending: Option<Receiver<Result3>>,
     poll_at: Instant,
     next_fetch: Option<Instant>,
-    next_clock: Instant,
     status: Status,
+    /// os pedidos de revisão abertos (da última busca)
+    reviews: Vec<Review>,
+    /// os que já foram vistos na ilha (não pedem mais atenção)
+    island_seen: Vec<i64>,
 }
 
 impl GitHub {
@@ -454,21 +348,20 @@ impl GitHub {
         // abre com os últimos dados guardados, enquanto busca os atuais
         let data = cache.get("github").and_then(Data::from_json).filter(|d| Some(d.user.as_str()) == user);
         let updated = if data.is_some() { cache.f64_of("github_time") } else { None };
+        let island_seen = cache["reviews_ilha"].as_array().map(|a| a.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
         GitHub {
             data,
             msg: "Carregando…".into(),
-            scroll: 0,
             token: None,
-            lookups: HashMap::new(),
             pending: None,
             poll_at: Instant::now(),
             next_fetch: None,
-            next_clock: Instant::now() + CLOCK,
             status: Status { updated, ..Default::default() },
+            reviews: Vec::new(),
+            island_seen,
         }
     }
 
-    /// Exemplo para a galeria: os dados guardados, ou inventados se não houver.
     /// Buscando as contribuições pela primeira vez (o esqueleto no lugar do resto).
     #[cfg(test)]
     pub fn sample_loading(cfg: &Value) -> GitHub {
@@ -478,31 +371,35 @@ impl GitHub {
         g
     }
 
+    /// Exemplo para a galeria: os dados guardados, ou inventados se não houver.
     pub fn sample(cfg: &Value, cache: &Value) -> GitHub {
         let mut g = GitHub::new(cfg, cache);
         if g.data.is_none() {
             g.data = cache.get("github").and_then(Data::from_json);
         }
         if g.data.is_none() {
-            let t = win::local_time();
-            let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
-            let days = (0..371).rev().map(|i| (today - i, if i % 4 == 0 { 0 } else { (i * 7 + i / 3) % 5 }, i % 6)).collect();
-            let now = win::now();
-            let rows = [
-                ("commit", "Ajusta o layout do cartão", "meu-projeto  ·  main", 0.2),
-                ("pr_merged", "Adiciona modo escuro", "meu-projeto  ·  #42", 1.5),
-                ("pr_open", "Lista de tarefas com arrastar e soltar", "meu-projeto  ·  #45", 4.0),
-                ("star", "Deu estrela", "rust-lang/rust", 20.0),
-                ("issue", "Erro ao abrir no segundo monitor", "meu-projeto  ·  #44", 30.0),
-                ("commit", "Corrige o encaixe entre monitores", "meu-projeto  ·  main", 50.0),
-                ("branch", "Criou o branch feat/tema-claro", "meu-projeto", 72.0),
-            ]
-                .iter()
-                .map(|(icon, title, info, h)| Row { title: title.to_string(), info: info.to_string(), icon: icon.to_string(), when: now - h * 3600.0, url: String::new() })
-                .collect();
-            g.data = Some(Data { user: "voce".into(), days, total: 812, rows });
+            let today = today();
+            let days = (0..371)
+                .rev()
+                .map(|i| {
+                    let weekend = (today - i + 3).rem_euclid(7) >= 5;
+                    let level = if i == 0 || (i % 4 == 0) || (weekend && i % 3 != 0) { 0 } else { (i * 7 + i / 3) % 5 };
+                    (today - i, level, [0, 2, 4, 7, 11][level as usize] + i % 3)
+                })
+                .collect::<Vec<_>>();
+            let total = days.iter().map(|d| d.2).sum();
+            g.data = Some(Data { user: "voce".into(), days, total });
         }
         g.msg = String::new();
+        g
+    }
+
+    /// Com dois pedidos de revisão esperando (o aviso da ilha).
+    #[cfg(test)]
+    pub fn sample_reviews(cfg: &Value) -> GitHub {
+        let mut g = GitHub::sample(cfg, &json!({}));
+        let r = |id: i64, repo: &str, title: &str| Review { id, title: title.into(), url: format!("https://github.com/{repo}/pull/{id}"), repo: repo.into() };
+        g.reviews = vec![r(34, "widgets", "Ilha na barra de tarefas"), r(12, "site", "Corrige o menu no celular")];
         g
     }
 
@@ -511,13 +408,11 @@ impl GitHub {
             return;
         }
         let user = ctx.cfg["github"].str_of("usuario").map(String::from);
-        let reviews = crate::config::notify_enabled(ctx.cfg, "github");
+        let reviews = crate::config::notify_enabled(ctx.cfg, "github") || super::on_island(ctx.cfg, "github");
         let token = self.token.clone().or_else(|| ctx.cfg["github"].str_of("token").map(String::from));
-        let mut lookups = std::mem::take(&mut self.lookups);
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let result = fetch(user, reviews, token, &mut lookups, MAX_ROWS).map(|(d, r, t)| (d, r, t, lookups));
-            let _ = tx.send(result);
+            let _ = tx.send(fetch(user, reviews, token));
             crate::events::wake();
         });
         self.pending = Some(rx);
@@ -555,12 +450,10 @@ impl GitHub {
                 self.status.error = Some("Sem conexão com o GitHub".into());
                 delay = RETRY;
             }
-            Ok((data, reviews, token, lookups)) => {
+            Ok((data, reviews, token)) => {
                 self.token = Some(token);
-                self.lookups = lookups;
                 self.status.error = None;
                 self.status.updated = Some(win::now());
-                self.scroll = self.scroll.min(data.rows.len().saturating_sub(ROWS));
                 if ctx.cfg["github"].str_of("usuario") != Some(data.user.as_str()) {
                     ctx.wcfg().insert("usuario".into(), json!(data.user));
                     ctx.save();
@@ -568,7 +461,11 @@ impl GitHub {
                 ctx.cache["github"] = data.to_json();
                 ctx.cache["github_time"] = json!(self.status.updated);
                 if let Some(reviews) = reviews {
-                    notify_reviews(&reviews, ctx);
+                    if crate::config::notify_enabled(ctx.cfg, "github") {
+                        notify_reviews(&reviews, ctx);
+                    }
+                    self.island_seen.retain(|id| reviews.iter().any(|r| r.id == *id));
+                    self.reviews = reviews;
                 }
                 ctx.out.push(Request::SaveCache);
                 self.data = Some(data);
@@ -577,131 +474,52 @@ impl GitHub {
         self.next_fetch = Some(Instant::now() + delay);
     }
 
-    fn list_geom(mode: Mode) -> Option<(f32, usize)> {
-        (mode == Mode::G).then(|| (list_y(), ROWS))
-    }
-
-    fn visible_rows(&self, mode: Mode) -> &[Row] {
-        match (Self::list_geom(mode), &self.data) {
-            (Some((_, n)), Some(d)) => {
-                let start = self.scroll.min(d.rows.len());
-                &d.rows[start..(start + n).min(d.rows.len())]
-            }
-            _ => &[],
-        }
-    }
-
-    fn row_index(&self, x: f32, y: f32, mode: Mode) -> Option<usize> {
-        let (top, _) = Self::list_geom(mode)?;
-        self.data.as_ref()?;
-        let i = ((y - top) / ROW_H).floor();
-        (y >= top && i >= 0.0 && (i as usize) < self.visible_rows(mode).len() && (PAD - 6.0..=W - PAD + 6.0).contains(&x)).then_some(i as usize)
-    }
-
     fn on_header(x: f32, y: f32, mode: Mode) -> bool {
-        mode != Mode::P && (8.0..=GRID_Y - 6.0).contains(&y) && (PAD - 4.0..=W - PAD + 4.0).contains(&x)
+        mode != Mode::P && (6.0..=28.0).contains(&y) && (PAD - 4.0..=W - PAD + 4.0).contains(&x)
     }
 
     fn on_message(&self, x: f32) -> bool {
         self.data.is_none() && self.status.error.is_some() && (8.0..=W - 8.0).contains(&x)
     }
 
-    /// (semanas, x, y, passo) do mapa de contribuições no tamanho dado.
-    fn grid(mode: Mode) -> (i64, f32, f32, f32) {
-        if mode == Mode::P { (P_WEEKS, PAD, P_GRID_Y, P_STEP) } else { (WEEKS, GRID_X, GRID_Y, STEP) }
+    /// Nível e quantidade de cada dia com dados.
+    fn by_day(&self) -> HashMap<i64, (i64, i64)> {
+        self.data.as_ref().map(|d| d.days.iter().map(|&(day, level, count)| (day, (level, count))).collect()).unwrap_or_default()
     }
 
-    /// Primeiro dia do mapa: colunas são semanas de domingo a sábado; a última é a atual.
-    fn grid_start(&self, weeks: i64) -> i64 {
-        // a última coluna é a semana de hoje (os dados podem vir só até ontem, ou até amanhã em UTC)
-        let t = win::local_time();
-        let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
-        let last = today;
-        let weekday = (last + 3).rem_euclid(7); // 0 = segunda (1970-01-01 foi quinta)
-        last - ((weekday + 1) % 7 + 7 * (weeks - 1))
-    }
-
+    /// O dia (e quantas contribuições teve) do quadrado no ponto, se há um ali.
     fn day_at(&self, x: f32, y: f32, mode: Mode) -> Option<(i64, i64)> {
-        let d = self.data.as_ref()?;
-        let (weeks, gx, gy, step) = Self::grid(mode);
-        let cell = step - GAP;
-        let col = ((x - gx) / step).floor();
-        let row = ((y - gy) / step).floor();
-        let inside = x - gx - col * step <= cell && y - gy - row * step <= cell;
-        if !(0.0..weeks as f32).contains(&col) || !(0.0..7.0).contains(&row) || !inside {
-            return None;
-        }
-        let day = self.grid_start(weeks) + col as i64 * 7 + row as i64;
-        d.days.iter().find(|x| x.0 == day).map(|x| (day, x.2))
+        self.data.as_ref()?;
+        let today = today();
+        let day = grids(mode, today).iter().find_map(|g| g.day_at(x, y)).filter(|&d| d <= today)?;
+        Some((day, self.by_day().get(&day).map_or(0, |v| v.1)))
     }
 
-    fn streak(&self) -> (i64, i64) {
-        let Some(d) = &self.data else { return (0, 0) };
-        let counts: HashMap<i64, i64> = d.days.iter().map(|x| (x.0, x.2)).collect();
-        let t = win::local_time();
-        let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
-        let mut day = today;
-        if counts.get(&day).copied().unwrap_or(0) == 0 {
-            day -= 1; // o dia de hoje ainda pode ganhar contribuições
-        }
-        let mut streak = 0;
-        while counts.get(&day).copied().unwrap_or(0) > 0 {
-            streak += 1;
-            day -= 1;
-        }
-        (streak, counts.get(&today).copied().unwrap_or(0))
-    }
-
-    fn heatmap(&self, c: &mut Canvas, mode: Mode) {
-        let Some(d) = &self.data else { return };
-        let (weeks, gx, gy, step) = Self::grid(mode);
-        let cell = step - GAP;
-        let start = self.grid_start(weeks);
-        let t = win::local_time();
-        let today = util::days_from_civil(t.year as i64, t.month as u32, t.day as u32);
-        for &(day, level, _) in &d.days {
-            let offset = day - start;
-            if offset < 0 || offset >= weeks * 7 {
-                continue;
-            }
-            let x = gx + (offset / 7) as f32 * step;
-            let y = gy + (offset % 7) as f32 * step;
-            c.fill_round_rect(x, y, x + cell, y + cell, cell * 0.25, HEAT[level.clamp(0, 4) as usize]);
+    /// Os quadrados de um bloco: os dias que já passaram (sem dados: o nível vazio) e hoje com
+    /// um contorno.
+    fn draw_grid(c: &mut Canvas, g: &Grid, days: &HashMap<i64, (i64, i64)>, today: i64) {
+        let cell = g.cell();
+        let r = cell * 0.3;
+        for day in g.start..(g.start + g.weeks * 7).min(today + 1) {
+            let Some((x, y)) = g.spot(day) else { continue };
+            let level = days.get(&day).map_or(0, |v| v.0).clamp(0, 4) as usize;
+            c.fill_round_rect(x, y, x + cell, y + cell, r, LEVELS[level]);
             if day == today {
-                c.stroke_round_rect(x, y, x + cell, y + cell, cell * 0.25, Rgba(255, 255, 255, 220), 1.2);
+                c.stroke_round_rect(x + 0.75, y + 0.75, x + cell - 0.75, y + cell - 0.75, r - 0.5, WHITE.alpha(0.9), 1.5);
             }
         }
     }
 
-    fn rows(&self, c: &mut Canvas, mode: Mode) {
-        let Some((list_y, visible)) = Self::list_geom(mode) else { return };
-        let Some(d) = &self.data else { return };
-        if d.rows.len() > visible {
-            // barra de rolagem fininha
-            let x = W - 7.0;
-            let track = visible as f32 * ROW_H - 10.0;
-            c.fill_round_rect(x, list_y, x + 3.0, list_y + track, 1.5, WHITE.alpha(0.08));
-            let thumb = track * visible as f32 / d.rows.len() as f32;
-            let scroll = self.scroll.min(d.rows.len() - visible);
-            let ty = list_y + (track - thumb) * scroll as f32 / (d.rows.len() - visible) as f32;
-            c.fill_round_rect(x, ty, x + 3.0, ty + thumb, 1.5, WHITE.alpha(0.4));
-        }
-        if d.rows.is_empty() {
-            c.text(PAD, list_y + 6.0, "Nenhuma atividade recente", Face::Regular, 12.0, MUTED, Anchor::LA, None);
-        }
-        let x = PAD + ICON_D + 10.0;
-        let w = W - x - PAD;
-        for (i, row) in self.visible_rows(mode).iter().enumerate() {
-            let top = list_y + i as f32 * ROW_H;
-            let color = kind_color(&row.icon);
-            let (cx, cy) = (PAD + ICON_D / 2.0, top + 17.0);
-            let bg = color.alpha(0.18);
-            c.fill_circle(cx, cy, ICON_D / 2.0, bg);
-            glyph(c, &row.icon, cx, cy, 13.0, color, Rgba(30, 30, 36, 255).mix(color, 0.18));
-            c.text(x, top + 1.0, &row.title, Face::Semibold, 12.0, FG, Anchor::LA, Some(w));
-            let ago = util::time_ago(row.when);
-            let info = if row.info.is_empty() { ago } else { format!("{}  ·  {ago}", row.info) };
-            c.text(x, top + 19.0, &info, Face::Regular, 10.5, MUTED, Anchor::LA, Some(w));
+    /// "812 contribuições" (pequeno) ou "812 no último ano" (médio e grande, à direita do rótulo):
+    /// o número forte, o resto apagado, na mesma linha de base.
+    fn draw_total(c: &mut Canvas, total: i64, mode: Mode) {
+        let number = grouped(total);
+        if mode == Mode::P {
+            let nw = c.text(PAD, TOP_BASE, &number, Face::Semibold, 12.5, FG, Anchor::LS, None);
+            c.text(PAD + nw + 4.0, TOP_BASE, "contribuições", Face::Regular, 11.0, MUTED, Anchor::LS, Some(SMALL - 2.0 * PAD - nw - 4.0));
+        } else {
+            let rw = c.text(W - PAD, TOP_BASE, "no último ano", Face::Regular, 11.0, MUTED, Anchor::RS, None);
+            c.text(W - PAD - rw - 4.0, TOP_BASE, &number, Face::Semibold, 11.5, FG, Anchor::RS, None);
         }
     }
 }
@@ -722,88 +540,22 @@ fn notify_reviews(reviews: &[Review], ctx: &mut Ctx) {
     ctx.cache["reviews_seen"] = json!(all[start..]);
 }
 
-/// Ícone de atividade no estilo dos Octicons, num quadro de lado `size` centrado em (cx, cy).
-fn glyph(c: &mut Canvas, kind: &str, cx: f32, cy: f32, size: f32, color: Rgba, bg: Rgba) {
-    let u = size / 2.0;
-    let w = (size * 0.12).max(1.0 / c.s);
-    let pt = |x: f32, y: f32| (cx + x * u, cy + y * u);
-    let line = |c: &mut Canvas, pts: &[(f32, f32)]| {
-        let pts: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| pt(x, y)).collect();
-        c.line(&pts, color, w);
-    };
-    let ring = |c: &mut Canvas, x: f32, y: f32, r: f32| {
-        let (x, y) = pt(x, y);
-        c.fill_circle(x, y, r * u, bg);
-        c.stroke_circle(x, y, r * u - w / 2.0, color, w);
-    };
-    match kind {
-        "commit" => {
-            line(c, &[(-1.0, 0.0), (1.0, 0.0)]);
-            ring(c, 0.0, 0.0, 0.45);
-        }
-        "pr_open" | "pr_closed" => {
-            line(c, &[(-0.5, -0.62), (-0.5, 0.62)]);
-            ring(c, -0.5, -0.62, 0.27);
-            ring(c, -0.5, 0.62, 0.27);
-            line(c, &[(0.5, 0.6), (0.5, -0.45), (0.05, -0.45)]);
-            line(c, &[(0.05, -0.45), (0.27, -0.67)]);
-            line(c, &[(0.05, -0.45), (0.27, -0.23)]);
-            ring(c, 0.5, 0.62, 0.27);
-        }
-        "pr_merged" => {
-            line(c, &[(-0.5, -0.62), (-0.5, 0.62)]);
-            line(c, &[(-0.5, -0.4), (-0.2, 0.2), (0.5, 0.2)]);
-            ring(c, -0.5, -0.62, 0.27);
-            ring(c, -0.5, 0.62, 0.27);
-            ring(c, 0.5, 0.2, 0.27);
-        }
-        "branch" | "delete" => {
-            line(c, &[(-0.5, -0.62), (-0.5, 0.62)]);
-            line(c, &[(0.5, -0.4), (0.5, -0.1), (-0.5, 0.35)]);
-            ring(c, -0.5, -0.62, 0.27);
-            ring(c, -0.5, 0.62, 0.27);
-            ring(c, 0.5, -0.55, 0.27);
-        }
-        "star" => {
-            let pts: Vec<(f32, f32)> = (0..10)
-                .map(|i| {
-                    let a = (-90.0 + i as f32 * 36.0f32).to_radians();
-                    let r = if i % 2 == 0 { 0.95 } else { 0.42 };
-                    pt(a.cos() * r, a.sin() * r + 0.06)
-                })
-                .collect();
-            c.polygon(&pts, color);
-        }
-        "issue" => {
-            ring(c, 0.0, 0.0, 0.8);
-            c.fill_circle(cx, cy, 0.2 * u, color);
-        }
-        "comment" => {
-            let ((x0, y0), (x1, y1)) = (pt(-0.85, -0.7), pt(0.85, 0.45));
-            c.stroke_round_rect(x0, y0, x1, y1, 0.3 * u, color, w);
-            line(c, &[(-0.35, 0.45), (-0.55, 0.85), (0.05, 0.45)]);
-        }
-        "tag" => {
-            let pts = [pt(-0.8, -0.8), pt(0.1, -0.8), pt(0.85, 0.0), pt(0.1, 0.8), pt(-0.8, 0.8)];
-            c.line_with(&pts, crate::gfx::Fill::Solid(color), w, true);
-            ring(c, -0.38, -0.38, 0.16);
-        }
-        _ => ring(c, 0.0, 0.0, 0.45),
-    }
-}
-
-/// A sequência no pequeno, por extenso: "5 dias seguidos", "1 dia seguido" ou, sem sequência,
-/// o que já tem hoje.
-fn small_streak(streak: i64, today: i64) -> String {
-    match (streak, today) {
-        (0, 0) => "nada hoje ainda".into(),
-        (0, n) => format!("hoje {n}"),
-        (1, _) => "1 dia seguido".into(),
-        (n, _) => format!("{n} dias seguidos"),
-    }
-}
-
 impl Kind for GitHub {
+    /// Na ilha com um pedido de revisão que ainda não foi visto (um aviso).
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        let unseen = self.unseen();
+        let newest = unseen.first()?;
+        Some(IslandItem::alert(GITHUB_GREEN, alert_hash(&newest.id.to_string())))
+    }
+
+    fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
+        self.draw_island(c, form, r, hot);
+    }
+
+    fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
+        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    }
+
     fn key(&self) -> &'static str {
         "github"
     }
@@ -811,13 +563,13 @@ impl Kind for GitHub {
         "GitHub"
     }
 
-    fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
+    fn draw(&self, c: &mut Canvas, mode: Mode, _env: &Env) {
         let Some(d) = &self.data else {
             let h = Layout::of(mode).h;
             if self.status.loading {
-                // buscando pela primeira vez: o título e o esqueleto pulsando no lugar do resto
-                // (na mesma altura de quando os dados chegam: o título não pula; o pequeno não
-                // tem título)
+                // buscando pela primeira vez: o rótulo e o esqueleto pulsando no lugar do resto
+                // (na mesma altura de quando os dados chegam: o rótulo não pula; o pequeno não
+                // tem rótulo)
                 if mode != Mode::P {
                     super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
                 }
@@ -830,69 +582,51 @@ impl Kind for GitHub {
                     c.text(PAD, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
                 }
             } else {
-                c.text(W / 2.0, h / 2.0, &self.msg, Face::Semibold, 12.0, FG, Anchor::MM, Some(W - 2.0 * C_PAD));
+                c.text(W / 2.0, h / 2.0, &self.msg, Face::Semibold, 12.0, FG, Anchor::MM, Some(W - 2.0 * PAD));
             }
             return;
         };
-        let (streak, today) = self.streak();
-        let total = d.total.to_string();
-        let mut grouped = String::new();
-        for (i, ch) in total.chars().enumerate() {
-            if i > 0 && (total.len() - i) % 3 == 0 {
-                grouped.push('.');
+        if mode != Mode::P {
+            super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+        }
+        Self::draw_total(c, d.total, mode);
+        let days = self.by_day();
+        let today = today();
+        for (k, g) in grids(mode, today).iter().enumerate() {
+            Self::draw_grid(c, g, &days, today);
+            if mode == Mode::G {
+                // a linha da faixa: o período e quantas contribuições teve
+                let last = (g.start + g.weeks * 7 - 1).min(today);
+                let sum: i64 = (g.start..=last).filter_map(|day| days.get(&day)).map(|v| v.1).sum();
+                let y = band_top(k as i64) + 11.0;
+                c.text(PAD, y, &band_range(g.start, last), Face::Semibold, 11.0, FG.alpha(0.85), Anchor::LS, None);
+                c.text(W - PAD, y, &amount(sum).to_lowercase(), Face::Regular, 11.0, MUTED, Anchor::RS, None);
             }
-            grouped.push(ch);
-        }
-        let days = if streak == 1 { "dia" } else { "dias" };
-        if mode == Mode::P {
-            // o placar, a sequência por extenso e o mapa das últimas semanas (sem o rótulo: no
-            // pequeno nenhum widget tem, e o mapa verde já diz o que é)
-            // (o número grande começa 1 ponto antes: o espaço do lado do dígito o afastava da margem)
-            c.text(PAD - 1.0, P_NUM_Y, &grouped, Face::Light, 28.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
-            c.text(PAD, P_STREAK_Y, &small_streak(streak, today), Face::Regular, 10.5, MUTED, Anchor::LA, Some(SMALL - 2.0 * PAD));
-            self.heatmap(c, mode);
-            return;
-        }
-        super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
-        let user = if d.user.is_empty() { env.wcfg().str_of("usuario").unwrap_or("").to_string() } else { d.user.clone() };
-        if !user.is_empty() {
-            c.text(W - PAD, HEAD_Y, &format!("@{user}"), Face::Regular, 10.5, MUTED, Anchor::RA, Some(180.0));
-        }
-        // o placar: o número grande e, ao lado, o que ele conta
-        let nw = c.text(PAD - 1.0, NUM_Y - 3.0, &grouped, Face::Light, 28.0, FG, Anchor::LA, None);
-        let sx = PAD + nw + 10.0;
-        c.text(sx, NUM_Y + 3.0, "contribuições no último ano", Face::Regular, 11.5, MUTED, Anchor::LA, Some(W - PAD - sx));
-        let today = match today {
-            0 => "nada hoje ainda".to_string(),
-            n => format!("hoje {n}"),
-        };
-        c.text(sx, NUM_Y + 19.0, &format!("{streak} {days} seguidos  ·  {today}"), Face::Regular, 11.5, MUTED, Anchor::LA, Some(W - PAD - sx));
-        self.heatmap(c, mode);
-        if mode == Mode::G {
-            c.hline_px(PAD, W - PAD, list_y() - 10.0, DIVIDER);
-            self.rows(c, mode);
         }
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
-        let _ = y;
         if self.on_message(x) {
             return Some(UPDATE);
         }
-        let shortcuts = env.shortcuts();
-        if let Some(i) = self.row_index(x, y, mode) {
-            return shortcuts.then_some(OPEN_ROW + i as u32);
-        }
-        if Self::on_header(x, y, mode) && shortcuts {
-            return Some(OPEN_PROFILE);
-        }
-        None
+        (Self::on_header(x, y, mode) && env.shortcuts()).then_some(OPEN_PROFILE)
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
             UPDATE => self.update(ctx),
             ASK_USER => ctx.out.push(Request::Ask("user")),
+            OPEN_REVIEW => {
+                if let Some(r) = self.unseen().first() {
+                    ctx.open(r.url.clone());
+                }
+                self.mark_seen(ctx);
+            }
+            OPEN_REVIEWS => {
+                ctx.open(REVIEWS_URL);
+                self.mark_seen(ctx);
+            }
+            DISMISS_REVIEWS => self.mark_seen(ctx),
             OPEN_PROFILE => {
                 let user = self.data.as_ref().map(|d| d.user.clone()).or_else(|| ctx.cfg["github"].str_of("usuario").map(String::from));
                 ctx.open(match user {
@@ -900,23 +634,13 @@ impl Kind for GitHub {
                     _ => "https://github.com".into(),
                 });
             }
-            a if a >= OPEN_ROW => {
-                let i = (a - OPEN_ROW) as usize + self.scroll;
-                if let Some(row) = self.data.as_ref().and_then(|d| d.rows.get(i)) {
-                    ctx.open(row.url.clone());
-                }
-            }
             _ => {}
         }
     }
 
     fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
-        if let Some(i) = self.row_index(x, y, mode) {
-            let top = Self::list_geom(mode).unwrap().0 + i as f32 * ROW_H;
-            return Some((PAD - 8.0, top - 4.0, W - PAD + 6.0, top + ROW_H - 6.0, 10.0));
-        }
         if Self::on_header(x, y, mode) {
-            return Some((PAD - 6.0, 10.0, W - PAD + 6.0, 30.0, 8.0));
+            return Some((PAD - 6.0, 6.0, W - PAD + 6.0, 28.0, 8.0));
         }
         if self.on_message(x) {
             let l = Layout::of(mode);
@@ -930,37 +654,10 @@ impl Kind for GitHub {
     }
 
     fn tooltip(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<String> {
-        if let Some((day, count)) = self.day_at(x, y, mode) {
-            let amount = match count {
-                0 => "Nenhuma contribuição".to_string(),
-                1 => "1 contribuição".to_string(),
-                n => format!("{n} contribuições"),
-            };
-            let (_, m, d) = util::civil_from_days(day);
-            let weekday = (day + 3).rem_euclid(7) as usize;
-            return Some(format!("{amount}\n{}, {d} de {}", WEEKDAYS[weekday], MONTHS[m as usize - 1]));
-        }
-        if let Some(i) = self.row_index(x, y, mode) {
-            let row = &self.visible_rows(mode)[i];
-            let probe = Canvas::new(1, 1, 1.0);
-            let title = probe.wrap(&row.title, Face::Semibold, 11.5, 320.0, 4).join("\n");
-            let local = row.when - util::tz_offset(); // horário local
-            let (_, m, d) = util::civil_from_days((local / 86400.0).floor() as i64);
-            let secs = local.rem_euclid(86400.0) as i64;
-            return Some(format!("{title}\n\n{d} de {} às {:02}:{:02}", MONTHS[m as usize - 1], secs / 3600, secs / 60 % 60));
-        }
-        None
-    }
-
-    fn uses_wheel(&self, _x: f32, y: f32, mode: Mode) -> bool {
-        // a lista de atividades do grande
-        Self::list_geom(mode).is_some_and(|(top, _)| y >= top - 4.0) && self.data.is_some()
-    }
-
-    fn wheel(&mut self, _x: f32, _y: f32, steps: f32, mode: Mode, _ctx: &mut Ctx) {
-        let (Some((_, visible)), Some(d)) = (Self::list_geom(mode), &self.data) else { return };
-        let top = d.rows.len().saturating_sub(visible) as i64;
-        self.scroll = (self.scroll as i64 - steps.round() as i64).clamp(0, top) as usize;
+        let (day, count) = self.day_at(x, y, mode)?;
+        let (_, m, d) = util::civil_from_days(day);
+        let weekday = (day + 3).rem_euclid(7) as usize;
+        Some(format!("{}\n{}, {d} de {}", amount(count), WEEKDAYS[weekday], MONTHS[m as usize - 1]))
     }
 
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
@@ -968,14 +665,10 @@ impl Kind for GitHub {
     }
 
     fn next_tick(&self) -> Option<Instant> {
-        let mut next = self.next_clock;
-        if let Some(t) = self.next_fetch {
-            next = next.min(t);
+        match (self.next_fetch, self.pending.is_some().then_some(self.poll_at)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
-        if self.pending.is_some() {
-            next = next.min(self.poll_at);
-        }
-        Some(next)
     }
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
@@ -1000,10 +693,6 @@ impl Kind for GitHub {
             self.update(ctx);
             changed = true;
         }
-        if now >= self.next_clock {
-            self.next_clock = now + CLOCK;
-            changed |= self.data.is_some();
-        }
         changed
     }
 
@@ -1011,37 +700,23 @@ impl Kind for GitHub {
         self.status.clone()
     }
 
-    /// O esqueleto da primeira busca: o número grande e as linhas de texto e, no médio e no
-    /// grande, o quadro de contribuições (e as atividades, no grande).
+    /// O esqueleto da primeira busca: o total em cima e os blocos de quadrados.
     fn skeleton(&self, mode: Mode) -> Vec<Hot> {
         if self.data.is_some() || !self.status.loading {
             return Vec::new();
         }
-        match mode {
-            Mode::P => vec![
-                (PAD, P_NUM_Y + 6.0, PAD + 70.0, P_NUM_Y + 28.0, 6.0),
-                (PAD, P_STREAK_Y + 3.0, PAD + 90.0, P_STREAK_Y + 11.0, 4.0),
-                (PAD, P_GRID_Y, SMALL - PAD, SMALL - PAD, 8.0),
-            ],
-            Mode::M | Mode::G => {
-                // o número grande, as duas linhas ao lado dele e o mapa de contribuições
-                let mut v = vec![
-                    (PAD, NUM_Y + 3.0, PAD + 52.0, NUM_Y + 27.0, 6.0),
-                    (PAD + 70.0, NUM_Y + 4.0, PAD + 200.0, NUM_Y + 12.0, 4.0),
-                    (PAD + 70.0, NUM_Y + 19.0, PAD + 170.0, NUM_Y + 27.0, 4.0),
-                    (GRID_X, GRID_Y, W - C_PAD, GRID_Y + heat_h(), 8.0),
-                ];
-                if mode == Mode::G {
-                    for i in 0..ROWS {
-                        let y = list_y() + i as f32 * ROW_H;
-                        v.push((PAD, y + 4.0, PAD + ICON_D, y + 4.0 + ICON_D, ICON_D / 2.0));
-                        v.push((PAD + ICON_D + 12.0, y + 7.0, W - PAD - 40.0, y + 17.0, 4.0));
-                        v.push((PAD + ICON_D + 12.0, y + 22.0, PAD + ICON_D + 110.0, y + 30.0, 4.0));
-                    }
-                }
-                v
+        let mut v = match mode {
+            Mode::P => vec![(PAD, TOP_BASE - 9.0, PAD + 100.0, TOP_BASE + 1.0, 4.0)],
+            _ => vec![(W - PAD - 100.0, TOP_BASE - 9.0, W - PAD, TOP_BASE + 1.0, 4.0)],
+        };
+        for (k, g) in grids(mode, today()).iter().enumerate() {
+            if mode == Mode::G {
+                let y = band_top(k as i64) + 2.0;
+                v.push((PAD, y, PAD + 96.0, y + 9.0, 4.0));
             }
+            v.push((g.x, g.y, g.x + g.weeks as f32 * g.step - GAP, g.y + grid_h(g.step), 8.0));
         }
+        v
     }
 
     fn retry(&mut self, ctx: &mut Ctx) {
@@ -1057,5 +732,191 @@ impl Kind for GitHub {
 
     fn start(&mut self, ctx: &mut Ctx) {
         self.update(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cada tamanho mostra mais semanas em quadrados maiores; os blocos ficam dentro do cartão,
+    /// e no grande as três faixas cobrem 54 semanas seguidas, sem buraco nem repetição.
+    #[test]
+    fn grids_fill_each_size() {
+        let today = util::days_from_civil(2026, 11, 17); // uma terça
+        let (p, m, g) = (grids(Mode::P, today), grids(Mode::M, today), grids(Mode::G, today));
+        assert!(p[0].cell() >= 12.5 && m[0].cell() >= 13.0 && m[0].cell() > p[0].cell() && g[0].cell() > m[0].cell(), "{} {} {}", p[0].cell(), m[0].cell(), g[0].cell());
+        for (mode, list) in [(Mode::P, &p), (Mode::M, &m), (Mode::G, &g)] {
+            let l = Layout::of(mode);
+            for b in list.iter() {
+                let (x1, y1) = (b.x + b.weeks as f32 * b.step - GAP, b.y + grid_h(b.step));
+                assert!(b.x >= PAD - 0.01 && x1 <= l.w - PAD + 0.01 && y1 <= l.h - PAD + 0.01, "{mode:?}: {b:?} passa do cartão");
+                assert!(b.y >= GRID_TOP - 0.01 || mode == Mode::P, "{mode:?}: encosta no rótulo");
+            }
+        }
+        // hoje é o último quadrado preenchido (terça: a terceira linha da última coluna)
+        for list in [&p, &m, &g] {
+            let last = list.last().unwrap();
+            assert_eq!(last.start + (last.weeks - 1) * 7 + 2, today);
+            assert_eq!((last.start + 3).rem_euclid(7), 6, "a coluna começa no domingo");
+        }
+        assert_eq!(g.len(), 3);
+        for w in g.windows(2) {
+            assert_eq!(w[1].start, w[0].start + BAND_WEEKS * 7);
+            assert!(w[1].y > w[0].y + grid_h(G_STEP) + BAND_HEAD, "faixas encostadas");
+        }
+        // ida e volta: o ponto no meio de cada quadrado dá o mesmo dia
+        for b in g.iter().chain(m.iter()) {
+            for day in [b.start, b.start + 10, b.start + b.weeks * 7 - 1] {
+                let (x, y) = b.spot(day).unwrap();
+                assert_eq!(b.day_at(x + b.cell() / 2.0, y + b.cell() / 2.0), Some(day));
+                assert_eq!(b.day_at(x + b.cell() + GAP / 2.0, y + b.cell() / 2.0), None, "no espaço entre os quadrados");
+            }
+        }
+    }
+
+    #[test]
+    fn levels_get_stronger() {
+        for w in LEVELS.windows(2) {
+            assert!(w[1].3 >= w[0].3, "{w:?}");
+        }
+        assert!(LEVELS[0].3 < 30, "o dia vazio chama atenção");
+        assert_eq!((LEVELS[1].0, LEVELS[1].1, LEVELS[1].2), (GREEN.0, GREEN.1, GREEN.2));
+    }
+
+    #[test]
+    fn words() {
+        assert_eq!(grouped(812), "812");
+        assert_eq!(grouped(1234), "1.234");
+        assert_eq!(grouped(1234567), "1.234.567");
+        assert_eq!(amount(0), "Nenhuma contribuição");
+        assert_eq!(amount(1), "1 contribuição");
+        assert_eq!(amount(1500), "1.500 contribuições");
+        let d = |y, m, d| util::days_from_civil(y, m, d);
+        assert_eq!(band_range(d(2026, 3, 1), d(2026, 7, 4)), "mar 2026 – jul");
+        assert_eq!(band_range(d(2025, 11, 9), d(2026, 3, 14)), "nov 2025 – mar 2026");
+    }
+
+    /// O cache de uma versão antiga (com a lista de atividades) ainda abre, e o novo não a guarda.
+    #[test]
+    fn old_cache_still_opens() {
+        let old = json!({"user": "voce", "total": 3, "days": [["2026-11-16", 2, 3]], "rows": [{"title": "x", "when": "2026-11-16T10:00:00+00:00"}]});
+        let data = Data::from_json(&old).expect("cache antigo");
+        assert_eq!((data.total, data.days.len()), (3, 1));
+        assert!(data.to_json().get("rows").is_none());
+    }
+
+    /// A dica de um quadrado diz o dia e quantas contribuições; fora dos quadrados, nada.
+    #[test]
+    fn tooltip_names_the_day() {
+        let g = GitHub::sample(&json!({}), &json!({}));
+        let today = today();
+        let grid = grids(Mode::M, today)[0];
+        let (x, y) = grid.spot(today).unwrap();
+        let tip = g.tooltip(x + 2.0, y + 2.0, Mode::M, &Env { cfg: &json!({}), key: "github" }).unwrap();
+        assert!(tip.starts_with("Nenhuma contribuição\n"), "{tip}");
+        assert_eq!(g.tooltip(W - 2.0, 4.0, Mode::M, &Env { cfg: &json!({}), key: "github" }), None);
+    }
+}
+
+// ---------- na ilha ----------
+
+/// Os botões da ilha: (ação, retângulo a partir do canto da pílula).
+fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, (f32, f32, f32, f32))> {
+    match form {
+        IslandForm::Medium => vec![(OPEN_REVIEW, (w - 86.0, h / 2.0 - 16.0, w - 18.0, h / 2.0 + 16.0))],
+        IslandForm::Large => vec![(OPEN_REVIEWS, (22.0, h - 46.0, 150.0, h - 14.0)), (DISMISS_REVIEWS, (w - 110.0, h - 44.0, w - 18.0, h - 16.0))],
+        _ => Vec::new(),
+    }
+}
+
+/// "1 revisão", "2 revisões".
+fn reviews_text(n: usize) -> String {
+    if n == 1 { "1 revisão".into() } else { format!("{n} revisões") }
+}
+
+impl GitHub {
+    /// Os pedidos que a ilha ainda não mostrou a ninguém (o mais novo primeiro).
+    fn unseen(&self) -> Vec<&Review> {
+        let mut list: Vec<&Review> = self.reviews.iter().filter(|r| !self.island_seen.contains(&r.id)).collect();
+        list.sort_by_key(|r| std::cmp::Reverse(r.id));
+        list
+    }
+
+    fn mark_seen(&mut self, ctx: &mut Ctx) {
+        self.island_seen.extend(self.reviews.iter().map(|r| r.id));
+        self.island_seen.sort();
+        self.island_seen.dedup();
+        ctx.cache["reviews_ilha"] = json!(self.island_seen);
+        ctx.out.push(Request::SaveCache);
+    }
+
+    /// Quadradinhos dos dias de `start` a hoje, em colunas de semanas (o mesmo mapa do cartão).
+    fn island_map(&self, c: &mut Canvas, x: f32, y: f32, weeks: i64, cell: f32, gap: f32) {
+        let today = today();
+        let days = self.by_day();
+        let start = grid_start(today, weeks);
+        for day in start..=today {
+            let (col, row) = ((day - start) / 7, (day - start) % 7);
+            let (cx, cy) = (x + col as f32 * (cell + gap), y + row as f32 * (cell + gap));
+            let level = days.get(&day).map_or(0, |v| v.0).clamp(0, 4) as usize;
+            c.fill_round_rect(cx, cy, cx + cell, cy + cell, cell * 0.3, LEVELS[level]);
+        }
+    }
+
+    fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
+        let (x, y, w, h) = r;
+        let cy = y + h / 2.0;
+        let unseen = self.unseen();
+        let n = unseen.len().max(1);
+        let newest = unseen.first().map(|r| format!("{} · {}", r.repo, r.title)).unwrap_or_default();
+        match form {
+            IslandForm::Bubble => iu::badge_icon(c, x + w / 2.0, cy, 15.0, "github", GITHUB_GREEN),
+            IslandForm::Compact | IslandForm::Banner => {
+                // a última semana, um dia em cada quadradinho (hoje contornado)
+                let today = today();
+                let days = self.by_day();
+                for k in 0..7 {
+                    let day = today - 6 + k;
+                    let bx = x + 16.0 + k as f32 * 12.0;
+                    let level = days.get(&day).map_or(0, |v| v.0).clamp(0, 4) as usize;
+                    c.fill_round_rect(bx, cy - 4.5, bx + 9.0, cy + 4.5, 2.7, LEVELS[level]);
+                    if k == 6 {
+                        c.stroke_round_rect(bx + 0.5, cy - 4.0, bx + 8.5, cy + 4.0, 2.4, WHITE.alpha(0.85), 1.0);
+                    }
+                }
+                let label = if form == IslandForm::Banner { format!("Revisão pedida · {}", unseen.first().map_or("", |r| r.repo.as_str())) } else { reviews_text(n) };
+                c.text(x + 108.0, cy, &label, Face::Regular, 12.0, FG, Anchor::LM, Some(w - 140.0));
+                c.fill_circle(x + w - 20.0, cy, 4.0, ACCENT_HOVER);
+            }
+            IslandForm::Medium => {
+                iu::badge_icon(c, x + 39.0, cy, 22.0, "github", GITHUB_GREEN);
+                let sub = if n > 1 { format!("Revisão pedida · mais {}", n - 1) } else { "Revisão pedida".into() };
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 98.0, &newest, &sub, GITHUB_GREEN.mix(WHITE, 0.2));
+                for (a, b) in island_buttons(form, w, h) {
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "Abrir", true, hot == Some(a));
+                }
+            }
+            IslandForm::Large => {
+                let total = self.data.as_ref().map_or(0, |d| d.total);
+                iu::header(c, r, "GITHUB", GITHUB_GREEN, &format!("{} no último ano", grouped(total)), SOFT);
+                self.island_map(c, x + 22.0, y + 42.0, 18, 8.5, 2.5);
+                c.text(x + w - 22.0, y + 64.0, &n.to_string(), Face::Semibold, 30.0, FG, Anchor::RM, None);
+                c.text(x + w - 22.0, y + 90.0, if n == 1 { "revisão pedida" } else { "revisões pedidas" }, Face::Regular, 11.5, SOFT, Anchor::RM, None);
+                for (k, rv) in unseen.iter().take(2).enumerate() {
+                    let ry = y + 136.0 + k as f32 * 20.0;
+                    c.fill_circle(x + 26.0, ry, 3.0, if k == 0 { ACCENT_HOVER } else { Rgba(255, 255, 255, 70) });
+                    c.text(x + 36.0, ry, &format!("{} · {}", rv.repo, rv.title), Face::Regular, 12.0, if k == 0 { FG } else { SOFT }, Anchor::LM, Some(w - 58.0));
+                }
+                for (a, b) in island_buttons(form, w, h) {
+                    let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
+                    if a == OPEN_REVIEWS {
+                        iu::pill_button(c, rect, "Abrir os pedidos", true, hot == Some(a));
+                    } else {
+                        iu::link(c, x + b.2, (rect.1 + rect.3) / 2.0, "Mais tarde", true, hot == Some(a));
+                    }
+                }
+            }
+        }
     }
 }

@@ -31,7 +31,7 @@ pub const TIPS: [(&str, &str); 5] = [
     ("Mover", "Arraste de qualquer lugar. Os widgets se encaixam uns nos outros e nas bordas da tela; segure Alt para soltar livre."),
     ("Reordenar", "Arraste um widget para dentro de uma coluna: os outros abrem espaço."),
     ("Tamanho", "Botão no canto (aparece com o mouse) ou dois cliques: pequeno, médio e grande."),
-    ("Roda do mouse", "Volume no Tocando agora; rola as atividades do GitHub; ±1 minuto no Pomodoro."),
+    ("Roda do mouse", "Volume no Tocando agora; ±1 minuto no Pomodoro."),
     ("Menu", "Clique direito num widget ou no ícone da bandeja: layouts, modo foco, edição e mais."),
 ];
 
@@ -48,6 +48,8 @@ pub struct SettingsState {
     pub scrolls: HashMap<&'static str, f32>,
     pub content_h: f32,
     pub thumbs: HashMap<&'static str, (bool, Option<Image>)>,
+    /// a prévia do alto da página do widget: (widget, visível, imagem)
+    hero: Option<(&'static str, bool, Option<Image>)>,
     preview: Option<((i32, i32, u32, u32, i64, i64, u64), Image)>,
     pub city: Suggest,
 }
@@ -62,6 +64,7 @@ impl SettingsState {
             self.page = page;
             self.city.clear();
             self.preview = None;
+            self.hero = None;
             if page == "widgets" {
                 self.thumbs.clear();
             }
@@ -113,6 +116,43 @@ fn nav_items() -> Vec<(&'static str, String, &'static str)> {
         ("sobre", "Sobre".into(), "sobre"),
     ]);
     items
+}
+
+/// A cor do quadradinho de cada página (a barra lateral e o título), como nos Ajustes do Mac.
+fn page_color(page: &str) -> Rgba {
+    match page {
+        "geral" => Rgba::rgb(142, 142, 152),
+        "aparencia" => Rgba::rgb(175, 92, 230),
+        "widgets" => Rgba::rgb(10, 122, 245),
+        "tempo" => Rgba::rgb(48, 166, 230),
+        "sistema" => Rgba::rgb(230, 82, 118),
+        "midia" => Rgba::rgb(240, 96, 70),
+        "github" => Rgba::rgb(46, 160, 67),
+        "pomodoro" => Rgba::rgb(235, 88, 76),
+        "claude" => Rgba::rgb(214, 120, 84),
+        "bateria" => Rgba::rgb(52, 180, 90),
+        "avisos" => Rgba::rgb(232, 64, 58),
+        "dicas" => Rgba::rgb(222, 160, 20),
+        _ => Rgba::rgb(110, 116, 130),
+    }
+}
+
+/// O ícone de cada página.
+fn page_icon(page: &str) -> &'static str {
+    nav_items().into_iter().find(|(p, _, _)| *p == page).map_or("sobre", |(_, _, icon)| icon)
+}
+
+/// Os widgets que aparecem na ilha flutuante (além do Tocando agora, que vira a ilha).
+pub const ISLAND_KEYS: [&str; 5] = ["pomodoro", "sistema", "github", "bateria", "tempo"];
+
+/// O interruptor "Mostrar na ilha" de cada widget.
+pub fn island_id(key: &str) -> &'static str {
+    match key {
+        "pomodoro" => "na_ilha:pomodoro",
+        "sistema" => "na_ilha:sistema",
+        "github" => "na_ilha:github",
+        _ => "na_ilha:bateria",
+    }
 }
 
 fn page_title(page: &str) -> (String, Option<String>) {
@@ -195,7 +235,7 @@ impl Control {
 pub struct Row(pub String, pub Option<String>, pub Control);
 
 fn section(ui: &mut Ui, x: f32, y: f32, title: &str) -> f32 {
-    ui.text(x + 2.0, y, title, 13.0, FG, Face::Semibold, Anchor::LA, None);
+    ui.text(x + 4.0, y + 2.0, title, 12.5, Rgba(255, 255, 255, 178), Face::Semibold, Anchor::LA, None);
     #[cfg(test)]
     tests::placed(x, y, y + 20.0);
     y + 28.0
@@ -263,46 +303,60 @@ pub fn draw(st: &mut SettingsState, ui: &mut Ui, v: &View) {
     ui.image(&icon, 22.0, 22.0);
     ui.text(62.0, 22.0, "Widgets", 15.0, FG, Face::Semibold, Anchor::LA, None);
     ui.text(62.0, 41.0, "Configurações", 11.0, MUTED, Face::Regular, Anchor::LA, None);
+    // primeiro onde fica cada item, para o fundo do escolhido deslizar por baixo deles
     let mut y = 82.0;
-    let mut selected = None;
+    let mut spots = Vec::new();
     for (page, label, icon_name) in nav_items() {
+        spots.push((y, page, label.clone(), icon_name));
+        y += match (page, label.is_empty()) {
+            ("-", true) => 17.0,
+            ("-", false) => 30.0,
+            _ => 38.0,
+        };
+    }
+    if let Some(&(sy, ..)) = spots.iter().find(|s| s.1 == st.page) {
+        let iy = ui.anim("nav-indicator", sy, 220);
+        ui.fill(12.0, iy, SIDEBAR - 12.0, iy + 36.0, 8.0, ACCENT.with_a(56));
+        ui.rect(12.0, iy, SIDEBAR - 12.0, iy + 36.0, 8.0, None, Some(ACCENT.with_a(70)), 1.0);
+    }
+    for (y, page, label, icon_name) in spots {
         if page == "-" {
             if label.is_empty() {
                 ui.fill(20.0, y + 8.0, SIDEBAR - 20.0, y + 9.0, 0.0, WHITE.with_a(16));
-                y += 17.0;
             } else {
                 ui.text(26.0, y + 12.0, &label, 9.5, FAINT, Face::Semibold, Anchor::LA, None);
-                y += 30.0;
             }
             continue;
         }
         let id = format!("nav:{page}");
         let active = page == st.page;
-        if active {
-            selected = Some(y);
-            ui.fill(12.0, y, SIDEBAR - 12.0, y + 36.0, 7.0, WHITE.with_a(22));
-        } else if ui.hot(&id) {
-            ui.fill(12.0, y, SIDEBAR - 12.0, y + 36.0, 7.0, WHITE.with_a(11));
+        if !active && ui.hot(&id) {
+            ui.fill(12.0, y, SIDEBAR - 12.0, y + 36.0, 8.0, WHITE.with_a(11));
         }
         let hidden = widgets::KEYS.contains(&page) && !v.visible.contains(&page);
+        ui.tile(22.0, y + 6.0, 24.0, page_color(page), icon_name, hidden);
         let color = if hidden { FAINT } else { FG };
-        ui.icon(36.0, y + 18.0, icon_name, 15.0, color);
         ui.text(58.0, y + 18.0, &label, 12.5, color, if active { Face::Semibold } else { Face::Regular }, Anchor::LM, Some(SIDEBAR - 80.0));
         if hidden {
             ui.text(SIDEBAR - 24.0, y + 18.0, "oculto", 10.0, FAINT, Face::Regular, Anchor::RM, None);
         }
         ui.region(&id, 12.0, y, SIDEBAR - 12.0, y + 36.0, A::Go(page), Cursor::Hand);
-        y += 38.0;
-    }
-    if let Some(sy) = selected {
-        // indicador azul que desliza até a página escolhida
-        let iy = ui.anim("nav-indicator", sy, 220);
-        ui.fill(12.0, iy + 10.0, 15.0, iy + 26.0, 1.5, ACCENT);
     }
     let (title, subtitle) = page_title(st.page);
-    ui.text(SIDEBAR + 32.0, 24.0, &title, 22.0, FG, Face::Semibold, Anchor::LA, None);
-    if let Some(sub) = subtitle {
-        ui.text(SIDEBAR + 32.0, 54.0, &sub, 11.5, MUTED, Face::Regular, Anchor::LA, Some(W - SIDEBAR - 64.0));
+    // no Sobre, o ícone do app já está logo abaixo
+    let with_tile = st.page != "sobre";
+    if with_tile {
+        ui.tile(SIDEBAR + 32.0, 20.0, 40.0, page_color(st.page), page_icon(st.page), false);
+    }
+    let tx = if with_tile { SIDEBAR + 86.0 } else { SIDEBAR + 32.0 };
+    match subtitle {
+        Some(sub) => {
+            ui.text(tx, 18.0, &title, 21.0, FG, Face::Semibold, Anchor::LA, None);
+            ui.text(tx, 46.0, &sub, 11.5, MUTED, Face::Regular, Anchor::LA, Some(W - tx - 32.0));
+        }
+        None => {
+            ui.text(tx, 40.0, &title, 21.0, FG, Face::Semibold, Anchor::LM, None);
+        }
     }
 
     // conteúdo rolável
@@ -354,6 +408,11 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
         Row("Dicas ao passar o mouse".into(), Some("Explicações curtas sobre o que está sob o mouse".into()), setting_switch(v, "dicas")),
         Row("Acompanhar a economia de energia".into(), Some("Pausa as animações contínuas quando a economia de energia do Windows está ligada".into()), setting_switch(v, "economia_bateria")),
         Row("Desenhar pela placa de vídeo".into(), Some("Animações mais lisas, com menos CPU (experimental; vale ao abrir o app de novo)".into()), setting_switch(v, "placa_de_video")),
+    ]);
+    let y = section(ui, x, y, "Ilha flutuante");
+    let y = rows(ui, x, y, w, vec![
+        Row("Widgets na ilha".into(), Some("O Pomodoro correndo, a CPU alta, pedidos de revisão, a bateria (fraca ou na tomada) e a chuva chegando aparecem na ilha, ao lado da música".into()), setting_switch(v, "ilha_widgets")),
+        Row("Onde fica".into(), Some("Na barra de tarefas, à esquerda do Iniciar. Arraste para qualquer lugar; clique direito nela para voltar".into()), Control::None),
     ]);
     let y = section(ui, x, y, "Organizar");
     let y = rows(ui, x, y, w, vec![
@@ -520,22 +579,8 @@ fn thumbnail(key: &'static str, ui: &Ui, x: f32, y: f32, w: f32, h: f32, v: &Vie
 
 fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, key: &'static str) -> f32 {
     let wcfg = &v.sh.cfg[key];
-    let mut y = 4.0;
     let visible = v.visible.contains(&key);
-    if !visible {
-        ui.rect(x, y, x + w, y + 56.0, 10.0, Some(Rgba(255, 184, 0, 22)), Some(Rgba(255, 184, 0, 90)), 1.0);
-        ui.text(x + 18.0, y + 28.0, "Este widget está oculto.", 12.5, FG, Face::Semibold, Anchor::LM, None);
-        ui.button("mostrar", x + w - 14.0, y + 12.0, "Mostrar na tela", A::Visible(key, true), "primary", 'r', None, None);
-        y += 56.0 + 22.0;
-    }
-    let current = v.modes.get(key).copied().or_else(|| wcfg.str_of("tamanho").and_then(Mode::from_code)).unwrap_or(widgets::DEFAULT_MODE);
-    let sizes: Vec<(String, String)> = Mode::ALL.iter().map(|m| (m.code().to_string(), m.name().to_string())).collect();
-    let y = section(ui, x, y, "Visual");
-    let y = rows(ui, x, y, w, vec![Row(
-        "Tamanho".into(),
-        Some("Também dá para mudar com o botão no canto ou com dois cliques".into()),
-        Control::Seg(size_id(key), sizes, current.code().into()),
-    )]);
+    let y = hero(st, ui, x, 4.0, w, v, key, visible);
     let notify = |kind: &'static str| sw(notify_id(kind), config::notify_enabled(&v.sh.cfg, kind), A::Notify(kind));
     match key {
         "sistema" => {
@@ -585,7 +630,7 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
             rows(ui, x, y, w, vec![
                 Row("Usuário".into(), Some("Com o GitHub CLI (gh) conectado, entram também os repositórios privados".into()),
                     Control::Entry("usuario", wcfg.str_of("usuario").unwrap_or("").into(), "seu-usuario".into(), 270.0)),
-                Row("Atualizar agora".into(), Some("As atividades atualizam sozinhas a cada 10 minutos".into()),
+                Row("Atualizar agora".into(), Some("As contribuições atualizam sozinhas a cada 10 minutos".into()),
                     if visible { Control::Button("atualizar_github", "Atualizar".into(), A::Widget("github", widgets::github::UPDATE), "secondary", Some("refresh")) } else { Control::None }),
                 Row("Avisar pedidos de revisão".into(), Some(NOTIFY[4].2.into()), notify("github")),
             ])
@@ -657,6 +702,69 @@ fn page_widget(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View, ke
     }
 }
 
+/// O alto da página de um widget: a prévia em vidro, o nome e se ele está na área de trabalho
+/// (e na ilha). Devolve o y logo abaixo.
+#[allow(clippy::too_many_arguments)]
+fn hero(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, key: &'static str, visible: bool) -> f32 {
+    let h = 168.0;
+    ui.card(x, y, x + w, y + h);
+    #[cfg(test)]
+    tests::placed(x, y, y + h);
+    // o palco da prévia, com um brilho na cor do widget
+    let (sx, sy, sw_, sh_) = (x + 10.0, y + 10.0, 236.0, h - 20.0);
+    let tint = page_color(key);
+    let (gx, gy) = (sx + ui.ox, sy + ui.oy);
+    ui.fill(sx, sy, sx + sw_, sy + sh_, 9.0, Rgba(0, 0, 0, 40));
+    ui.c.push_round_clip(gx, gy, gx + sw_, gy + sh_, 9.0);
+    ui.c.fill_radial(gx + sw_ / 2.0, gy + sh_ * 0.62, sw_ * 0.7, sh_ * 0.8, &[(0.0, tint.alpha(0.30)), (1.0, tint.alpha(0.0))]);
+    ui.c.pop_clip();
+    ui.rect(sx, sy, sx + sw_, sy + sh_, 9.0, None, Some(WHITE.with_a(14)), 1.0);
+    let cached = st.hero.as_ref().filter(|(k, vis, _)| *k == key && *vis == visible).map(|t| t.2.clone());
+    let thumb = match cached {
+        Some(t) => t,
+        None => {
+            let t = thumbnail(key, ui, sx, sy, sw_, sh_, v);
+            st.hero = Some((key, visible, t.clone()));
+            t
+        }
+    };
+    let s = ui.s();
+    if let Some(t) = thumb {
+        ui.image(&t, sx + (sw_ - t.w as f32 / s) / 2.0, sy + (sh_ - t.h as f32 / s) / 2.0);
+    }
+    // o tamanho e os interruptores
+    let rx = sx + sw_ + 22.0;
+    let rw = x + w - 18.0 - rx;
+    let current = v.modes.get(key).copied().or_else(|| v.sh.cfg[key].str_of("tamanho").and_then(Mode::from_code)).unwrap_or(widgets::DEFAULT_MODE);
+    let sizes: Vec<(String, String)> = Mode::ALL.iter().map(|m| (m.code().to_string(), m.name().to_string())).collect();
+    ui.text(rx, y + 24.0, "Tamanho", 11.5, MUTED, Face::Regular, Anchor::LM, None);
+    ui.segmented(size_id(key), rx, y + 36.0, &sizes, current.code(), false);
+    let mut toggles: Vec<(&'static str, String, bool, A)> = vec![("ver:hero", "Na área de trabalho".into(), visible, A::Visible(key, !visible))];
+    if ISLAND_KEYS.contains(&key) {
+        let on = widgets::on_island(&v.sh.cfg, key);
+        let label = if config::setting_bool(&v.sh.cfg, "ilha_widgets") { "Na ilha flutuante" } else { "Na ilha (desligada em Geral)" };
+        toggles.push((island_id(key), label.into(), on, A::Toggle(island_id(key))));
+    } else if key == "midia" {
+        toggles.push(("", "Clique no widget para virar a ilha".into(), false, A::Go("geral")));
+    }
+    let n = toggles.len() as f32;
+    let mut ty = y + h - 18.0 - 30.0 * n;
+    for (id, label, on, action) in toggles {
+        let row = (rx - 8.0, ty - 2.0, x + w - 10.0, ty + 28.0);
+        if id.is_empty() {
+            ui.text(rx, ty + 13.0, &label, 11.5, FAINT, Face::Regular, Anchor::LM, Some(rw));
+        } else {
+            if ui.hot(id) {
+                ui.fill(row.0, row.1, row.2, row.3, 8.0, WHITE.with_a(8));
+            }
+            ui.text(rx, ty + 13.0, &label, 12.5, FG, Face::Regular, Anchor::LM, Some(rw - 60.0));
+            ui.switch(id, x + w - 18.0 - 40.0, ty + 2.0, on, action, Some(row));
+        }
+        ty += 30.0;
+    }
+    y + h + 26.0
+}
+
 pub fn size_id(key: &str) -> &'static str {
     match key {
         "tempo" => "tamanho:tempo",
@@ -720,6 +828,16 @@ fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O texto das notificações fala dos mesmos limites que a notificação e a ilha usam.
+    #[test]
+    fn notify_texts_show_the_real_limits() {
+        let text = |kind: &str| NOTIFY.iter().find(|(k, _, _)| *k == kind).unwrap().2;
+        let high = format!("{} por {}", crate::config::high_use_pct(), crate::config::high_use_time());
+        assert!(text("cpu").contains(&high), "{}", text("cpu"));
+        assert!(text("ram").contains(&high), "{}", text("ram"));
+        assert!(text("bateria").contains(&format!("{}%", crate::config::LOW_BATTERY)), "{}", text("bateria"));
+    }
 
     #[test]
     fn slider_rows_leave_room_for_the_text() {
@@ -876,7 +994,10 @@ mod tests {
     #[ignore]
     fn settings_pages() {
         com();
-        for (name, end) in [("aparencia", false), ("widgets", false), ("widgets", true)] {
+        let pages = ["geral", "aparencia", "widgets", "pomodoro", "midia", "avisos", "dicas", "sobre"];
+        let mut list: Vec<(&'static str, bool)> = pages.iter().map(|p| (*p, false)).collect();
+        list.push(("widgets", true));
+        for (name, end) in list {
             let (_, _, max_scroll) = page(name, 0.0, 1.25);
             let (img, _, _) = page(name, if end { max_scroll } else { 0.0 }, 1.25);
             let path = std::env::temp_dir().join(format!("config_{name}{}.png", if end { "_fim" } else { "" }));

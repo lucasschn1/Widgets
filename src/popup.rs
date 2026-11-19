@@ -15,10 +15,20 @@ use crate::win::{self, Z};
 // ---------- menu ----------
 
 const ITEM_H: f32 = 30.0;
+/// o título (o widget que abriu o menu)
+const TITLE_H: f32 = 42.0;
+/// a ação em destaque, um botão azul
+const PRIMARY_H: f32 = 40.0;
 const SEP_H: f32 = 9.0;
 const PAD: f32 = 6.0;
-const MIN_W: f32 = 210.0;
-const MENU_BG: Rgba = Rgba(36, 36, 42, 244);
+const MIN_W: f32 = 224.0;
+/// coluna dos ícones (e das marcas), à esquerda do texto
+const ICON_COL: f32 = 32.0;
+const RADIUS: f32 = 14.0;
+/// margem transparente em volta do menu, para a sombra
+const MARGIN: f32 = 14.0;
+const MENU_BG: Rgba = Rgba(30, 30, 36, 246);
+const ICON_COLOR: Rgba = Rgba(255, 255, 255, 200);
 const WATCH: Duration = Duration::from_millis(40);
 
 struct Level {
@@ -26,9 +36,12 @@ struct Level {
     items: Vec<MenuItem>,
     /// retângulo de cada item, em pixels da janela
     rects: Vec<(f32, f32, f32, f32)>,
+    /// canto da janela na tela e tamanho dela (com a margem da sombra)
     pos: (i32, i32),
     size: (i32, i32),
     hot: Option<usize>,
+    /// a sombra, feita uma vez ao abrir
+    shadow: Image,
 }
 
 pub struct GlassMenu {
@@ -40,11 +53,150 @@ pub struct GlassMenu {
     pub context: Option<&'static str>,
 }
 
-fn label(item: &MenuItem) -> Option<&str> {
+/// O item sem o ícone (o que ele é de verdade).
+fn base(item: &MenuItem) -> &MenuItem {
     match item {
-        MenuItem::Cmd(l, _) | MenuItem::Hint(l, _, _) | MenuItem::Check(l, _, _) | MenuItem::Radio(l, _, _) | MenuItem::Sub(l, _) => Some(l),
-        MenuItem::Sep => None,
+        MenuItem::Icon(_, inner) => base(inner),
+        other => other,
     }
+}
+
+fn icon_of(item: &MenuItem) -> Option<&'static str> {
+    match item {
+        MenuItem::Icon(name, _) => Some(name),
+        MenuItem::Primary(_, _, name) | MenuItem::Title(_, name) => Some(name),
+        _ => None,
+    }
+}
+
+fn label(item: &MenuItem) -> Option<&str> {
+    match base(item) {
+        MenuItem::Cmd(l, _) | MenuItem::Hint(l, _, _) | MenuItem::Check(l, _, _) | MenuItem::Radio(l, _, _) | MenuItem::Sub(l, _) => Some(l),
+        MenuItem::Title(l, _) | MenuItem::Primary(l, _, _) => Some(l),
+        MenuItem::Sep | MenuItem::Icon(..) => None,
+    }
+}
+
+/// Itens que o mouse e o teclado escolhem (não as linhas nem o título).
+fn selectable(item: &MenuItem) -> bool {
+    !matches!(base(item), MenuItem::Sep | MenuItem::Title(..))
+}
+
+fn height(item: &MenuItem) -> f32 {
+    match base(item) {
+        MenuItem::Sep => SEP_H,
+        MenuItem::Title(..) => TITLE_H,
+        MenuItem::Primary(..) => PRIMARY_H,
+        _ => ITEM_H,
+    }
+}
+
+/// Largura (lógica) que o texto do item pede, sem as colunas.
+fn text_width(probe: &Canvas, item: &MenuItem) -> f32 {
+    let Some(l) = label(item) else { return 0.0 };
+    match base(item) {
+        MenuItem::Title(..) => probe.text_width(l, Face::Semibold, 13.0) + 10.0,
+        MenuItem::Primary(..) => probe.text_width(l, Face::Semibold, 12.5),
+        MenuItem::Hint(_, _, hint) => probe.text_width(l, Face::Regular, 12.0) + probe.text_width(hint, Face::Regular, 11.0) + 24.0,
+        _ => probe.text_width(l, Face::Regular, 12.0),
+    }
+}
+
+/// Medidas de um menu (lógicas, sem a margem da sombra): largura, altura e o retângulo de cada
+/// item a partir do canto do menu.
+fn measure(items: &[MenuItem]) -> (f32, f32, Vec<(f32, f32, f32, f32)>) {
+    let probe = Canvas::new(1, 1, 1.0);
+    let widest = items.iter().map(|e| text_width(&probe, e)).fold(0.0f32, f32::max);
+    let w = MIN_W.max(PAD + ICON_COL + widest + 30.0 + PAD).ceil();
+    let mut rects = Vec::new();
+    let mut top = PAD;
+    for (n, e) in items.iter().enumerate() {
+        let h = height(e);
+        rects.push((PAD, top, w - PAD, top + h));
+        top += h;
+        // o título e o botão em destaque ganham um respiro embaixo
+        if matches!(base(e), MenuItem::Title(..) | MenuItem::Primary(..)) && items.get(n + 1).is_some_and(|e| !matches!(e, MenuItem::Sep)) {
+            top += 4.0;
+        }
+    }
+    (w, (top + PAD).ceil(), rects)
+}
+
+/// Desenha um menu (sem a sombra) em `c`, com o canto em (ox, oy), em pixels lógicos.
+fn paint(c: &mut Canvas, items: &[MenuItem], rects: &[(f32, f32, f32, f32)], w: f32, h: f32, ox: f32, oy: f32, hot: Option<usize>, s: f32) {
+    c.fill_round_rect(ox, oy, ox + w, oy + h, RADIUS, MENU_BG);
+    c.stroke_round_rect(ox, oy, ox + w, oy + h, RADIUS, WHITE.with_a(30), 1.0 / s);
+    for (n, (item, &(x0, y0, x1, y1))) in items.iter().zip(rects).enumerate() {
+        let (x0, y0, x1, y1) = (ox + x0, oy + y0, ox + x1, oy + y1);
+        let ym = (y0 + y1) / 2.0;
+        let cx = x0 + ICON_COL / 2.0;
+        let is_hot = hot == Some(n);
+        let text = label(item).unwrap_or("");
+        match base(item) {
+            MenuItem::Sep => {
+                c.hline_px(x0 + 10.0, x1 - 10.0, ym, Rgba(255, 255, 255, 26));
+                continue;
+            }
+            MenuItem::Title(..) => {
+                // o ícone do widget num quadradinho e o nome
+                let t = 26.0;
+                c.fill_round_rect(x0 + 4.0, ym - t / 2.0, x0 + 4.0 + t, ym + t / 2.0, 8.0, WHITE.with_a(28));
+                c.text(x0 + 4.0 + t / 2.0, ym, icon(icon_of(item).unwrap_or("")), Face::Icons, 13.0, FG, Anchor::MM, None);
+                c.text(x0 + t + 14.0, ym, text, Face::Semibold, 13.0, FG, Anchor::LM, Some(x1 - x0 - t - 18.0));
+                continue;
+            }
+            MenuItem::Primary(..) => {
+                let fill = if is_hot { ACCENT_HOVER } else { ACCENT };
+                c.fill_round_rect(x0 + 1.0, y0 + 3.0, x1 - 1.0, y1 - 3.0, 10.0, fill);
+                c.text(cx + 1.0, ym, icon(icon_of(item).unwrap_or("")), Face::Icons, 14.0, WHITE, Anchor::MM, None);
+                c.text(x0 + ICON_COL, ym, text, Face::Semibold, 12.5, WHITE, Anchor::LM, None);
+                continue;
+            }
+            _ => {}
+        }
+        if is_hot {
+            c.fill_round_rect(x0, y0, x1, y1, 8.0, WHITE.with_a(26));
+        }
+        let ic = icon_of(item);
+        if let Some(name) = ic {
+            c.text(cx, ym, icon(name), Face::Icons, 13.0, if is_hot { FG } else { ICON_COLOR }, Anchor::MM, None);
+        }
+        c.text(x0 + ICON_COL, ym, text, Face::Regular, 12.0, FG, Anchor::LM, None);
+        let right = x1 - 15.0;
+        // a marca vai à esquerda; se ali já há um ícone, à direita
+        let mark_x = if ic.is_some() { right } else { cx };
+        match base(item) {
+            MenuItem::Check(_, true, _) => c.line(&[(mark_x - 5.0, ym), (mark_x - 1.5, ym + 3.5), (mark_x + 5.0, ym - 4.0)], ACCENT_HOVER, 1.7),
+            MenuItem::Radio(_, true, _) => c.fill_circle(mark_x, ym, 3.4, ACCENT_HOVER),
+            MenuItem::Sub(..) => {
+                c.line(&[(right - 2.0, ym - 4.5), (right + 2.5, ym), (right - 2.0, ym + 4.5)], Rgba(255, 255, 255, 150), 1.5);
+            }
+            MenuItem::Hint(_, _, hint) => {
+                c.text(x1 - 10.0, ym, hint, Face::Regular, 11.0, MUTED, Anchor::RM, None);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Um menu inteiro, com a sombra, numa imagem (para conferir o desenho num teste).
+#[cfg(test)]
+pub fn menu_image(items: &[MenuItem], hot: Option<usize>, s: f32) -> Image {
+    let (w, h, rects) = measure(items);
+    let (pw, ph) = (((w + 2.0 * MARGIN) * s).round() as u32, ((h + 2.0 * MARGIN) * s).round() as u32);
+    let mut c = Canvas::new(pw, ph, s);
+    c.image(&shadow(w, h, s, pw, ph), 0.0, 0.0);
+    paint(&mut c, items, &rects, w, h, MARGIN, MARGIN, hot, s);
+    c.finish()
+}
+
+/// A sombra suave embaixo do menu, numa imagem do tamanho da janela.
+fn shadow(w: f32, h: f32, s: f32, pw: u32, ph: u32) -> Image {
+    let mut sh = Canvas::new(pw, ph, s);
+    sh.fill_round_rect(MARGIN + 2.0, MARGIN + 5.0, MARGIN + w - 2.0, MARGIN + h + 3.0, RADIUS, Rgba(0, 0, 0, 120));
+    let mut img = sh.finish();
+    blur(&mut img.px, pw, ph, 4, 7.0 * s);
+    img
 }
 
 impl GlassMenu {
@@ -81,38 +233,19 @@ impl GlassMenu {
 
     fn open_level(&mut self, items: Vec<MenuItem>, x: i32, y: i32, parent: Option<(i32, i32, i32, i32)>) {
         let s = self.s;
-        let probe = Canvas::new(1, 1, s);
-        let (pad, ih, sh) = (PAD * s, ITEM_H * s, SEP_H * s);
-        let (left_col, right_col) = (30.0 * s, 30.0 * s);
-        let widest = items
-            .iter()
-            .filter_map(|e| {
-                let l = label(e)?;
-                let mut w = probe.text_width(l, Face::Regular, 12.0) * s;
-                if let MenuItem::Hint(_, _, hint) = e {
-                    w += probe.text_width(hint, Face::Regular, 11.0) * s + 24.0 * s;
-                }
-                Some(w)
-            })
-            .fold(0.0f32, f32::max);
-        let w = (MIN_W * s).max(left_col + widest + right_col).round();
-        let mut rects = Vec::new();
-        let mut top = pad;
-        for e in &items {
-            let h = if matches!(e, MenuItem::Sep) { sh } else { ih };
-            rects.push((pad, top, w - pad, top + h));
-            top += h;
-        }
-        let h = (top + pad).round();
+        let (w, h, rects) = measure(&items);
+        let m = (MARGIN * s).round() as i32;
+        let rects: Vec<_> = rects.into_iter().map(|(x0, y0, x1, y1)| (x0 * s + m as f32, y0 * s + m as f32, x1 * s + m as f32, y1 * s + m as f32)).collect();
+        let (wi, hi) = ((w * s).round() as i32, (h * s).round() as i32);
         let area = win::area_for((x, y, x + 1, y + 1));
-        let (wi, hi) = (w as i32, h as i32);
+        let pad = (PAD * s) as i32;
         let (mut x, mut y) = (x, y);
         if let Some((px0, py0, px1, _)) = parent {
             // submenu ao lado do item, para a direita se couber
-            x = px1 - (4.0 * s) as i32;
-            y = py0 - pad as i32;
+            x = px1 + pad;
+            y = py0 - pad;
             if x + wi > area.2 {
-                x = px0 - wi + (4.0 * s) as i32;
+                x = px0 - wi - pad;
             }
         } else if x + wi > area.2 {
             x -= wi;
@@ -121,8 +254,10 @@ impl GlassMenu {
             y = if parent.is_none() { y - hi } else { area.3 - hi };
         }
         let (x, y) = (x.max(area.0), y.max(area.1));
+        let size = (wi + 2 * m, hi + 2 * m);
         let hwnd = events::create_popup();
-        self.levels.push(Level { hwnd, items, rects, pos: (x, y), size: (wi, hi), hot: None });
+        let shadow = shadow(w, h, s, size.0 as u32, size.1 as u32);
+        self.levels.push(Level { hwnd, items, rects, pos: (x - m, y - m), size, hot: None, shadow });
         let i = self.levels.len() - 1;
         self.draw(i);
         events::show(hwnd, true);
@@ -132,36 +267,12 @@ impl GlassMenu {
     fn draw(&self, i: usize) {
         let l = &self.levels[i];
         let s = self.s;
-        let (w, h) = (l.size.0 as f32 / s, l.size.1 as f32 / s);
+        let m = (MARGIN * s).round();
+        let (w, h) = ((l.size.0 as f32 - 2.0 * m) / s, (l.size.1 as f32 - 2.0 * m) / s);
+        let rects: Vec<_> = l.rects.iter().map(|&(x0, y0, x1, y1)| ((x0 - m) / s, (y0 - m) / s, (x1 - m) / s, (y1 - m) / s)).collect();
         let mut c = Canvas::new(l.size.0 as u32, l.size.1 as u32, s);
-        c.fill_round_rect(0.0, 0.0, w, h, 12.0, MENU_BG);
-        c.stroke_round_rect(0.0, 0.0, w, h, 12.0, WHITE.with_a(34), 1.0 / s);
-        let (left_col, right_col) = (30.0, 30.0);
-        for (n, (item, &(x0, y0, x1, y1))) in l.items.iter().zip(&l.rects).enumerate() {
-            let (x0, y0, x1, y1) = (x0 / s, y0 / s, x1 / s, y1 / s);
-            let ym = (y0 + y1) / 2.0;
-            if matches!(item, MenuItem::Sep) {
-                c.hline_px(x0 + 8.0, x1 - 8.0, ym, Rgba(66, 66, 74, 244));
-                continue;
-            }
-            if l.hot == Some(n) {
-                c.fill_round_rect(x0, y0, x1, y1, 7.0, WHITE.with_a(30));
-            }
-            c.text(x0 + left_col - 2.0, ym, label(item).unwrap(), Face::Regular, 12.0, FG, Anchor::LM, None);
-            let cx = x0 + left_col / 2.0;
-            match item {
-                MenuItem::Check(_, true, _) => c.line(&[(cx - 5.0, ym), (cx - 1.5, ym + 3.5), (cx + 5.0, ym - 4.0)], FG, 1.6),
-                MenuItem::Radio(_, true, _) => c.fill_circle(cx, ym, 3.2, FG),
-                MenuItem::Sub(..) => {
-                    let ax = x1 - right_col / 2.0;
-                    c.line(&[(ax - 2.0, ym - 4.5), (ax + 2.5, ym), (ax - 2.0, ym + 4.5)], Rgba::rgb(176, 176, 184), 1.5);
-                }
-                MenuItem::Hint(_, _, hint) => {
-                    c.text(x1 - 10.0, ym, hint, Face::Regular, 11.0, MUTED, Anchor::RM, None);
-                }
-                _ => {}
-            }
-        }
+        c.image(&l.shadow, 0.0, 0.0);
+        paint(&mut c, &l.items, &rects, w, h, m / s, m / s, l.hot, s);
         win::blit(l.hwnd, &c.finish(), Some(l.pos), 255);
     }
 
@@ -169,7 +280,7 @@ impl GlassMenu {
         let l = &self.levels[level];
         l.rects.iter().enumerate().find_map(|(n, &(x0, y0, x1, y1))| {
             let inside = (x as f32) >= x0 && (x as f32) < x1 && (y as f32) >= y0 && (y as f32) < y1;
-            (inside && !matches!(l.items[n], MenuItem::Sep)).then_some(n)
+            (inside && selectable(&l.items[n])).then_some(n)
         })
     }
 
@@ -181,7 +292,7 @@ impl GlassMenu {
         self.close(level + 1);
         self.draw(level);
         if let Some(n) = index {
-            if let MenuItem::Sub(_, sub) = &self.levels[level].items[n] {
+            if let MenuItem::Sub(_, sub) = base(&self.levels[level].items[n]) {
                 let sub = sub.clone();
                 let l = &self.levels[level];
                 let (x0, y0, x1, y1) = l.rects[n];
@@ -212,13 +323,13 @@ impl GlassMenu {
     }
 
     fn activate(&mut self, level: usize, index: usize) -> Option<u32> {
-        let id = match &self.levels[level].items[index] {
+        let id = match base(&self.levels[level].items[index]) {
             MenuItem::Sub(..) => {
                 self.set_hot(level, Some(index));
                 return None;
             }
-            MenuItem::Cmd(_, id) | MenuItem::Hint(_, id, _) | MenuItem::Check(_, _, id) | MenuItem::Radio(_, _, id) => *id,
-            MenuItem::Sep => return None,
+            MenuItem::Cmd(_, id) | MenuItem::Hint(_, id, _) | MenuItem::Check(_, _, id) | MenuItem::Radio(_, _, id) | MenuItem::Primary(_, id, _) => *id,
+            MenuItem::Sep | MenuItem::Title(..) | MenuItem::Icon(..) => return None,
         };
         self.close(0);
         Some(id)
@@ -227,7 +338,7 @@ impl GlassMenu {
     /// Teclado: setas, Enter, Esc. Devolve o item escolhido, se houver.
     pub fn key(&mut self, vk: u32) -> Option<u32> {
         let level = self.levels.len().checked_sub(1)?;
-        let items: Vec<usize> = (0..self.levels[level].items.len()).filter(|&n| !matches!(self.levels[level].items[n], MenuItem::Sep)).collect();
+        let items: Vec<usize> = (0..self.levels[level].items.len()).filter(|&n| selectable(&self.levels[level].items[n])).collect();
         match vk {
             0x1B => self.close(0), // Esc
             0x26 | 0x28 => {
@@ -241,11 +352,11 @@ impl GlassMenu {
             0x0D | 0x27 => {
                 // Enter / direita
                 let hot = self.levels[level].hot?;
-                if let MenuItem::Sub(..) = self.levels[level].items[hot] {
+                if let MenuItem::Sub(..) = base(&self.levels[level].items[hot]) {
                     self.levels[level].hot = None;
                     self.set_hot(level, Some(hot));
                     let sub = self.levels.len() - 1;
-                    self.levels[sub].hot = (0..self.levels[sub].items.len()).find(|&n| !matches!(self.levels[sub].items[n], MenuItem::Sep));
+                    self.levels[sub].hot = (0..self.levels[sub].items.len()).find(|&n| selectable(&self.levels[sub].items[n]));
                     self.draw(sub);
                 } else if vk == 0x0D {
                     return self.activate(level, hot);
@@ -526,6 +637,71 @@ impl GlassBar {
     pub fn focus(&self) {
         if let Some(h) = self.hwnd {
             events::focus(h);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn com() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+    }
+
+    /// Um menu de widget como o app monta: título, o botão em destaque e itens com ícones.
+    fn sample() -> Vec<MenuItem> {
+        vec![
+            MenuItem::Title("GitHub".into(), "github"),
+            MenuItem::Primary("Organizar widgets".into(), 1, "organizar"),
+            MenuItem::Sep,
+            MenuItem::Sub("Tamanho".into(), vec![MenuItem::Radio("Médio".into(), true, 2)]).icon("tamanho"),
+            MenuItem::Sep,
+            MenuItem::Cmd("Atualizar".into(), 3),
+            MenuItem::Cmd("Mudar usuário…".into(), 4),
+            MenuItem::Sep,
+            MenuItem::Sub("Widgets".into(), Vec::new()).icon("widgets"),
+            MenuItem::Check("Travar posições".into(), true, 5).icon("lock"),
+            MenuItem::Check("Sem ícone".into(), true, 6),
+            MenuItem::Hint("Com atalho".into(), 7, "Ctrl+K".into()),
+            MenuItem::Cmd("Sair".into(), 8).icon("sair"),
+        ]
+    }
+
+    /// O título e as linhas não são escolhidos pelo mouse nem pelo teclado; os outros (com
+    /// ícone ou não) sim, e o botão em destaque devolve o número dele.
+    #[test]
+    fn menu_items_are_chosen_right() {
+        com();
+        let items = sample();
+        let pick: Vec<bool> = items.iter().map(selectable).collect();
+        assert_eq!(pick, [false, true, false, true, false, true, true, false, true, true, true, true, true]);
+        assert_eq!(label(&items[3]), Some("Tamanho"));
+        assert!(matches!(base(&items[3]), MenuItem::Sub(..)));
+        assert_eq!(icon_of(&items[12]), Some("sair"));
+        // as alturas: o título e o botão são maiores e ganham um respiro; nada se sobrepõe
+        let (w, h, rects) = measure(&items);
+        assert!(w >= MIN_W);
+        assert_eq!(rects[0].3 - rects[0].1, TITLE_H);
+        assert_eq!(rects[1].3 - rects[1].1, PRIMARY_H);
+        for r in rects.windows(2) {
+            assert!(r[1].1 >= r[0].3, "{r:?}");
+        }
+        assert!(rects.last().unwrap().3 + PAD <= h);
+    }
+
+    /// Desenha o menu num PNG (para conferir): cargo test --release popup::tests::draw_menu -- --ignored
+    #[test]
+    #[ignore]
+    fn draw_menu() {
+        com();
+        for (name, hot) in [("menu", None), ("menu_organizar", Some(1)), ("menu_item", Some(5))] {
+            let img = menu_image(&sample(), hot, 1.5);
+            let path = std::env::temp_dir().join(format!("{name}.png"));
+            crate::gfx::save_png(&img, &path).unwrap();
+            println!("{}", path.display());
         }
     }
 }

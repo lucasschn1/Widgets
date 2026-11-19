@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::odometer::draw_counting;
-use super::{Ctx, Env, Hot, Kind, MenuItem, Mode, Status, LARGE_H, SMALL, WIDE};
+use super::island_ui::{self as iu, SOFT};
+use super::{alert_hash, Ctx, Env, Hot, IslandForm, IslandItem, Kind, MenuItem, Mode, Rect4, Status, LARGE_H, SMALL, WIDE};
+use crate::drawing;
 use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
 use crate::theme::*;
@@ -42,6 +44,16 @@ const BARS_MS: f32 = 650.0;
 const SELECT: u32 = 10; // + recurso (0 CPU, 1 memória, 2 disco)
 const OPEN_EXPLORER: u32 = 2;
 const CLOSE: u32 = 3;
+/// na ilha: abrir o Gerenciador de Tarefas e não avisar por uma hora
+const OPEN_TASKMGR: u32 = 4;
+const DISMISS: u32 = 5;
+
+/// CPU ou memória acima disto por `HIGH_FOR` entram na ilha (os mesmos limites da notificação);
+/// saem abaixo de `CALM`.
+const HIGH: f32 = crate::config::HIGH_USE;
+const CALM: f32 = HIGH - 0.1;
+const HIGH_FOR: Duration = Duration::from_secs(crate::config::HIGH_USE_SECS);
+const QUIET_FOR: Duration = Duration::from_secs(3600);
 
 const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
 const TITLES: [&str; 3] = ["Processador", "Memória", "Armazenamento"];
@@ -167,6 +179,10 @@ pub struct System {
     status: Status,
     /// quando chamar `tick` de novo (um prazo fixo: "agora + x" nunca venceria)
     due: Instant,
+    /// desde quando a CPU e a memória estão acima de `HIGH` (até baixarem de `CALM`)
+    high_since: [Option<Instant>; 2],
+    /// "Dispensar por 1 hora" na ilha
+    quiet_until: Option<Instant>,
 }
 
 impl System {
@@ -198,6 +214,8 @@ impl System {
             mode_seen: Cell::new(Mode::M),
             status: Status::default(),
             due: Instant::now(),
+            high_since: [None; 2],
+            quiet_until: None,
         };
         let (rx, tx) = sysinfo::net_bytes();
         s.last_net = (rx, tx, Instant::now());
@@ -250,6 +268,17 @@ impl System {
         s
     }
 
+    /// A CPU alta há dois minutos, com os apps lidos: o aviso da ilha.
+    #[cfg(test)]
+    pub fn sample_alarm() -> System {
+        let mut s = System::sample_flipped(None, Mode::M);
+        s.target = [0.92, 0.68, 0.41];
+        s.from = s.target;
+        s.apps[0].cpu = 41.0;
+        s.high_since = [Some(Instant::now() - HIGH_FOR - Duration::from_secs(60)), None];
+        s
+    }
+
     /// O mesmo, com ícones de 64 px nos apps (como os que o Windows dá), para desenhar o caminho
     /// dos ícones de verdade.
     #[cfg(test)]
@@ -286,6 +315,7 @@ impl System {
             format!("{:.0}/{:.0} GB", win::gb(dused), win::gb(dtotal)),
         ];
         self.set_rings(values);
+        self.watch_high(values);
         let (rx, tx) = sysinfo::net_bytes();
         let secs = self.last_net.2.elapsed().as_secs_f64().max(0.1);
         self.rates = (rx.saturating_sub(self.last_net.0) as f64 / secs, tx.saturating_sub(self.last_net.1) as f64 / secs);
@@ -455,7 +485,7 @@ impl System {
             self.drives = sysinfo::drives();
             self.drives_at = Some(Instant::now());
         }
-        self.sampler.set_active(self.list_visible());
+        self.sampler.set_active(self.wants_apps());
         if let Some(apps) = self.sampler.latest() {
             self.apps = apps;
         }
@@ -641,6 +671,22 @@ impl System {
 }
 
 impl Kind for System {
+    /// Na ilha só com a CPU ou a memória alta por um minuto (um aviso: não toma a pílula).
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        let (i, since) = self.alarm()?;
+        // um aviso novo a cada vez que passa do limite
+        let id = alert_hash(&format!("{i}{:?}", since));
+        Some(IslandItem::alert(color(i), id))
+    }
+
+    fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
+        self.draw_island(c, form, r, hot);
+    }
+
+    fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
+        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    }
+
     fn key(&self) -> &'static str {
         "sistema"
     }
@@ -653,7 +699,7 @@ impl Kind for System {
             // mudou de tamanho: o cartão desvira
             self.mode_seen.set(mode);
             self.flipped.set(None);
-            self.sampler.set_active(self.list_visible());
+            self.sampler.set_active(self.wants_apps());
         }
         if let Some(which) = self.flipped.get() {
             match mode {
@@ -698,6 +744,8 @@ impl Kind for System {
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         match action {
             OPEN_EXPLORER => ctx.open("shell:MyComputerFolder"),
+            OPEN_TASKMGR => ctx.open("taskmgr"),
+            DISMISS => self.quiet_until = Some(Instant::now() + QUIET_FOR),
             CLOSE => self.flip(None),
             a if (SELECT..SELECT + 3).contains(&a) => {
                 let i = (a - SELECT) as usize;
@@ -771,7 +819,8 @@ impl System {
         }
         if now >= self.next {
             self.measure();
-            if self.list_visible() {
+            self.sampler.set_active(self.wants_apps());
+            if self.wants_apps() {
                 if let Some(apps) = self.sampler.latest() {
                     self.apps = apps;
                 }
@@ -911,6 +960,136 @@ mod tests {
             let path = std::env::temp_dir().join(format!("sistema_{name}.png"));
             crate::gfx::save_png(&c.finish(), &path).unwrap();
             println!("{}", path.display());
+        }
+    }
+}
+
+// ---------- na ilha ----------
+
+/// Os botões da ilha aberta: (ação, retângulo a partir do canto da pílula).
+fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, (f32, f32, f32, f32))> {
+    match form {
+        IslandForm::Large => vec![(OPEN_TASKMGR, (22.0, h - 46.0, 182.0, h - 14.0)), (DISMISS, (w - 172.0, h - 44.0, w - 18.0, h - 16.0))],
+        _ => Vec::new(),
+    }
+}
+
+/// "há 2 min" (desde quando está alto).
+fn ago(since: Instant) -> String {
+    let m = (since.elapsed().as_secs() / 60).max(1);
+    if m < 60 { format!("há {m} min") } else { format!("há {} h", m / 60) }
+}
+
+impl System {
+    /// Os apps aparecem na lista do cartão ou na ilha (com um aviso)?
+    fn wants_apps(&self) -> bool {
+        self.list_visible() || self.alarm().is_some()
+    }
+
+    /// Acompanha quanto tempo a CPU e a memória ficam altas.
+    fn watch_high(&mut self, values: [f32; 3]) {
+        for i in 0..2 {
+            match self.high_since[i] {
+                None if values[i] >= HIGH => self.high_since[i] = Some(Instant::now()),
+                Some(_) if values[i] < CALM => self.high_since[i] = None,
+                _ => {}
+            }
+        }
+        if self.quiet_until.is_some_and(|t| Instant::now() >= t) {
+            self.quiet_until = None;
+        }
+    }
+
+    /// O recurso que está alto há mais de um minuto (CPU antes da memória) e desde quando.
+    fn alarm(&self) -> Option<(usize, Instant)> {
+        if self.quiet_until.is_some() {
+            return None;
+        }
+        (0..2).find_map(|i| self.high_since[i].filter(|t| t.elapsed() >= HIGH_FOR).map(|t| (i, t)))
+    }
+
+    /// Os apps que mais gastam do recurso `i` (os três primeiros): nome e fração.
+    fn top_apps(&self, i: usize) -> Vec<(String, f32)> {
+        let total_mem = win::memory().1.max(1) as f32;
+        let mut list: Vec<(String, f32)> = self.apps.iter().map(|a| (a.name.clone(), if i == 0 { a.cpu / 100.0 } else { a.mem as f32 / total_mem })).collect();
+        list.sort_by(|a, b| b.1.total_cmp(&a.1));
+        list.truncate(3);
+        list
+    }
+
+    fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
+        let (x, y, w, h) = r;
+        let (i, since) = self.alarm().unwrap_or((0, Instant::now()));
+        let col = color(i);
+        let value = format!("{:.0}%", self.target[i] * 100.0);
+        let top = self.top_apps(i);
+        let who = top.first().map(|a| a.0.clone());
+        let cy = y + h / 2.0;
+        match form {
+            IslandForm::Bubble => {
+                drawing::ring(c, x + w / 2.0, cy, 30.0, 3.5, self.target[i], col);
+                c.text(x + w / 2.0, cy, &format!("{:.0}", self.target[i] * 100.0), Face::Semibold, 10.0, FG, Anchor::MM, None);
+            }
+            IslandForm::Compact | IslandForm::Banner => {
+                // as três barrinhas, de baixo para cima
+                for k in 0..3 {
+                    let bx = x + 16.0 + k as f32 * 7.0;
+                    c.fill_round_rect(bx, cy - 10.0, bx + 4.0, cy + 10.0, 2.0, Rgba(255, 255, 255, 30));
+                    let fh = (20.0 * self.target[k]).max(3.0);
+                    c.fill_round_rect(bx, cy + 10.0 - fh, bx + 4.0, cy + 10.0, 2.0, color(k));
+                }
+                let label = match (&who, form) {
+                    (Some(app), IslandForm::Banner) => format!("{} alta · {app}", NAMES[i]),
+                    (Some(app), _) => format!("{} · {app}", NAMES[i]),
+                    (None, _) => format!("{} alta", NAMES[i]),
+                };
+                iu::compact_text(c, x + 44.0, r, &label, &value, AMBER);
+            }
+            IslandForm::Medium => {
+                drawing::ring(c, x + 39.0, cy, 50.0, 4.5, self.target[i], col);
+                c.text(x + 39.0, cy, &value, Face::Semibold, 12.0, FG, Anchor::MM, None);
+                let title = match &top.first() {
+                    Some((app, f)) => format!("{app} usa {:.0}% {}", f * 100.0, if i == 0 { "da CPU" } else { "da memória" }),
+                    None => format!("{} em {value}", TITLES[i]),
+                };
+                let lines = c.wrap(&title, Face::Semibold, 13.5, w - 96.0, 2);
+                let sub = format!("Acima de {:.0}% {}", HIGH * 100.0, ago(since));
+                if lines.len() > 1 {
+                    c.text(x + 78.0, cy - 17.0, &lines[0], Face::Semibold, 13.5, FG, Anchor::LM, None);
+                    c.text(x + 78.0, cy + 1.0, &lines[1], Face::Semibold, 13.5, FG, Anchor::LM, Some(w - 96.0));
+                    c.text(x + 78.0, cy + 19.0, &sub, Face::Regular, 11.5, AMBER, Anchor::LM, None);
+                } else {
+                    iu::two_lines(c, x + 78.0, cy, w - 96.0, &title, &sub, AMBER);
+                }
+            }
+            IslandForm::Large => {
+                iu::header(c, r, "SISTEMA", PINK.mix(WHITE, 0.12), &format!("{} alta {}", NAMES[i], ago(since)), AMBER);
+                // os três anéis
+                for k in 0..3 {
+                    let (rx, ry) = (x + 22.0 + k as f32 * 108.0, y + 62.0);
+                    drawing::ring(c, rx + 20.0, ry, 40.0, 4.0, self.target[k], color(k));
+                    c.text(rx + 20.0, ry, &format!("{:.0}", self.target[k] * 100.0), Face::Semibold, 11.0, FG, Anchor::MM, None);
+                    c.text(rx + 48.0, ry, NAMES[k], Face::Regular, 12.0, if k == i { FG } else { SOFT }, Anchor::LM, None);
+                }
+                // quem mais gasta
+                for (n, (app, f)) in top.iter().enumerate() {
+                    let ry = y + 104.0 + n as f32 * 22.0;
+                    c.text(x + 22.0, ry, app, Face::Regular, 12.0, FG, Anchor::LM, Some(96.0));
+                    iu::bar(c, x + 126.0, x + w - 64.0, ry, *f, col);
+                    c.text(x + w - 22.0, ry, &format!("{:.0}%", f * 100.0), Face::Regular, 12.0, SOFT, Anchor::RM, None);
+                }
+                if top.is_empty() {
+                    c.text(x + 22.0, y + 104.0, "Lendo os apps…", Face::Regular, 12.0, SOFT, Anchor::LM, None);
+                }
+                for (a, b) in island_buttons(form, w, h) {
+                    let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
+                    if a == OPEN_TASKMGR {
+                        iu::pill_button(c, rect, "Gerenciador de Tarefas", false, hot == Some(a));
+                    } else {
+                        iu::link(c, x + b.2, (rect.1 + rect.3) / 2.0, "Dispensar por 1 hora", true, hot == Some(a));
+                    }
+                }
+            }
         }
     }
 }

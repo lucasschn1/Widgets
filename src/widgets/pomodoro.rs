@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::odometer::{Odometer, ROLL_MS};
-use super::{Ctx, Env, Hot, Kind, MenuItem, Mode, NotifyAction, LARGE_H, MEDIUM_H, SMALL, WIDE};
+use super::island_ui::{self as iu, SOFT};
+use super::{Ctx, Env, Hot, IslandForm, IslandItem, Kind, MenuItem, Mode, NotifyAction, Rect4, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::config::Get;
 use crate::drawing;
 use crate::gfx::{Anchor, Canvas, Face};
@@ -76,6 +77,8 @@ const OPEN_CLOCK: u32 = 4;
 pub const RESET_DAY: u32 = 5;
 pub const START_IF_IDLE: u32 = 6;
 const TOGGLE_AUTO: u32 = 7;
+/// um minuto a mais (o "+1 min" da ilha)
+pub const ADD_MINUTE: u32 = 8;
 const DURATION: u32 = 1000; // + fase * 1000 + minutos
 const EVERY: u32 = 900; // + n
 
@@ -432,6 +435,26 @@ impl ObjMutOr for serde_json::Map<String, Value> {
 }
 
 impl Kind for Pomodoro {
+    /// Na ilha desde que a fase começou (correndo ou pausada no meio); no último minuto passa
+    /// na frente da música.
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        if !self.started() {
+            return None;
+        }
+        let mut item = IslandItem::live(self.phase.color());
+        item.idle = !self.running();
+        item.hurry = self.running() && self.left() <= 60.0;
+        Some(item)
+    }
+
+    fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, env: &Env) {
+        self.draw_island(c, form, r, hot, env);
+    }
+
+    fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
+        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    }
+
     fn key(&self) -> &'static str {
         "pomodoro"
     }
@@ -576,6 +599,7 @@ impl Kind for Pomodoro {
                     self.toggle(ctx);
                 }
             }
+            ADD_MINUTE => self.wheel(0.0, 0.0, 1.0, Mode::M, ctx),
             TOGGLE_AUTO => {
                 let auto = ctx.cfg[ctx.key].bool_of("auto").unwrap_or(false);
                 ctx.wcfg().insert("auto".into(), json!(!auto));
@@ -774,5 +798,98 @@ mod tests {
         // nada no pé do pequeno abre o Relógio do Windows
         let (x0, y0, x1, y1) = Pomodoro::clock_rect(Mode::P);
         assert!(!Pomodoro::on_clock((x0 + x1) / 2.0, (y0 + y1) / 2.0, Mode::P));
+    }
+}
+
+// ---------- na ilha ----------
+
+/// Os botões da ilha em cada forma: (ação, retângulo a partir do canto da pílula).
+fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, (f32, f32, f32, f32))> {
+    match form {
+        IslandForm::Medium => vec![(TOGGLE, iu::circle(w - 74.0, h / 2.0, 18.0)), (SKIP, iu::circle(w - 34.0, h / 2.0, 16.0))],
+        IslandForm::Large => {
+            let y = 140.0;
+            vec![(TOGGLE, (22.0, y, 130.0, y + 34.0)), (SKIP, (138.0, y, 236.0, y + 34.0)), (ADD_MINUTE, (244.0, y, 316.0, y + 34.0))]
+        }
+        _ => Vec::new(),
+    }
+}
+
+impl Pomodoro {
+    /// Quanto da fase já passou (0 a 1): o anel.
+    fn done_frac(&self) -> f32 {
+        if self.total <= 0.0 { 0.0 } else { (1.0 - self.left() / self.total).clamp(0.0, 1.0) as f32 }
+    }
+
+    /// "2 de 4": o foco de agora no ciclo até a pausa longa.
+    fn cycle_text(&self, wcfg: &Value) -> (i64, i64) {
+        let every = Self::every(wcfg);
+        let n = if self.phase == Phase::Foco { self.cycle + 1 } else { self.cycle.max(1) };
+        (n.clamp(1, every), every)
+    }
+
+    fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, env: &Env) {
+        let (x, y, w, h) = r;
+        let color = self.phase.color();
+        let running = self.running();
+        let time = fmt_timer(self.left());
+        let (n, every) = self.cycle_text(env.wcfg());
+        let is_hot = |a: u32| hot == Some(a);
+        match form {
+            IslandForm::Bubble => {
+                drawing::ring(c, x + w / 2.0, y + h / 2.0, 30.0, 3.5, self.done_frac(), color);
+                if !running {
+                    drawing::pause(c, x + w / 2.0, y + h / 2.0, 9.0, FG);
+                }
+            }
+            IslandForm::Compact | IslandForm::Banner => {
+                drawing::ring(c, x + 21.0, y + h / 2.0, 24.0, 3.5, self.done_frac(), color);
+                let label = if running { format!("{} · {n} de {every}", self.phase.label()) } else { "Pausado".to_string() };
+                iu::compact_text(c, x + 42.0, r, &label, &time, if running { FG } else { SOFT });
+            }
+            IslandForm::Medium => {
+                let (cx, cy) = (x + 39.0, y + h / 2.0);
+                drawing::ring(c, cx, cy, 50.0, 4.5, self.done_frac(), color);
+                c.text(cx, cy, &format!("{n}/{every}"), Face::Semibold, 11.0, SOFT, Anchor::MM, None);
+                let label = if running { self.phase.label().to_string() } else { format!("{} · pausado", self.phase.label()) };
+                c.text(x + 78.0, cy - 13.0, &label, Face::Semibold, 11.5, color, Anchor::LM, None);
+                c.text(x + 78.0, cy + 9.0, &time, Face::Semibold, 24.0, FG, Anchor::LM, None);
+                for (a, b) in island_buttons(form, w, h) {
+                    let (bx, by, br) = (x + (b.0 + b.2) / 2.0, y + (b.1 + b.3) / 2.0, (b.2 - b.0) / 2.0);
+                    let glyph = if a == TOGGLE { if running { "pause" } else { "play" } } else { "next" };
+                    iu::round_button(c, bx, by, br, glyph, is_hot(a));
+                }
+            }
+            IslandForm::Large => {
+                let upcoming = self.upcoming(env.wcfg()).label().to_lowercase();
+                iu::header(c, r, &self.phase.label().to_uppercase(), color, &format!("Ciclo {n} de {every}"), SOFT);
+                c.text(x + 22.0, y + 72.0, &time, Face::Semibold, 42.0, FG, Anchor::LM, None);
+                let today = today(env.cfg, false).1;
+                let sub = match (running, self.end) {
+                    (true, Some(end)) => format!("Termina às {} · depois, {upcoming}", win::clock_at(end)),
+                    _ => format!("Pausado · {today} hoje"),
+                };
+                c.text(x + 22.0, y + 108.0, &sub, Face::Regular, 12.0, SOFT, Anchor::LM, Some(w - 120.0));
+                drawing::ring(c, x + w - 54.0, y + 82.0, 60.0, 6.0, self.done_frac(), color);
+                for (a, b) in island_buttons(form, w, h) {
+                    let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
+                    let label = match a {
+                        TOGGLE if running => "Pausar",
+                        TOGGLE => "Continuar",
+                        SKIP => "Pular fase",
+                        _ => "+1 min",
+                    };
+                    iu::pill_button(c, rect, label, a == TOGGLE, is_hot(a));
+                }
+                // os focos do ciclo, em pontinhos
+                for k in 0..every {
+                    let done = k < n - i64::from(self.phase == Phase::Foco);
+                    let now = k == n - 1 && self.phase == Phase::Foco;
+                    let col = if done || now { color } else { Rgba(255, 255, 255, 46) };
+                    c.fill_circle(x + 26.0 + k as f32 * 13.0, y + h - 24.0, if now { 4.0 } else { 3.2 }, col);
+                }
+                c.text(x + w - 22.0, y + h - 24.0, &format!("{today} pomodoros hoje"), Face::Regular, 11.5, SOFT, Anchor::RM, None);
+            }
+        }
     }
 }
