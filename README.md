@@ -6,8 +6,16 @@
 
 <p align="center">
   <b>Widgets de vidro para a área de trabalho do Windows.</b><br>
-  Clima, sistema, a música que está tocando, seu GitHub, um Pomodoro e o uso do Claude,
-  presos ao papel de parede.
+  Clima, sistema, a música que está tocando, seu GitHub, um Pomodoro, a bateria e o uso do
+  Claude, presos ao papel de parede.
+</p>
+
+<p align="center">
+  <a href="https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe"><img alt="Baixar o Widgets para Windows" src="https://img.shields.io/github/v/release/lucasschn1/Widgets?style=for-the-badge&label=Baixar%20para%20Windows&color=0a84ff&logo=windows&logoColor=white" height="40"></a>
+</p>
+
+<p align="center">
+  <sub>Grátis · Windows 10 ou 11 · download de 1,5 MB · sem precisar de administrador · <a href="#instalar">como instalar</a></sub>
 </p>
 
 <p align="center">
@@ -24,9 +32,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe"><b>⬇ Baixar o instalador</b></a>
-  &nbsp;·&nbsp;
-  <a href="#instalar">Instalar pelo terminal</a>
+  <a href="#instalar"><b>Instalar</b></a>
   &nbsp;·&nbsp;
   <a href="#os-widgets">Ver os widgets</a>
   &nbsp;·&nbsp;
@@ -42,10 +48,21 @@ memória.
 
 ## Instalar
 
-**Pelo instalador:** baixe o **[Widgets-Setup.exe](https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe)**
-e siga os passos.
+Em três passos:
 
-**Pelo terminal:** abra o **PowerShell** e cole:
+1. **Baixe o [Widgets-Setup.exe](https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe)** (1,5 MB).
+2. **Abra o arquivo**, avance e clique em **Instalar**. Se aparecer a tela azul "O Windows protegeu o
+   computador", clique em **Mais informações** e depois em **Executar assim mesmo**
+   ([por que esse aviso aparece](#o-aviso-do-windows)).
+3. **Pronto.** Ao concluir, os widgets abrem na área de trabalho, e umas boas-vindas rápidas ajudam a
+   escolher quais mostrar e a cidade do clima.
+
+<p align="center">
+  <a href="https://github.com/lucasschn1/Widgets/releases/latest/download/Widgets-Setup.exe"><img alt="Baixar o Widgets para Windows" src="https://img.shields.io/github/v/release/lucasschn1/Widgets?style=for-the-badge&label=Baixar%20para%20Windows&color=0a84ff&logo=windows&logoColor=white" height="40"></a>
+</p>
+
+**Prefere o terminal?** Abra o **PowerShell** e cole a linha abaixo. Ela baixa a última versão
+direto do GitHub e instala (sem os avisos do navegador e do SmartScreen):
 
 ```powershell
 irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
@@ -64,6 +81,7 @@ as suas configurações.
 | **Permissões** | Nenhuma de administrador; tudo fica na sua pasta de usuário |
 | **Desinstalar** | Configurações → Aplicativos → Widgets |
 
+<a id="o-aviso-do-windows"></a>
 <details>
 <summary><b>O Windows disse que "protegeu o computador" (ou o navegador desconfiou do download)</b></summary>
 
