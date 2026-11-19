@@ -581,6 +581,79 @@ pub fn find_window(part: &str) -> Option<HWND> {
     data.1
 }
 
+// ---------- barra de tarefas ----------
+
+/// A barra de tarefas de um monitor, em pixels da tela.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Taskbar {
+    pub bar: Rect,
+    /// o botão Iniciar (o Windows 11 guarda uma janela "Start" escondida que acompanha o ícone)
+    pub start: Option<Rect>,
+    /// a área de notificação (relógio, ícones), na barra principal
+    pub tray: Option<Rect>,
+}
+
+const TASKBAR_CLASSES: [PCWSTR; 2] = [w!("Shell_TrayWnd"), w!("Shell_SecondaryTrayWnd")];
+
+fn window_rect(hwnd: HWND) -> Option<Rect> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut r) }.ok()?;
+    let r = rect_of(r);
+    (r.2 > r.0 && r.3 > r.1).then_some(r)
+}
+
+fn child_rect(parent: HWND, class: PCWSTR) -> Option<Rect> {
+    let child = unsafe { FindWindowExW(Some(parent), None, class, PCWSTR::null()) }.ok().filter(|h| !h.is_invalid())?;
+    window_rect(child)
+}
+
+/// A barra de tarefas à vista, embaixo, no monitor do ponto (escondida sozinha, de lado ou em
+/// cima: nada).
+pub fn taskbar_at(x: i32, y: i32) -> Option<Taskbar> {
+    let (screen, _) = monitor_at(x, y);
+    for class in TASKBAR_CLASSES {
+        let mut after: Option<HWND> = None;
+        loop {
+            let Some(hwnd) = (unsafe { FindWindowExW(None, after, class, PCWSTR::null()) }).ok().filter(|h| !h.is_invalid()) else { break };
+            after = Some(hwnd);
+            let Some(bar) = window_rect(hwnd) else { continue };
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() || !taskbar_in_view(bar, screen) {
+                continue;
+            }
+            let inside = |r: Rect| r.0 >= bar.0 && r.2 <= bar.2 && r.1 >= bar.1 && r.3 <= bar.3;
+            let start = child_rect(hwnd, w!("Start")).filter(|&r| inside(r));
+            let tray = child_rect(hwnd, w!("TrayNotifyWnd")).filter(|&r| inside(r));
+            return Some(Taskbar { bar, start, tray });
+        }
+    }
+    None
+}
+
+/// Se a barra está inteira à vista, embaixo do monitor e de largura cheia.
+fn taskbar_in_view(bar: Rect, screen: Rect) -> bool {
+    let h = bar.3 - bar.1;
+    bar.0 <= screen.0 + 2 && bar.2 >= screen.2 - 2 && (bar.3 - screen.3).abs() <= 2 && h >= 16 && h < (screen.3 - screen.1) / 3
+}
+
+/// A barra de tarefas foi para a frente da janela (ela sobe ao ser clicada): volta para cima dela.
+pub fn stay_over_taskbar(hwnd: HWND) {
+    let mut above = hwnd;
+    for _ in 0..64 {
+        let Ok(prev) = (unsafe { GetWindow(above, GW_HWNDPREV) }) else { return };
+        if prev.is_invalid() {
+            return;
+        }
+        let mut buf = [0u16; 64];
+        let n = unsafe { GetClassNameW(prev, &mut buf) }.max(0) as usize;
+        let class = String::from_utf16_lossy(&buf[..n]);
+        if class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd" {
+            set_z(hwnd, Z::Topmost);
+            return;
+        }
+        above = prev;
+    }
+}
+
 pub fn bring_to_front(hwnd: HWND) {
     unsafe {
         if IsIconic(hwnd).as_bool() {

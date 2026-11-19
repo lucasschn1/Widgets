@@ -147,7 +147,7 @@ pub fn default_setting(name: &str) -> Value {
         "escurecimento" => json!(crate::theme::TINT_AMOUNT),
         "texto" => json!(0.0), // 0 = seguir o Windows
         "esmaecer" => json!(false),
-        "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" => json!(true),
+        "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" | "ilha_widgets" => json!(true),
         // (experimental: desligado até ser conferido em mais PCs)
         "placa_de_video" => json!(false),
         "opacidade_ociosa" => json!(0.8),
@@ -175,6 +175,26 @@ pub fn setting_f64(cfg: &Value, name: &str) -> f64 {
 
 pub fn setting_str(cfg: &Value, name: &str) -> String {
     setting(cfg, name).as_str().unwrap_or_default().to_string()
+}
+
+/// Limites dos avisos, os mesmos na notificação, na ilha e no texto das Configurações:
+/// CPU ou memória acima de `HIGH_USE` por `HIGH_USE_SECS` segundos; bateria abaixo de `LOW_BATTERY`%.
+pub const HIGH_USE: f32 = 0.9;
+pub const HIGH_USE_SECS: u64 = 180;
+pub const LOW_BATTERY: u8 = 15;
+
+/// "90%"
+pub fn high_use_pct() -> String {
+    format!("{:.0}%", HIGH_USE * 100.0)
+}
+
+/// "3 minutos" (ou "1 minuto", "45 segundos")
+pub fn high_use_time() -> String {
+    match HIGH_USE_SECS {
+        60 => "1 minuto".into(),
+        s if s % 60 == 0 => format!("{} minutos", s / 60),
+        s => format!("{s} segundos"),
+    }
 }
 
 pub fn notify_enabled(cfg: &Value, kind: &str) -> bool {

@@ -1,12 +1,13 @@
 //! Widget Bateria: a bateria do notebook (com a saúde, os ciclos e as últimas 24 horas) e a dos
-//! dispositivos conectados (fones, mouses, teclados, controles). No pequeno, um círculo por
-//! aparelho; no médio, o anel do notebook e a lista; no grande, tudo. Num PC sem bateria, só os
-//! dispositivos.
+//! dispositivos conectados (fones, mouses, teclados, controles). No pequeno, um anel por aparelho
+//! (os lugares que sobram ficam com o anel vazio); no médio, o anel do notebook e a lista; no
+//! grande, tudo. Num PC sem bateria, só os dispositivos. Os ícones são desenhados (`vector`).
 //!
 //! As animações tocam nos momentos que importam e param depois: ligar na tomada (uma onda sai do
 //! anel e o raio entra com um "pop"; o arco fica onde está), a carga mudando (os números rolam
 //! como num hodômetro), a carga completa (um reflexo atravessa o cartão e o raio vira um ✓), um
-//! aparelho chegando ou saindo, a bateria baixa (a ponta do arco respira uma vez por minuto) e o
+//! aparelho chegando ou saindo (no pequeno, o ícone entra com um "pop", uma onda sai do anel e
+//! o arco enche do zero), a bateria baixa (a ponta do arco respira uma vez por minuto) e o
 //! gráfico se desenhando ao abrir o grande. Carregando, um brilho percorre o arco a cada 3,5 s.
 //! Parado, nada se mexe. (O reflexo do mouse na borda de vidro é do cartão, em todos os widgets.)
 
@@ -16,9 +17,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::{Ctx, Env, Hot, HoverStyle, Kind, Layout, MenuItem, Mode, Status, SMALL, WIDE};
+use super::island_ui::{self as iu, SOFT};
+use super::{alert_hash, Ctx, Env, Hot, HoverStyle, IslandForm, IslandItem, Kind, Layout, MenuItem, Mode, Rect4, Status, SMALL, WIDE};
 use crate::battery::{self, DevKind, Device, Power};
 use super::odometer::draw_rolling;
+use super::vector;
 use crate::gfx::{Anchor, Canvas, Face, Fill};
 use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
 use crate::win;
@@ -27,11 +30,52 @@ use crate::win;
 const OK: Rgba = crate::theme::GREEN;
 const MID: Rgba = crate::theme::AMBER;
 const LOW: Rgba = crate::theme::RED;
-const TRACK: Rgba = Rgba(255, 255, 255, 30);
-const LINE: Rgba = Rgba(255, 255, 255, 26);
+/// o trilho dos anéis e das barras (9%), o dos anéis do pequeno (10%) e o do anel vazio (8%)
+const TRACK: Rgba = Rgba(255, 255, 255, 23);
+const MINI_TRACK: Rgba = Rgba(255, 255, 255, 26);
+const EMPTY_TRACK: Rgba = Rgba(255, 255, 255, 20);
+/// os fios entre as linhas da saúde e o que separa o anel da lista (7%) e as guias do gráfico (7%)
+const RULE: Rgba = Rgba(255, 255, 255, 18);
+const GRID: Rgba = Rgba(255, 255, 255, 18);
+/// os textos de apoio (64%), o "Notebook" (58%), a legenda (60%) e os ícones (82% e 86%)
+const SUB: Rgba = Rgba(255, 255, 255, 163);
+const LEGEND: Rgba = Rgba(255, 255, 255, 153);
+const ICON: Rgba = Rgba(255, 255, 255, 209);
+const MINI_ICON: Rgba = Rgba(255, 255, 255, 219);
+/// o quadradinho de vidro dos ícones da lista (6%, contorno de 4%) e o painel do gráfico (3,5%,
+/// contorno de 5%)
+const TILE: Rgba = Rgba(255, 255, 255, 15);
+const TILE_LINE: Rgba = Rgba(255, 255, 255, 10);
+const PANEL: Rgba = Rgba(255, 255, 255, 9);
+const PANEL_LINE: Rgba = Rgba(255, 255, 255, 13);
+/// a linha embaixo do anel: na bateria, na tomada e com a bateria baixa
+const STATUS: Rgba = Rgba(255, 255, 255, 184);
+const CHARGE_TEXT: Rgba = Rgba::rgb(125, 219, 160);
+const LOW_TEXT: Rgba = Rgba::rgb(255, 154, 144);
 const NUM: Face = Face::Custom("Outfit", 300);
 const TEXT: Face = Face::Custom("Outfit", 400);
+const MEDIUM: Face = Face::Custom("Outfit", 500);
 const BOLD: Face = Face::Custom("Outfit", 600);
+/// a altura dos dígitos da Outfit (em relação ao tamanho da fonte): para centrar o número no anel
+const DIGIT_H: f32 = 0.70;
+/// o "%" em relação ao número
+const PCT: f32 = 0.37;
+
+/// O degradê do arco de cada cor: do tom mais fundo (no começo, embaixo à esquerda) ao mais claro.
+fn gradient_of(c: Rgba) -> (Rgba, Rgba) {
+    if c == LOW {
+        (Rgba::rgb(232, 78, 66), Rgba::rgb(255, 150, 139))
+    } else if c == MID {
+        (Rgba::rgb(228, 158, 54), Rgba::rgb(246, 210, 138))
+    } else {
+        (Rgba::rgb(61, 190, 111), Rgba::rgb(143, 227, 174))
+    }
+}
+
+/// A cor com a opacidade multiplicada por `a`.
+fn fade(c: Rgba, a: f32) -> Rgba {
+    c.with_a((c.3 as f32 * a.clamp(0.0, 1.0)).round() as u8)
+}
 
 /// A cor da carga: verde, âmbar abaixo de 30% e vermelho abaixo de 15%.
 fn level_color(v: f32) -> Rgba {
@@ -65,11 +109,87 @@ impl Ring {
     }
 }
 
-const RING_P: Ring = Ring { cx: SMALL / 2.0, cy: 79.0, r: 55.0, w: 10.0 };
-const RING_M: Ring = Ring { cx: 64.0, cy: 70.0, r: 44.0, w: 9.0 };
-const RING_G: Ring = Ring { cx: 80.0, cy: 132.0, r: 54.0, w: 10.0 };
-/// a margem de dentro do cartão (a mesma de todos os widgets)
-const PAD: f32 = super::CARD_PAD;
+const RING_M: Ring = Ring { cx: 66.0, cy: 58.0, r: 40.0, w: 8.0 };
+const RING_G: Ring = Ring { cx: 80.0, cy: 126.0, r: 52.0, w: 10.0 };
+/// a margem de dentro do cartão médio e do grande
+const M: f32 = 18.0;
+/// o pequeno: a grade 2 × 2 começa em `CELL_X` (nos dois eixos), com lugares de `CELL`; cada anel
+/// tem raio `MINI_R` e traço `MINI_W`
+const CELL_X: f32 = 14.0;
+const CELL: f32 = (SMALL - 2.0 * CELL_X) / 2.0;
+const MINI_R: f32 = 16.0;
+const MINI_W: f32 = 4.0;
+
+/// O meio da abertura de baixo do anel (entre as duas pontas do arco): onde fica o ícone.
+fn g_opening(g: Ring) -> (f32, f32) {
+    (g.cx, g.cy + g.r * std::f32::consts::FRAC_1_SQRT_2)
+}
+
+/// Como desenhar uma linha da lista: com o ícone num quadradinho de vidro deste tamanho, ou solto.
+#[derive(Clone, Copy)]
+enum Row {
+    Tile(f32),
+    Inline,
+}
+
+/// Um lugar do pequeno: o notebook, um aparelho ou vazio.
+#[derive(Clone, Copy)]
+enum Spot<'a> {
+    Laptop,
+    Dev(&'a Device),
+    Empty,
+}
+
+/// O arco de `g` até `v` (0 a 100) num degradê na diagonal do anel (de baixo à esquerda para
+/// cima à direita), em pedaços de até 8°.
+fn gradient_arc(c: &mut Canvas, g: Ring, v: f32, color: Rgba) {
+    let (a, b) = gradient_of(color);
+    let end = START + SWEEP * v.clamp(0.0, 100.0) / 100.0;
+    let n = ((end - START) / 8.0).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let a0 = START + (end - START) * i as f32 / n as f32;
+        let a1 = START + (end - START) * (i + 1) as f32 / n as f32;
+        let mid = ((a0 + a1) / 2.0).to_radians();
+        let (px, py) = (g.r * mid.cos(), g.r * mid.sin());
+        let t = ((px + g.r) + (g.r - py)) / (4.0 * g.r);
+        c.arc(g.cx, g.cy, g.r, a0, a1, a.mix(b, t.clamp(0.0, 1.0)), g.w);
+    }
+}
+
+/// O ícone do aparelho chegando no pequeno: (escala, opacidade) aos `ms` do começo. Entra pequeno,
+/// passa do tamanho (112%) e volta.
+fn connect_icon(ms: f32) -> (f32, f32) {
+    if ms < 120.0 {
+        let t = ease_out(ms / 120.0);
+        (0.5 + 0.35 * t, 0.8 * t)
+    } else if ms < 250.0 {
+        let t = ease_out((ms - 120.0) / 130.0);
+        (0.85 + 0.27 * t, 0.8 + 0.2 * t)
+    } else {
+        (1.12 - 0.12 * ease_in_out(((ms - 250.0) / 130.0).min(1.0)), 1.0)
+    }
+}
+
+/// A linha suave (Catmull-Rom) pelos pontos: duas paradas a mais entre cada par.
+fn catmull_rom(pts: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut out = Vec::with_capacity(pts.len() * 3);
+    for i in 0..pts.len() - 1 {
+        let (p0, p1, p2, p3) = (pts[i.saturating_sub(1)], pts[i], pts[i + 1], pts[(i + 2).min(pts.len() - 1)]);
+        let c1 = (p1.0 + (p2.0 - p0.0) / 6.0, p1.1 + (p2.1 - p0.1) / 6.0);
+        let c2 = (p2.0 - (p3.0 - p1.0) / 6.0, p2.1 - (p3.1 - p1.1) / 6.0);
+        out.push(p1);
+        for t in [1.0 / 3.0, 2.0 / 3.0] {
+            let u = 1.0 - t;
+            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+            out.push((w[0] * p1.0 + w[1] * c1.0 + w[2] * c2.0 + w[3] * p2.0, w[0] * p1.1 + w[1] * c1.1 + w[2] * c2.1 + w[3] * p2.1));
+        }
+    }
+    out.push(pts[pts.len() - 1]);
+    out
+}
 
 // ---------- as animações ----------
 const FRAME: Duration = Duration::from_millis(16);
@@ -83,8 +203,12 @@ const POP_MS: f32 = 560.0;
 /// o ✓ no lugar do raio e o reflexo atravessando o cartão, na carga completa
 const CHECK_MS: f32 = 3000.0;
 const SHEEN_MS: f32 = 1100.0;
-/// um aparelho chegando (desliza e a barra enche) ou saindo (esmaece e a barra esvazia)
-const DEVICE_MS: f32 = 800.0;
+/// um aparelho chegando ou saindo: a animação inteira (no pequeno) e a da linha da lista (desliza
+/// e a barra enche, ou esmaece e a barra esvazia)
+const DEVICE_MS: f32 = 900.0;
+const ROW_MS: f32 = 800.0;
+/// a onda saindo do anel do aparelho que chegou, no pequeno
+const RIPPLE_CELL_MS: f32 = 500.0;
 /// o gráfico se desenhando
 const REVEAL_MS: f32 = 1300.0;
 /// o brilho correndo no arco, carregando: um a cada `SHIMMER_EVERY`, visível nesta parte dele
@@ -111,16 +235,26 @@ fn pop(t: f32) -> f32 {
 // ---------- a leitura ----------
 /// de quanto em quanto tempo olhar a bateria do notebook, a dos dispositivos e guardar no histórico
 const POWER_EVERY: Duration = Duration::from_secs(5);
-const DEVICES_EVERY: Duration = Duration::from_secs(30);
 const SAMPLE_EVERY: f64 = 5.0 * 60.0;
 const DAY: f64 = 24.0 * 3600.0;
 /// avisa quando um aparelho conectado passa disto; avisa de novo só depois de carregar até `REARM`
-const LOW_AT: u8 = 15;
-const REARM: u8 = 20;
+const LOW_AT: u8 = crate::config::LOW_BATTERY;
+const REARM: u8 = LOW_AT + 5;
 
 // ---------- ações ----------
 const OPEN_POWER: u32 = 1;
 const OPEN_BLUETOOTH: u32 = 2;
+/// na ilha: "OK" (não avisar mais deste aparelho até ele carregar)
+const DISMISS: u32 = 3;
+/// na ilha abaixo disto (o mesmo limite da notificação); abaixo de `ISLAND_URGENT`, fica na pílula
+/// até alguém ver
+const ISLAND_LOW: f32 = LOW_AT as f32;
+const ISLAND_URGENT: f32 = 10.0;
+/// ao entrar ou sair da tomada, a ilha mostra a carga por este tempo
+const PLUG_SHOW: Duration = Duration::from_secs(8);
+/// de quanto em quanto tempo conferir se entrou ou saiu da tomada e se chegou uma lista nova de
+/// dispositivos (só isso: barato)
+const CHECK_EVERY: Duration = Duration::from_millis(500);
 
 /// o consumo na bateria é a média dos últimos minutos (o do momento pula de 7 W para 10 W com
 /// qualquer coisa que o PC faz, e o tempo restante pulava de 5 h 50 para 4 h 10)
@@ -152,6 +286,8 @@ struct Rolled {
     percent: String,
     status: String,
     header: String,
+    /// a de baixo do anel do grande
+    under: String,
     at: Instant,
 }
 
@@ -169,10 +305,12 @@ pub struct Battery {
     /// as últimas 24 horas: (segundos desde 1970, carga, na tomada)
     hist: Vec<(f64, f32, bool)>,
     last_sample: f64,
-    /// a leitura dos dispositivos em andamento (num fio à parte)
-    reading: Option<Receiver<Vec<Device>>>,
+    /// as listas de dispositivos, lidas num fio à parte (de tempos em tempos e logo depois de um
+    /// aparelho conectar ou desconectar)
+    feed: Option<Receiver<Vec<Device>>>,
+    /// os aparelhos nos lugares do pequeno, na ordem em que entraram (None: o lugar de um que saiu)
+    slots: Vec<Option<String>>,
     next_power: Instant,
-    next_devices: Instant,
     /// "agora" fixo nos exemplos (sem ler o sistema)
     fixed_now: Option<f64>,
     // animações
@@ -182,8 +320,9 @@ pub struct Battery {
     drain: Option<(f32, Instant)>,
     /// o tempo restante mostrado (segundos) e desde quando: dali ele desce como um relógio
     left: Option<(f64, Instant)>,
-    /// os textos (porcentagem, linha de baixo, linha de cima) do último desenho pedido
-    texts: Option<(String, String, String)>,
+    /// os textos (porcentagem, linha de baixo, linha de cima, linha de baixo do grande) do último
+    /// desenho pedido
+    texts: Option<Texts>,
     /// alguma animação rodava no último tick (o quadro final precisa ser desenhado)
     was_animating: bool,
     plug_at: Option<Instant>,
@@ -197,6 +336,14 @@ pub struct Battery {
     warned: Vec<String>,
     /// leituras estranhas seguidas que ainda esperam confirmação (ver `steady`)
     doubt: u8,
+    /// os avisos da ilha já dispensados ("nome|nível"), até o aparelho carregar
+    island_ok: Vec<String>,
+    /// entrou (true) ou saiu (false) da tomada, e quando: a ilha mostra por `PLUG_SHOW`
+    plug_event: Option<(bool, Instant)>,
+    /// quantas vezes entrou ou saiu (cada uma é um aviso novo na ilha)
+    plug_count: u64,
+    /// próxima conferida rápida da tomada e dos dispositivos
+    next_check: Instant,
 }
 
 impl Battery {
@@ -208,7 +355,7 @@ impl Battery {
             .unwrap_or_default();
         b.last_sample = b.hist.last().map_or(0.0, |s| s.0);
         b.apply_power(battery::power());
-        b.read_devices();
+        b.feed = battery::watch_devices();
         b
     }
 
@@ -218,9 +365,9 @@ impl Battery {
             devices: Vec::new(),
             hist: Vec::new(),
             last_sample: 0.0,
-            reading: None,
+            feed: None,
+            slots: Vec::new(),
             next_power: Instant::now() + POWER_EVERY,
-            next_devices: Instant::now() + DEVICES_EVERY,
             fixed_now: None,
             grow: None,
             roll: None,
@@ -236,7 +383,11 @@ impl Battery {
             mode_seen: Cell::new(None),
             shimmering: false,
             warned: Vec::new(),
+            island_ok: Vec::new(),
             doubt: 0,
+            plug_event: None,
+            plug_count: 0,
+            next_check: Instant::now() + CHECK_EVERY,
         }
     }
 
@@ -312,13 +463,26 @@ impl Battery {
         b
     }
 
+    /// Acabou de entrar (`plugged`) ou sair da tomada: o aviso na ilha.
+    #[cfg(test)]
+    pub fn sample_plug_event(plugged: bool) -> Battery {
+        let mut b = if plugged { Battery::sample_charging() } else { Battery::sample() };
+        // nenhum aparelho fraco (o aviso de pouca bateria passaria na frente)
+        for d in &mut b.devices {
+            d.level = d.level.map(|l| l.max(60));
+        }
+        b.plug_event = Some((plugged, Instant::now()));
+        b.plug_count = 1;
+        b
+    }
+
     /// A carga chegou a 100% há `ms` milissegundos (o reflexo e o ✓).
     #[cfg(test)]
     pub fn sample_full(ms: u64) -> Battery {
         let mut b = Battery::sample_charging();
         b.power = Some(Power { percent: 100.0, plugged: true, charging: false, secs_left: None, secs_to_full: None, health: Some(0.87), cycles: Some(312), ..Default::default() });
         b.full_at = Some(Instant::now() - Duration::from_millis(ms));
-        b.roll = Some(Rolled { percent: "99".into(), status: "cheia às 15:03".into(), header: "Carregando · cheia às 15:03".into(), at: Instant::now() - Duration::from_millis(ms) });
+        b.roll = Some(Rolled { percent: "99".into(), status: "cheia às 15:03".into(), header: "Carregando · cheia às 15:03".into(), under: "cheia em 2 min".into(), at: Instant::now() - Duration::from_millis(ms) });
         b
     }
 
@@ -327,13 +491,13 @@ impl Battery {
     #[cfg(test)]
     pub fn sample_rolling(ms: u64) -> Battery {
         let mut b = Battery::sample();
-        let before = (b.percent_text(), b.status_line(), b.header_line());
+        let before = b.current_texts();
         let mut p = b.power.clone().unwrap();
         p.percent = 68.0;
         p.secs_left = Some(3 * 3600 + 5 * 60);
         b.apply_power(Some(p));
         let r = b.roll.as_mut().expect("rola");
-        (r.percent, r.status, r.header) = before;
+        (r.percent, r.status, r.header, r.under) = before;
         r.at = Instant::now() - Duration::from_millis(ms);
         if let Some(g) = b.grow.as_mut() {
             g.2 = r.at;
@@ -352,22 +516,18 @@ impl Battery {
         b
     }
 
-    fn now(&self) -> f64 {
-        self.fixed_now.unwrap_or_else(win::now)
+    /// Só o notebook, com o fone conectando há `ms` milissegundos (no pequeno, ele entra no
+    /// primeiro anel vazio).
+    #[cfg(test)]
+    pub fn sample_connecting(ms: u64) -> Battery {
+        let mut b = Battery::sample();
+        b.devices.retain(|d| d.kind == DevKind::Headphones);
+        b.changes = vec![Change { name: b.devices[0].name.clone(), arriving: true, since: Instant::now() - Duration::from_millis(ms) }];
+        b
     }
 
-    /// Começa a ler os dispositivos num fio à parte; o resultado chega em `tick`.
-    fn read_devices(&mut self) {
-        let (tx, rx) = mpsc::channel();
-        let started = std::thread::Builder::new().name("bateria-dispositivos".into()).spawn(move || {
-            unsafe {
-                let _ = windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED);
-            }
-            let _ = tx.send(battery::devices());
-        });
-        if started.is_ok() {
-            self.reading = Some(rx);
-        }
+    fn now(&self) -> f64 {
+        self.fixed_now.unwrap_or_else(win::now)
     }
 
     // ---------- o que mostrar ----------
@@ -483,8 +643,9 @@ impl Battery {
 
     // ---------- desenho ----------
 
-    /// O anel do notebook: o trilho, o arco até a carga, a bolinha da ponta, a onda de quando
-    /// liga na tomada e o brilho vermelho que respira com a bateria baixa.
+    /// O anel do notebook: o trilho, o arco até a carga (num degradê da cor dela), a ponta com
+    /// o brilho, a onda de quando liga na tomada e o brilho vermelho que respira com a bateria
+    /// baixa.
     fn draw_ring(&self, c: &mut Canvas, g: Ring) {
         let v = self.shown();
         c.arc(g.cx, g.cy, g.r, START, START + SWEEP, TRACK, g.w);
@@ -497,14 +658,14 @@ impl Battery {
         }
         let color = level_color(self.power.as_ref().map_or(v, |p| p.percent));
         if v > 0.05 {
-            c.arc(g.cx, g.cy, g.r, START, START + SWEEP * v / 100.0, color, g.w);
+            gradient_arc(c, g, v, color);
         }
         let (dx, dy) = g.at(v);
         if let Some(a) = self.low_pulse() {
             c.fill_circle(dx, dy, g.w * 1.3, LOW.alpha(0.55 * a));
         }
-        c.fill_circle(dx, dy + 0.8, g.w * 0.36 * 1.17, Rgba(0, 0, 0, 70));
-        c.fill_circle(dx, dy, g.w * 0.36, FG);
+        c.fill_circle(dx, dy, g.w * 0.75, color.alpha(0.30));
+        c.fill_circle(dx, dy, g.w * 0.3, WHITE);
     }
 
     /// A ponta respirando com a bateria baixa: a força do brilho agora (None: fora do pulso).
@@ -517,26 +678,27 @@ impl Battery {
         (t < LOW_MS).then(|| (t / LOW_MS * std::f32::consts::PI).sin())
     }
 
-    /// O raio (ou o ✓ da carga completa) dentro do anel, com o "pop" de quando liga na tomada.
-    fn draw_badge(&self, c: &mut Canvas, x: f32, y: f32, size: f32) {
+    /// O raio (ou o ✓ da carga completa) do notebook agora, com o "pop" de quando liga na tomada:
+    /// (o desenho, a escala, a opacidade); None: sem raio.
+    fn badge(&self) -> Option<(&'static str, f32, f32)> {
         if !self.plugged() {
-            return;
+            return None;
         }
         let check = self.showing_check();
         if !self.charging() && !check {
-            return;
+            return None;
         }
         let since = if check { self.full_at } else { self.plug_at };
         let scale = since.map_or(1.0, |t| pop(ms_since(t) / POP_MS));
         let alpha = since.map_or(1.0, |t| (ms_since(t) / (POP_MS * 0.4)).min(1.0));
-        let glyph = if check { "\u{e73e}" } else { "\u{e945}" };
-        c.text(x, y, glyph, Face::Icons, size * scale, OK.alpha(alpha), Anchor::MM, None);
+        Some((if check { vector::CHECK } else { vector::BOLT }, scale, alpha))
     }
 
     /// A porcentagem grande, com os dígitos que mudaram rolando (o de antes sobe e some, o novo
-    /// vem de baixo), e o "%" menor depois dela; centrada em `x`, na linha de base `y`. O tamanho
-    /// diminui até tudo caber em `max_w` (o "100%", de três dígitos, não encosta no anel).
-    fn draw_percent(&self, c: &mut Canvas, x: f32, y: f32, size: f32, max_w: f32) {
+    /// vem de baixo), e o "%" menor e um pouco acima depois dela; os dígitos centrados em
+    /// (x, cy). O tamanho diminui até tudo caber em `max_w` (o "100%", de três dígitos, não
+    /// encosta no anel).
+    fn draw_percent(&self, c: &mut Canvas, x: f32, cy: f32, size: f32, max_w: f32) {
         if self.power.is_none() {
             return;
         }
@@ -544,10 +706,11 @@ impl Battery {
         let size = fit_size(c, &text, size, max_w);
         let nw = c.text_width(&text, NUM, size);
         // o número e o "%" juntos no centro (só o número no centro deixava tudo para a direita)
-        let x0 = x - (nw + 1.0 + c.text_width("%", NUM, size * 0.42)) / 2.0;
+        let x0 = x - (nw + 1.5 + c.text_width("%", NUM, size * PCT)) / 2.0;
+        let base = cy + DIGIT_H * size / 2.0;
         let (before, t) = self.rolled(|r| &r.percent);
-        draw_rolling(c, x0, y, &text, before, t, NUM, size, FG, Anchor::LS, None);
-        c.text(x0 + nw + 1.0, y, "%", NUM, size * 0.42, FG.alpha(0.7), Anchor::LS, None);
+        draw_rolling(c, x0, base, &text, before, t, NUM, size, FG, Anchor::LS, None);
+        c.text(x0 + nw + 1.5, base - 0.1 * size, "%", NUM, size * PCT, FG.alpha(0.7), Anchor::LS, None);
     }
 
     /// Um texto de antes da última mudança (`pick` escolhe qual) e quanto do rolar já foi
@@ -559,21 +722,42 @@ impl Battery {
         }
     }
 
-    /// A linha de baixo do anel (o tempo que falta, ou quando enche), rolando.
-    fn draw_status(&self, c: &mut Canvas, x: f32, y: f32, max_w: f32) {
-        let (before, t) = self.rolled(|r| &r.status);
-        draw_rolling(c, x, y, &self.status_line(), before, t, TEXT, 10.5, if self.charging() { OK } else { MUTED }, Anchor::MA, Some(max_w));
+    /// A cor da linha embaixo do anel: verde na tomada, vermelha com a bateria baixa.
+    fn status_color(&self) -> Rgba {
+        match &self.power {
+            Some(p) if p.plugged => CHARGE_TEXT,
+            Some(p) if p.percent < 15.0 => LOW_TEXT,
+            _ => STATUS,
+        }
     }
 
-    /// Quanto da chegada (ou da saída) de um aparelho já foi: (chegando, 0 a 1).
+    /// O que dizer embaixo do anel do grande: quanto falta para encher ("cheia em 1 h 10") ou
+    /// para acabar.
+    fn under_line(&self) -> String {
+        match self.plug_line() {
+            s if s.is_empty() => self.status_line(),
+            s => s,
+        }
+    }
+
+    /// A linha de baixo do anel, rolando: a do médio (`status_line`) ou a do grande (`under_line`).
+    fn draw_status(&self, c: &mut Canvas, x: f32, y: f32, size: f32, max_w: f32, large: bool) {
+        let (text, (before, t)) = if large { (self.under_line(), self.rolled(|r| &r.under)) } else { (self.status_line(), self.rolled(|r| &r.status)) };
+        draw_rolling(c, x, y, &text, before, t, MEDIUM, size, self.status_color(), Anchor::MA, Some(max_w));
+    }
+
+    /// Quanto tempo desde que um aparelho chegou ou saiu da lista: (chegando, milissegundos).
     fn change_of(&self, name: &str) -> Option<(bool, f32)> {
-        self.changes.iter().find(|c| c.name == name && ms_since(c.since) < DEVICE_MS).map(|c| (c.arriving, ease_out(ms_since(c.since) / DEVICE_MS)))
+        self.changes.iter().find(|c| c.name == name && ms_since(c.since) < DEVICE_MS).map(|c| (c.arriving, ms_since(c.since)))
     }
 
-    /// Uma linha da lista: o ícone, o nome, a barra de carga e a porcentagem, de `x` a `x + w`.
-    fn draw_row(&self, c: &mut Canvas, d: &Device, x: f32, y: f32, w: f32) {
-        let change = self.change_of(&d.name);
-        let (mut alpha, mut fill, mut dx) = (if d.connected { 1.0 } else { 0.45 }, 1.0, 0.0);
+    /// Uma linha da lista: o ícone, o nome, a porcentagem e a barra de carga, de `x` a `x + w`,
+    /// a partir de `top`. `Row::Tile`: o ícone num quadradinho de vidro e a barra embaixo do nome
+    /// e da porcentagem, de ponta a ponta; `Row::Inline`: o ícone solto, e a porcentagem numa
+    /// coluna à direita.
+    fn draw_row(&self, c: &mut Canvas, d: &Device, x: f32, top: f32, w: f32, style: Row) {
+        let change = self.change_of(&d.name).map(|(a, ms)| (a, ease_out(ms / ROW_MS)));
+        let (mut alpha, mut fill, mut dx) = (if d.connected { 1.0 } else { 0.4 }, 1.0, 0.0);
         match change {
             Some((true, t)) => {
                 alpha = t;
@@ -581,7 +765,7 @@ impl Battery {
                 dx = 10.0 * (1.0 - t);
             }
             Some((false, t)) => {
-                alpha = 1.0 - 0.55 * t;
+                alpha = 1.0 - 0.6 * t;
                 fill = 1.0 - t;
             }
             None if !d.connected => fill = 0.0,
@@ -590,146 +774,270 @@ impl Battery {
         let x = x + dx;
         let shows = d.connected || matches!(change, Some((false, _)));
         let level = d.level.filter(|_| shows);
-        c.push_opacity(alpha);
-        c.text(x + 8.0, y + 9.0, glyph(d.kind), Face::Icons, 14.0, FG, Anchor::MM, None);
-        let (nx, vx) = (x + 26.0, x + w);
-        c.text(nx, y, &d.name, TEXT, 11.5, FG, Anchor::LA, Some(vx - 42.0 - nx));
-        let (bx0, bx1, by) = (nx, vx - 42.0, y + 16.0);
-        c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, TRACK);
-        if let Some(l) = level {
-            let frac = l as f32 / 100.0 * fill;
-            if frac > 0.0 {
-                c.fill_round_rect(bx0, by, bx0 + ((bx1 - bx0) * frac).max(4.0), by + 4.0, 2.0, level_color(l as f32));
-            }
-        }
+        let low = d.connected && d.level.is_some_and(|l| l < LOW_AT);
+        let icon_col = if low { LOW } else { ICON };
         let value = match (d.connected, d.level) {
             (true, Some(l)) => format!("{l}%"),
-            _ => "–".into(),
+            _ => "—".into(),
         };
-        let vcol = if d.connected && d.level.is_some_and(|l| l < LOW_AT) { LOW } else { FG };
-        c.text(vx, y + 1.0, &value, TEXT, 11.5, vcol, Anchor::RA, None);
+        c.push_opacity(alpha);
+        // (onde ficam o nome e a barra, e o tamanho do texto)
+        let (nx, name_y, bar_y, size, bar_end) = match style {
+            Row::Tile(t) => {
+                let (radius, icon, stroke) = if t >= 24.0 { (8.0, 15.0, 1.7) } else { (7.0, 13.0, 1.8) };
+                c.fill_round_rect(x, top, x + t, top + t, radius, TILE);
+                c.stroke_round_rect(x, top, x + t, top + t, radius, TILE_LINE, 1.0);
+                vector::icon(c, icon_of(d.kind), x + t / 2.0, top + t / 2.0, icon, icon_col, stroke * 24.0 / icon);
+                let big = t >= 24.0;
+                (x + t + 10.0, top + if big { 1.0 } else { 0.0 }, top + if big { 20.0 } else { 18.0 }, if big { 11.5 } else { 12.0 }, x + w)
+            }
+            Row::Inline => {
+                vector::icon(c, icon_of(d.kind), x + 8.0, top + 7.0, 16.0, icon_col, 1.6);
+                (x + 26.0, top, top + 18.0, 12.0, x + w - 50.0)
+            }
+        };
+        let vw = c.text(x + w, name_y, &value, BOLD, size, if low { LOW } else { FG }, Anchor::RA, None);
+        let name_end = if matches!(style, Row::Tile(_)) { x + w - vw - 8.0 } else { x + w - 50.0 };
+        c.text(nx, name_y, &d.name, TEXT, size, FG, Anchor::LA, Some(name_end - nx));
+        c.fill_round_rect(nx, bar_y, bar_end, bar_y + 3.0, 1.5, TRACK);
+        if let Some(l) = level {
+            let frac = (l as f32).max(3.0) / 100.0 * fill;
+            if frac > 0.0 {
+                c.fill_round_rect(nx, bar_y, nx + ((bar_end - nx) * frac).max(3.0), bar_y + 3.0, 1.5, level_color(l as f32));
+            }
+        }
         c.pop_clip();
     }
 
     /// A lista de aparelhos, uma linha a cada `gap`, até caber `max`.
-    fn draw_rows(&self, c: &mut Canvas, x: f32, y: f32, w: f32, gap: f32, max: usize) {
+    fn draw_rows(&self, c: &mut Canvas, x: f32, y: f32, w: f32, gap: f32, max: usize, style: Row) {
         for (i, d) in self.devices.iter().take(max).enumerate() {
-            self.draw_row(c, d, x, y + i as f32 * gap, w);
+            self.draw_row(c, d, x, y + i as f32 * gap, w, style);
+        }
+    }
+    /// Nenhum aparelho para mostrar: o ícone e duas linhas, centradas em `x`.
+    fn draw_no_devices(&self, c: &mut Canvas, x: f32, y: f32, w: f32) {
+        vector::icon(c, vector::DEVICE, x, y, 20.0, MUTED, 1.6);
+        c.text(x, y + 18.0, "Nenhum dispositivo", BOLD, 12.0, FG, Anchor::MA, Some(w));
+        for (i, line) in c.wrap("Fones, mouses e teclados Bluetooth aparecem aqui", TEXT, 10.5, w, 2).iter().enumerate() {
+            c.text(x, y + 36.0 + 14.0 * i as f32, line, TEXT, 10.5, SUB, Anchor::MA, None);
         }
     }
 
-    /// Nenhum aparelho para mostrar: o ícone e duas linhas, centradas em `x`.
-    fn draw_no_devices(&self, c: &mut Canvas, x: f32, y: f32, w: f32) {
-        c.text(x, y, "\u{e702}", Face::Icons, 18.0, MUTED, Anchor::MM, None);
-        c.text(x, y + 20.0, "Nenhum dispositivo", BOLD, 12.0, FG, Anchor::MA, Some(w));
-        for (i, line) in c.wrap("Fones, mouses e teclados Bluetooth aparecem aqui", TEXT, 10.0, w, 2).iter().enumerate() {
-            c.text(x, y + 37.0 + 13.0 * i as f32, line, TEXT, 10.0, MUTED, Anchor::MA, None);
+    /// Os quatro lugares do pequeno: o notebook primeiro, os aparelhos conectados no lugar onde
+    /// entraram (um que chega ocupa o primeiro lugar vazio; um que sai deixa o lugar vazio, e os
+    /// outros não mudam de lugar) e anéis vazios no resto.
+    fn small_cells(&self) -> Vec<Spot<'_>> {
+        let shows = |d: &Device| d.connected || matches!(self.change_of(&d.name), Some((false, _)));
+        let mut cells: Vec<Spot> = Vec::new();
+        if self.power.is_some() {
+            cells.push(Spot::Laptop);
         }
+        for s in &self.slots {
+            let d = s.as_ref().and_then(|n| self.devices.iter().find(|d| &d.name == n && shows(d)));
+            cells.push(d.map_or(Spot::Empty, Spot::Dev));
+        }
+        for d in self.devices.iter().filter(|d| shows(d) && !self.slots.iter().flatten().any(|n| n == &d.name)) {
+            match cells.iter().position(|c| matches!(c, Spot::Empty)) {
+                Some(i) => cells[i] = Spot::Dev(d),
+                None => cells.push(Spot::Dev(d)),
+            }
+        }
+        cells.truncate(4);
+        cells.resize(4, Spot::Empty);
+        cells
+    }
+
+    /// O centro do anel do lugar `i` (0 a 3) do pequeno.
+    fn cell_center(i: usize) -> (f32, f32) {
+        (CELL_X + (i % 2) as f32 * CELL + CELL / 2.0, CELL_X + (i / 2) as f32 * CELL + 23.0)
     }
 
     fn draw_small(&self, c: &mut Canvas) {
-        let laptop = self.power.is_some();
-        if laptop && self.devices.is_empty() {
-            // só o notebook: o anel grande
-            self.draw_ring(c, RING_P);
-            self.draw_badge(c, RING_P.cx, 45.0, 12.0);
-            self.draw_percent(c, RING_P.cx, 88.0, 38.0, inner_width(RING_P));
-            c.text(RING_P.cx, 95.0, "Notebook", TEXT, 10.5, MUTED, Anchor::MA, None);
-            self.draw_status(c, RING_P.cx, 131.0, SMALL - 28.0);
-            return;
-        }
-        if !laptop && self.devices.is_empty() {
-            self.draw_no_devices(c, SMALL / 2.0, 52.0, SMALL - 24.0);
-            return;
-        }
-        // um círculo para o notebook e um para cada aparelho conectado (os quatro primeiros)
-        // (o arco do notebook anda com a animação; a cor é a da carga de verdade)
-        let mut items: Vec<(Option<&Device>, f32)> = Vec::new();
-        if laptop {
-            items.push((None, self.shown()));
-        }
-        let pc_level = self.power.as_ref().map_or(0.0, |p| p.percent);
-        for d in self.devices.iter().filter(|d| d.connected || matches!(self.change_of(&d.name), Some((false, _)))) {
-            items.push((Some(d), d.level.map_or(0.0, |l| l as f32)));
-        }
-        for (i, (dev, v)) in items.into_iter().take(4).enumerate() {
-            let (x, y) = (14.0 + (i % 2) as f32 * 63.0, 14.0 + (i / 2) as f32 * 64.0);
-            let (cx, cy) = (x + 31.5, y + 22.0);
-            let (pop_scale, alpha) = match dev.and_then(|d| self.change_of(&d.name)) {
-                Some((true, t)) => (pop(t), t),
-                Some((false, t)) => (1.0, 1.0 - 0.55 * t),
-                None => (1.0, 1.0),
-            };
-            let r = 18.5 * pop_scale;
-            c.push_opacity(alpha);
-            c.arc(cx, cy, r, -90.0, 270.0, TRACK, 4.5);
-            let known = dev.map_or(true, |d| d.level.is_some());
-            if known && v > 0.05 {
-                let color = level_color(if dev.is_none() { pc_level } else { v });
-                c.arc(cx, cy, r, -90.0, -90.0 + 360.0 * v / 100.0, color, 4.5);
+        for (i, cell) in self.small_cells().into_iter().enumerate() {
+            let (cx, cy) = Battery::cell_center(i);
+            let label_y = cy + 23.0;
+            match cell {
+                Spot::Empty => c.arc(cx, cy, MINI_R, START, START + SWEEP, EMPTY_TRACK, MINI_W),
+                Spot::Laptop => {
+                    let p = self.power.as_ref().map_or(0.0, |p| p.percent);
+                    let low = p < LOW_AT as f32;
+                    c.arc(cx, cy, MINI_R, START, START + SWEEP, MINI_TRACK, MINI_W);
+                    let v = self.shown();
+                    if v > 0.05 {
+                        c.arc(cx, cy, MINI_R, START, START + SWEEP * v / 100.0, level_color(p), MINI_W);
+                    }
+                    match self.badge() {
+                        Some((d, scale, alpha)) => vector::icon(c, d, cx, cy, 16.0 * scale, OK.alpha(alpha), if d == vector::CHECK { 2.6 } else { 0.0 }),
+                        None => vector::icon(c, vector::LAPTOP, cx, cy, 16.0, if low { LOW } else { MINI_ICON }, 2.4),
+                    }
+                    // a do notebook rola como a porcentagem grande
+                    let (before, t) = self.rolled(|r| &r.percent);
+                    let before = before.map(|b| format!("{b}%"));
+                    draw_rolling(c, cx, label_y, &format!("{}%", p.round() as i32), before.as_deref(), t, BOLD, 11.5, if low { LOW } else { FG }, Anchor::MA, None);
+                }
+                Spot::Dev(d) => self.draw_cell(c, d, cx, cy, label_y),
             }
-            let (icon, col) = match dev {
-                Some(d) => (glyph(d.kind), FG),
-                None if self.showing_check() => ("\u{e73e}", OK),
-                None if self.charging() => ("\u{e945}", OK),
-                None => ("\u{e7f8}", FG),
-            };
-            c.text(cx, cy, icon, Face::Icons, 14.0, col, Anchor::MM, None);
-            let label = match dev {
-                None => format!("{}%", self.power.as_ref().map_or(0, |p| p.percent.round() as i32)),
-                Some(d) => d.level.map_or("–".into(), |l| format!("{l}%")),
-            };
-            let low = (if dev.is_none() { pc_level } else { v }) < LOW_AT as f32 && known;
-            // a do notebook rola como a porcentagem grande
-            let (before, t) = if dev.is_none() { self.rolled(|r| &r.percent) } else { (None, 1.0) };
-            let before = before.map(|b| format!("{b}%"));
-            draw_rolling(c, cx, y + 49.0, &label, before.as_deref(), t, TEXT, 11.0, if low { LOW } else { FG }, Anchor::MA, None);
-            c.pop_clip();
         }
+    }
+
+    /// O anel de um aparelho no pequeno, com a chegada (o ícone entra com um "pop", uma onda sai
+    /// do anel, o arco enche do zero e o número sobe) ou a saída (o caminho de volta, até sobrar o
+    /// anel vazio).
+    fn draw_cell(&self, c: &mut Canvas, d: &Device, cx: f32, cy: f32, label_y: f32) {
+        let v = d.level.map_or(0.0, |l| l as f32);
+        let color = level_color(v);
+        let low = d.level.is_some_and(|l| l < LOW_AT);
+        // (o ícone: escala e opacidade; o arco: quanto da carga; o número: opacidade e deslocamento)
+        let (mut icon_k, mut icon_a, mut arc, mut num_a, mut num_dy) = (1.0, 1.0, 1.0, 1.0, 0.0);
+        match self.change_of(&d.name) {
+            Some((true, ms)) => {
+                (icon_k, icon_a) = connect_icon(ms);
+                arc = ease_out((ms - 140.0) / 760.0);
+                let u = ease_out((ms - 300.0) / 600.0);
+                (num_a, num_dy) = (u, 4.0 * (1.0 - u));
+                if ms < RIPPLE_CELL_MS {
+                    let t = ease_out(ms / RIPPLE_CELL_MS);
+                    c.stroke_circle(cx, cy, MINI_R * (1.0 + 0.5 * t), color.alpha(0.45 * (1.0 - t)), 2.0 * (1.0 + 0.5 * t));
+                }
+            }
+            Some((false, ms)) => {
+                let u = (ms / 160.0).clamp(0.0, 1.0);
+                (num_a, num_dy) = (1.0 - u, 2.0 * u);
+                arc = 1.0 - ease_in_out((ms / 320.0).clamp(0.0, 1.0));
+                let k = (ms / 240.0).clamp(0.0, 1.0);
+                (icon_k, icon_a) = (1.0 - 0.3 * k, 1.0 - k);
+            }
+            None => {}
+        }
+        c.arc(cx, cy, MINI_R, START, START + SWEEP, MINI_TRACK, MINI_W);
+        if d.level.is_some() && v * arc > 0.05 {
+            c.arc(cx, cy, MINI_R, START, START + SWEEP * v * arc / 100.0, color, MINI_W);
+        }
+        if icon_a > 0.01 {
+            vector::icon(c, icon_of(d.kind), cx, cy, 16.0 * icon_k, fade(if low { LOW } else { MINI_ICON }, icon_a), 2.4);
+        }
+        if num_a > 0.01 {
+            let label = d.level.map_or("—".into(), |l| format!("{l}%"));
+            c.text(cx, label_y + num_dy, &label, BOLD, 11.5, fade(if low { LOW } else { FG }, num_a), Anchor::MA, None);
+        }
+    }
+
+    /// O fundo, o contorno e a cor do texto das pílulas do estado: cinza na bateria, verde na
+    /// tomada e vermelha com a bateria baixa (`chip`: a do título do grande, um pouco mais clara).
+    fn tint(&self, chip: bool) -> (Rgba, Rgba, Rgba) {
+        match &self.power {
+            Some(p) if p.plugged => (OK.alpha(0.14), OK.alpha(0.22), CHARGE_TEXT),
+            Some(p) if p.percent < 15.0 => (LOW.alpha(0.14), LOW.alpha(0.24), LOW_TEXT),
+            _ => (Rgba(255, 255, 255, 18), Rgba(255, 255, 255, 15), if chip { Rgba(255, 255, 255, 209) } else { STATUS }),
+        }
+    }
+
+    /// O estado, na pílula do título do grande.
+    fn chip_text(&self) -> &'static str {
+        match &self.power {
+            Some(p) if p.charging => "Carregando",
+            Some(p) if p.plugged && p.percent >= 99.0 => "Carga completa",
+            Some(p) if p.plugged => "Na tomada",
+            Some(p) if p.percent < 15.0 => "Bateria baixa",
+            _ => "Na bateria",
+        }
+    }
+
+    /// A linha embaixo do título do grande: "acaba às 17:40", "cheia às 18:10" (sem bateria, o
+    /// que está conectado).
+    fn top_line(&self) -> String {
+        let Some(p) = &self.power else { return self.header_line() };
+        if !p.plugged {
+            return self.secs_left().map_or("na bateria".into(), |s| format!("acaba às {}", win::clock_at(self.now() + s)));
+        }
+        match (p.charging, p.secs_to_full) {
+            (true, Some(s)) => format!("cheia às {}", win::clock_at(self.now() + s as f64)),
+            (true, None) => "carregando".into(),
+            _ if p.percent >= 99.0 => "na tomada".into(),
+            _ => "sem carregar".into(),
+        }
+    }
+
+    /// Uma pílula de altura `h` centrada em `cx` (ou terminando em `right`), com o texto (e, se
+    /// houver, o raio na frente): devolve a largura.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pill(&self, c: &mut Canvas, cx: Option<f32>, right: f32, cy: f32, h: f32, text: &str, before: Option<&str>, t: f32, chip: bool) -> f32 {
+        let (bg, line, col) = self.tint(chip);
+        let size = 11.0;
+        let pad = if chip { 9.0 } else { 10.0 };
+        let badge = if chip { None } else { self.badge() };
+        // (no título, um pontinho na cor da carga na frente)
+        let lead = if chip || badge.is_some() { if chip { 12.0 } else { 15.0 } } else { 0.0 };
+        let w = pad * 2.0 + lead + c.text_width(text, MEDIUM, size);
+        let x0 = cx.map_or(right - w, |cx| cx - w / 2.0);
+        c.fill_round_rect(x0, cy - h / 2.0, x0 + w, cy + h / 2.0, h / 2.0, bg);
+        c.stroke_round_rect(x0, cy - h / 2.0, x0 + w, cy + h / 2.0, h / 2.0, line, 1.0);
+        if chip {
+            c.fill_circle(x0 + pad + 3.0, cy, 3.0, level_color(self.power.as_ref().map_or(100.0, |p| p.percent)));
+        } else if let Some((d, scale, alpha)) = badge {
+            let stroke = if d == vector::CHECK { 3.0 } else { 0.0 };
+            vector::icon(c, d, x0 + pad + 5.0, cy, 10.0 * scale, fade(CHARGE_TEXT, alpha), stroke);
+        }
+        draw_rolling(c, x0 + pad + lead, cy, text, before, t, MEDIUM, size, col, Anchor::LM, None);
+        w
     }
 
     fn draw_medium(&self, c: &mut Canvas) {
         if self.power.is_none() {
             // um PC de mesa: só os aparelhos
-            c.text(PAD, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
-            c.text(PAD, 33.0, &self.header_line(), TEXT, 10.5, MUTED, Anchor::LA, None);
+            c.text(M, 16.0, "Dispositivos", BOLD, 12.5, FG, Anchor::LA, None);
+            let n = self.devices.iter().filter(|d| d.connected).count();
+            let count = match n {
+                0 => String::new(),
+                1 => "1 conectado".into(),
+                n => format!("{n} conectados"),
+            };
+            c.text(WIDE - M, 17.5, &count, TEXT, 10.5, SUB, Anchor::RA, None);
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 82.0, WIDE - 2.0 * PAD);
+                self.draw_no_devices(c, WIDE / 2.0, 66.0, WIDE - 2.0 * M);
             } else {
-                self.draw_rows(c, PAD, 56.0, WIDE - 2.0 * PAD, 23.0, 4);
+                self.draw_rows(c, M, 44.0, WIDE - 2.0 * M, 25.0, 4, Row::Inline);
             }
             return;
         }
+        // o anel só com o número; o tempo numa pílula embaixo (com o raio, carregando)
         self.draw_ring(c, RING_M);
-        self.draw_badge(c, RING_M.cx, 41.0, 11.0);
-        self.draw_percent(c, RING_M.cx, 72.0, 30.0, inner_width(RING_M));
-        c.text(RING_M.cx, 78.0, "Notebook", TEXT, 10.5, MUTED, Anchor::MA, None);
-        self.draw_status(c, RING_M.cx, 128.0, 130.0);
+        self.draw_percent(c, RING_M.cx, RING_M.cy, 31.0, inner_width(RING_M));
+        let (before, t) = self.rolled(|r| &r.status);
+        self.draw_pill(c, Some(RING_M.cx), 0.0, 122.0, 24.0, &self.status_line(), before, t, false);
+        c.fill_round_rect(134.0, 22.0, 135.0, 132.0, 0.0, RULE);
         if self.devices.is_empty() {
-            self.draw_no_devices(c, 226.0, 56.0, 150.0);
+            self.draw_no_devices(c, 225.0, 44.0, 150.0);
         } else {
-            self.draw_rows(c, 146.0, 22.0, WIDE - PAD - 146.0, 29.0, 4);
+            self.draw_rows(c, 148.0, 15.0, WIDE - M - 148.0, 32.0, 4, Row::Tile(26.0));
         }
     }
 
     fn draw_large(&self, c: &mut Canvas) {
-        c.text(PAD, 20.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 14.0, FG, Anchor::LA, None);
+        c.text(M, 18.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 15.0, FG, Anchor::LA, None);
         let (before, t) = self.rolled(|r| &r.header);
-        draw_rolling(c, PAD, 41.0, &self.header_line(), before, t, TEXT, 10.5, MUTED, Anchor::LA, Some(WIDE - 2.0 * PAD));
         let Some(p) = self.power.clone() else {
+            draw_rolling(c, M, 40.0, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * M));
             if self.devices.is_empty() {
-                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 2.0 * PAD);
+                self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 2.0 * M);
             } else {
-                self.draw_rows(c, PAD, 70.0, WIDE - 2.0 * PAD, 26.0, 14);
+                self.draw_rows(c, M, 70.0, WIDE - 2.0 * M, 26.0, 14, Row::Tile(22.0));
             }
             return;
         };
+        // o estado numa pílula à direita do título; embaixo, quando acaba ou enche
+        let chip_w = self.draw_pill(c, None, WIDE - M, 27.0, 22.0, self.chip_text(), None, 1.0, true);
+        draw_rolling(c, M, 40.0, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * M - chip_w));
+        // o anel: o número no centro e o ícone na abertura de baixo
         self.draw_ring(c, RING_G);
-        self.draw_badge(c, RING_G.cx, 99.0, 14.0);
-        self.draw_percent(c, RING_G.cx, 143.0, 40.0, inner_width(RING_G));
-        let under = if p.plugged { "na tomada".to_string() } else { self.status_line() };
-        let (before, t) = self.rolled(|r| &r.status);
-        draw_rolling(c, RING_G.cx, 186.0, &under, before, t, TEXT, 10.5, MUTED, Anchor::MA, Some(160.0));
+        self.draw_percent(c, RING_G.cx, 124.0, 42.0, inner_width(RING_G));
+        let (ox, oy) = g_opening(RING_G);
+        match self.badge() {
+            Some((d, scale, alpha)) => vector::icon(c, d, ox, oy, 16.0 * scale, OK.alpha(alpha), if d == vector::CHECK { 2.6 } else { 0.0 }),
+            None => vector::icon(c, vector::LAPTOP, ox, oy, 16.0, if p.percent < 15.0 { LOW_TEXT } else { Rgba(255, 255, 255, 204) }, 2.4),
+        }
+        self.draw_status(c, RING_G.cx, 176.0, 11.5, 140.0, true);
         // ao lado do anel: saúde, ciclos e o dia
         let (today, longest) = self.day_stats();
         let stats = [
@@ -738,33 +1046,39 @@ impl Battery {
             ("Na tomada hoje", today.map_or("—".into(), duration)),
             ("Maior tempo fora", longest.map_or("—".into(), duration)),
         ];
-        let (sx0, sx1) = (170.0, WIDE - PAD);
+        let (sx0, sx1) = (160.0, WIDE - M);
         for (i, (k, v)) in stats.iter().enumerate() {
-            let y = 92.0 + i as f32 * 25.0;
-            c.text(sx0, y, k, TEXT, 10.5, MUTED, Anchor::LA, None);
-            c.text(sx1, y, v, TEXT, 11.0, FG, Anchor::RA, None);
-            c.fill_round_rect(sx0, y + 18.0, sx1, y + 19.0, 0.0, LINE);
+            let top = 68.0 + i as f32 * 30.0;
+            c.text(sx0, top + 15.0, k, TEXT, 11.5, SUB, Anchor::LM, None);
+            c.text(sx1, top + 15.0, v, BOLD, 13.0, FG, Anchor::RM, None);
+            if i < 3 {
+                c.fill_round_rect(sx0, top + 29.0, sx1, top + 30.0, 0.0, RULE);
+            }
         }
-        c.fill_round_rect(PAD, 212.0, WIDE - PAD, 213.0, 0.0, LINE);
-        c.text(PAD, 224.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LA, None);
-        c.text(WIDE - PAD, 226.0, "verde: na tomada", TEXT, 10.0, MUTED, Anchor::RA, None);
-        self.draw_chart(c, PAD, 246.0, WIDE - PAD, 300.0);
-        c.fill_round_rect(PAD, 328.0, WIDE - PAD, 329.0, 0.0, LINE);
+        // o gráfico num painel de vidro mais claro
+        c.fill_round_rect(10.0, 204.0, WIDE - 10.0, 316.0, 18.0, PANEL);
+        c.stroke_round_rect(10.0, 204.0, WIDE - 10.0, 316.0, 18.0, PANEL_LINE, 1.0);
+        c.text(20.0, 222.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LM, None);
+        let lw = c.text(WIDE - 20.0, 222.0, "na tomada", TEXT, 10.5, LEGEND, Anchor::RM, None);
+        let lx = WIDE - 20.0 - lw - 6.0 - 9.0;
+        c.fill_round_rect(lx, 217.5, lx + 9.0, 226.5, 3.0, OK.alpha(0.30));
+        c.stroke_round_rect(lx, 217.5, lx + 9.0, 226.5, 3.0, OK.alpha(0.55), 1.0);
+        self.draw_chart(c, 20.0, 238.0, WIDE - 20.0, 286.0);
         if self.devices.is_empty() {
-            self.draw_no_devices(c, WIDE / 2.0, 360.0, WIDE - 2.0 * PAD);
+            self.draw_no_devices(c, WIDE / 2.0, 352.0, WIDE - 2.0 * M);
         } else {
-            self.draw_rows(c, PAD, 342.0, WIDE - 2.0 * PAD, 25.0, 4);
+            self.draw_rows(c, M, 330.0, WIDE - 2.0 * M, 26.0, 4, Row::Tile(22.0));
         }
     }
 
-    /// O gráfico das últimas 24 horas: a carga em linha, com a área embaixo, as faixas em que
-    /// esteve na tomada e o ponto de agora; ao abrir, a linha se desenha da esquerda para a
+    /// O gráfico das últimas 24 horas: a carga numa curva suave, com a área embaixo, as faixas em
+    /// que esteve na tomada e o ponto de agora; ao abrir, a linha se desenha da esquerda para a
     /// direita.
     fn draw_chart(&self, c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32) {
         let now = self.now();
         let (w, h) = (x1 - x0, y1 - y0);
-        for g in [0.0, 0.5, 1.0] {
-            c.fill_round_rect(x0, y1 - h * g, x1, y1 - h * g + 1.0, 0.0, Rgba(255, 255, 255, 16));
+        for y in [y0, (y0 + y1) / 2.0 - 0.5, y1 - 1.0] {
+            c.fill_round_rect(x0, y, x1, y + 1.0, 0.0, GRID);
         }
         let t = win::local_time();
         let hour_now = t.hour as f64 + t.minute as f64 / 60.0;
@@ -775,16 +1089,17 @@ impl Battery {
                 4 => Anchor::RA,
                 _ => Anchor::MA,
             };
-            c.text(x0 + w * k as f32 / 4.0, y1 + 6.0, &label, TEXT, 9.0, FAINT_TEXT, anchor, None);
+            c.text(x0 + w * k as f32 / 4.0, y1 + 6.0, &label, TEXT, 9.5, FAINT_TEXT, anchor, None);
         }
+        // (3 pt de folga em cima e embaixo: o ponto de 100% não encosta na borda)
         let pts: Vec<(f32, f32, bool)> = self
             .hist
             .iter()
             .filter(|s| s.0 >= now - DAY)
-            .map(|s| (x0 + w * (1.0 - ((now - s.0) / DAY) as f32), y1 - h * s.1.clamp(0.0, 100.0) / 100.0, s.2))
+            .map(|s| (x0 + w * (1.0 - ((now - s.0) / DAY) as f32), y0 + 3.0 + (h - 6.0) * (1.0 - s.1.clamp(0.0, 100.0) / 100.0), s.2))
             .collect();
         if pts.len() < 2 {
-            c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, "O gráfico enche com o uso, de 5 em 5 minutos", TEXT, 10.0, MUTED, Anchor::MM, Some(w));
+            c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, "O gráfico enche com o uso, de 5 em 5 minutos", TEXT, 10.5, SUB, Anchor::MM, Some(w));
             return;
         }
         // as faixas na tomada
@@ -795,43 +1110,44 @@ impl Battery {
                 while i < pts.len() && pts[i].2 {
                     i += 1;
                 }
-                let end = pts.get(i).map_or(pts[pts.len() - 1].0, |p| p.0);
-                c.fill_round_rect(start, y0, end.max(start + 2.0), y1, 3.0, OK.alpha(0.10));
+                let end = pts.get(i).map_or(pts[pts.len() - 1].0, |p| p.0).max(start + 2.0);
+                c.fill_round_rect(start, y0, end, y1, 5.0f32.min((end - start) / 2.0), OK.alpha(0.11));
             }
             i += 1;
         }
         // a linha se desenhando (ao abrir o grande)
+        let smooth = catmull_rom(&pts.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>());
         let reveal = self.reveal.get().map_or(1.0, |t| ease_in_out((ms_since(t) / REVEAL_MS).min(1.0)));
-        let cut = x0 + (pts[pts.len() - 1].0 - x0) * reveal;
+        let last = smooth[smooth.len() - 1];
+        let cut = x0 + (last.0 - x0) * reveal;
         let mut line: Vec<(f32, f32)> = Vec::new();
-        for win in pts.windows(2) {
+        for win in smooth.windows(2) {
             let (a, b) = (win[0], win[1]);
             if a.0 > cut {
                 break;
             }
-            line.push((a.0, a.1));
+            line.push(a);
             if b.0 > cut {
                 let k = (cut - a.0) / (b.0 - a.0).max(0.001);
                 line.push((cut, a.1 + (b.1 - a.1) * k));
             }
         }
         if reveal >= 1.0 {
-            let last = pts[pts.len() - 1];
-            line.push((last.0, last.1));
+            line.push(last);
         }
         if line.len() >= 2 {
             let area_alpha = ((reveal - 0.35) / 0.65).clamp(0.0, 1.0);
             let mut area = line.clone();
             area.push((line[line.len() - 1].0, y1));
             area.push((line[0].0, y1));
-            c.polygon_with(&area, Fill::VGrad(y0, y1, OK.alpha(0.35 * area_alpha), OK.alpha(0.0)));
-            c.line(&line, OK, 1.6);
+            c.polygon_with(&area, Fill::VGrad(y0, y1, OK.alpha(0.30 * area_alpha), OK.alpha(0.0)));
+            c.line(&line, OK, 1.8);
         }
         if reveal >= 0.85 {
             let a = ((reveal - 0.85) / 0.15).min(1.0);
-            let (nx, ny, _) = pts[pts.len() - 1];
-            c.fill_circle(nx, ny, 4.5, OK.alpha(0.25 * a));
-            c.fill_circle(nx, ny, 2.2, FG.alpha(a));
+            let col = level_color(self.power.as_ref().map_or(100.0, |p| p.percent));
+            c.fill_circle(last.0, last.1, 5.5, col.alpha(0.30 * a));
+            c.fill_circle(last.0, last.1, 2.6, WHITE.alpha(a));
         }
     }
 
@@ -855,7 +1171,6 @@ impl Battery {
     fn ring_of(&self, mode: Mode) -> Option<Ring> {
         self.power.as_ref()?;
         match mode {
-            Mode::P if self.devices.is_empty() => Some(RING_P),
             Mode::P => None,
             Mode::M => Some(RING_M),
             Mode::G => Some(RING_G),
@@ -894,9 +1209,10 @@ impl Battery {
         new
     }
 
-    /// Os textos de agora: a porcentagem, a linha de baixo do anel e a de cima.
-    fn current_texts(&self) -> (String, String, String) {
-        (self.percent_text(), self.status_line(), self.header_line())
+    /// Os textos de agora: a porcentagem, a linha de baixo do anel, a de cima e a de baixo do
+    /// anel do grande.
+    fn current_texts(&self) -> Texts {
+        (self.percent_text(), self.status_line(), self.top_line(), self.under_line())
     }
 
     /// Uma leitura nova da bateria do notebook: as animações de cada mudança. Devolve true se
@@ -935,6 +1251,11 @@ impl Battery {
             if o.plugged && !n.plugged {
                 self.charge_since = Instant::now();
             }
+            if o.plugged != n.plugged {
+                // na ilha por alguns segundos: "Carregando · 64%" ou "Na bateria · 64%"
+                self.plug_event = Some((n.plugged, Instant::now()));
+                self.plug_count += 1;
+            }
         }
         let had = old.is_some();
         self.power = new;
@@ -947,9 +1268,9 @@ impl Battery {
         // a porcentagem ou as linhas de tempo mudaram: os dígitos rolam desde o que estava escrito
         let now = self.current_texts();
         let changed = now != before;
-        let (percent, status, header) = before;
+        let (percent, status, header, under) = before;
         if had && changed {
-            self.roll = Some(Rolled { percent, status, header, at: Instant::now() });
+            self.roll = Some(Rolled { percent, status, header, under, at: Instant::now() });
         }
         self.texts = Some(now);
         changed || !looks_same
@@ -983,6 +1304,26 @@ impl Battery {
         }
         self.changes = changes;
         self.devices = list;
+        // os lugares do pequeno ficam como estão (quem chegou, no primeiro vazio)
+        let mut slots: Vec<Option<String>> = self
+            .small_cells()
+            .into_iter()
+            .filter(|c| !matches!(c, Spot::Laptop))
+            .map(|c| match c {
+                Spot::Dev(d) => Some(d.name.clone()),
+                _ => None,
+            })
+            .collect();
+        // (um lugar vazio guarda o nome de quem estava lá, para ele voltar ao mesmo lugar)
+        for (i, s) in slots.iter_mut().enumerate() {
+            if s.is_none() {
+                *s = self.slots.get(i).cloned().flatten();
+            }
+        }
+        while slots.last().is_some_and(|s| s.as_ref().is_none_or(|n| !self.devices.iter().any(|d| &d.name == n && d.connected))) {
+            slots.pop();
+        }
+        self.slots = slots;
         true
     }
 
@@ -1014,7 +1355,7 @@ fn fit_size(c: &Canvas, text: &str, size: f32, max_w: f32) -> f32 {
     // (a largura do texto não diminui na mesma proporção da fonte: algumas rodadas até caber)
     let mut s = size;
     for _ in 0..6 {
-        let w = c.text_width(text, NUM, s) + 1.0 + c.text_width("%", NUM, s * 0.42);
+        let w = c.text_width(text, NUM, s) + 1.5 + c.text_width("%", NUM, s * PCT);
         if w <= max_w {
             break;
         }
@@ -1026,19 +1367,23 @@ fn fit_size(c: &Canvas, text: &str, size: f32, max_w: f32) -> f32 {
 /// O tom apagado dos rótulos do gráfico.
 const FAINT_TEXT: Rgba = Rgba(255, 255, 255, 115);
 
-/// O ícone de cada tipo de aparelho (Segoe Fluent Icons).
-fn glyph(kind: DevKind) -> &'static str {
+/// O ícone de cada tipo de aparelho.
+fn icon_of(kind: DevKind) -> &'static str {
     match kind {
-        DevKind::Headphones => "\u{e7f6}",
-        DevKind::Speaker => "\u{e7f5}",
-        DevKind::Mouse => "\u{e962}",
-        DevKind::Keyboard => "\u{e765}",
-        DevKind::Gamepad => "\u{e7fc}",
-        DevKind::Phone => "\u{e8ea}",
-        DevKind::Pen => "\u{edc6}",
-        DevKind::Other => "\u{e702}",
+        DevKind::Headphones => vector::HEADPHONES,
+        DevKind::Speaker => vector::SPEAKER,
+        DevKind::Mouse => vector::MOUSE,
+        DevKind::Keyboard => vector::KEYBOARD,
+        DevKind::Gamepad => vector::GAMEPAD,
+        DevKind::Phone => vector::PHONE,
+        DevKind::Pen => vector::PEN,
+        DevKind::Other => vector::DEVICE,
     }
 }
+
+/// Os textos que rolam: a porcentagem, a linha de baixo do anel, a de cima e a de baixo do anel
+/// do grande.
+type Texts = (String, String, String, String);
 
 /// "3 h 20", "45 min".
 fn duration(secs: f64) -> String {
@@ -1068,6 +1413,26 @@ fn sample_history(now: f64, end: f32) -> Vec<(f64, f32, bool)> {
 }
 
 impl Kind for Battery {
+    /// Na ilha quando o notebook (fora da tomada) ou um aparelho conectado fica abaixo de 20%.
+    fn island_item(&self, _env: &Env) -> Option<IslandItem> {
+        if let Some(low) = self.island_low() {
+            let mut item = IslandItem::alert(level_color(low.level), alert_hash(&low.key()));
+            item.urgent = low.level < ISLAND_URGENT;
+            return Some(item);
+        }
+        let plugged = self.plug_shown()?;
+        let col = if plugged { OK } else { level_color(self.power.as_ref()?.percent) };
+        Some(IslandItem::alert(col, alert_hash(&format!("tomada|{}", self.plug_count))))
+    }
+
+    fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
+        self.draw_island(c, form, r, hot);
+    }
+
+    fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
+        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    }
+
     fn key(&self) -> &'static str {
         "bateria"
     }
@@ -1122,21 +1487,31 @@ impl Kind for Battery {
                 return Some(OPEN_POWER);
             }
         }
+        if mode == Mode::P {
+            // o anel do notebook abre a energia; os outros (e os vazios), o Bluetooth
+            let col = ((x - CELL_X) / CELL).floor().clamp(0.0, 1.0) as usize;
+            let row = ((y - CELL_X) / CELL).floor().clamp(0.0, 1.0) as usize;
+            return Some(if self.power.is_some() && col + row == 0 { OPEN_POWER } else { OPEN_BLUETOOTH });
+        }
         if self.devices.is_empty() {
             return None;
         }
         let in_list = match (mode, self.power.is_some()) {
-            (Mode::P, _) => true,
-            (Mode::M, true) => x >= 140.0,
-            (Mode::M, false) => y >= 50.0,
-            (Mode::G, true) => y >= 334.0,
-            (Mode::G, false) => y >= 64.0,
+            (Mode::M, true) => x >= 130.0,
+            (Mode::M, false) => y >= 40.0,
+            (Mode::G, true) => y >= 322.0,
+            _ => y >= 64.0,
         };
         in_list.then_some(OPEN_BLUETOOTH)
     }
 
     fn hot_rect(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<Hot> {
         match self.hit(x, y, mode, env)? {
+            OPEN_POWER if mode == Mode::P => {
+                let (cx, cy) = Battery::cell_center(0);
+                let r = MINI_R + MINI_W + 2.0;
+                Some((cx - r, cy - r, cx + r, cy + r, r))
+            }
             OPEN_POWER => {
                 let g = self.ring_of(mode)?;
                 let r = g.r + g.w;
@@ -1154,6 +1529,10 @@ impl Kind for Battery {
         match action {
             OPEN_POWER => ctx.open("ms-settings:batterysaver"),
             OPEN_BLUETOOTH => ctx.open("ms-settings:bluetooth"),
+            DISMISS => match self.island_low() {
+                Some(low) => self.island_ok.push(low.key()),
+                None => self.plug_event = None,
+            },
             _ => {}
         }
     }
@@ -1171,7 +1550,7 @@ impl Kind for Battery {
         if self.fixed_now.is_some() {
             return self.animating().then(|| Instant::now() + FRAME);
         }
-        let mut next = self.next_power.min(self.next_devices);
+        let mut next = self.next_power;
         if self.animating() || self.was_animating {
             next = next.min(Instant::now() + FRAME);
         }
@@ -1179,13 +1558,18 @@ impl Kind for Battery {
             // o começo e o fim de cada brilho (para ligar e desligar os quadros da camada)
             next = next.min(Instant::now() + Duration::from_millis(100));
         }
-        if self.reading.is_some() {
-            next = next.min(Instant::now() + Duration::from_millis(250));
+        if self.power.is_some() || self.feed.is_some() {
+            next = next.min(self.next_check);
+        }
+        // o aviso da tomada sai da ilha na hora certa
+        if let Some((_, at)) = self.plug_event.filter(|e| e.1.elapsed() < PLUG_SHOW) {
+            next = next.min(at + PLUG_SHOW);
         }
         Some(next)
     }
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
+        self.prune_island_ok();
         // durante uma animação, um quadro por tick; e mais um depois que ela acaba: o último
         // desenhado podia ser do meio do caminho (com o tick atrasado, comum na bateria) e ficar
         // na tela, com o arco ou os dígitos pela metade, até o mouse passar e redesenhar
@@ -1194,25 +1578,45 @@ impl Kind for Battery {
         self.was_animating = animating;
         if self.fixed_now.is_none() {
             let now = Instant::now();
+            // entrou ou saiu da tomada: lê tudo já (sem esperar a leitura de 5 em 5 s), para a
+            // ilha e a onda do anel aparecerem na hora
+            if now >= self.next_check {
+                self.next_check = now + CHECK_EVERY;
+                if let (Some(p), Some(ac)) = (&self.power, battery::on_ac()) {
+                    if p.plugged != ac {
+                        self.next_power = now;
+                    }
+                }
+            }
+            if self.plug_event.is_some_and(|e| e.1.elapsed() >= PLUG_SHOW) {
+                self.plug_event = None;
+            }
             if now >= self.next_power {
                 self.next_power = now + POWER_EVERY;
                 let reading = self.steady(battery::power());
                 redraw |= self.apply_power(reading);
                 self.sample_now(ctx);
             }
-            if now >= self.next_devices && self.reading.is_none() {
-                self.next_devices = now + DEVICES_EVERY;
-                self.read_devices();
-            }
-            if let Some(rx) = &self.reading {
-                match rx.try_recv() {
-                    Ok(list) => {
-                        self.reading = None;
-                        redraw |= self.apply_devices(list, ctx);
+            // as listas novas de dispositivos (fica a última, se chegaram várias)
+            let mut latest = None;
+            let mut gone = false;
+            if let Some(rx) = &self.feed {
+                loop {
+                    match rx.try_recv() {
+                        Ok(list) => latest = Some(list),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            gone = true;
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
                     }
-                    Err(mpsc::TryRecvError::Disconnected) => self.reading = None,
-                    Err(mpsc::TryRecvError::Empty) => {}
                 }
+            }
+            if gone {
+                self.feed = None;
+            }
+            if let Some(list) = latest {
+                redraw |= self.apply_devices(list, ctx);
             }
         }
         // o brilho começou ou acabou: redesenha para a camada ganhar (ou perder) os quadros
@@ -1232,6 +1636,32 @@ impl Kind for Battery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Entrar ou sair da tomada põe a carga na ilha por alguns segundos, cada vez como um aviso
+    /// novo; um aparelho com pouca bateria passa na frente.
+    #[test]
+    fn plugging_shows_on_the_island_for_a_while() {
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let mut b = Battery::sample_alone();
+        b.power = Some(Power { percent: 64.0, plugged: false, ..Default::default() });
+        assert!(b.island_item(&env).is_none(), "parado na bateria: nada na ilha");
+        b.apply_power(Some(Power { percent: 64.0, plugged: true, charging: true, secs_to_full: Some(70 * 60), ..Default::default() }));
+        let first = b.island_item(&env).expect("entrou na tomada");
+        assert!(first.alert && !first.urgent);
+        assert_eq!(b.plug_line(), "cheia em 1 h 10");
+        b.apply_power(Some(Power { percent: 64.0, plugged: false, ..Default::default() }));
+        let second = b.island_item(&env).expect("saiu da tomada");
+        assert_ne!(first.alert_id, second.alert_id, "cada vez é um aviso novo");
+        assert_eq!(b.plug_shown(), Some(false));
+        // passou o tempo: sai da ilha
+        b.plug_event = Some((false, Instant::now() - PLUG_SHOW));
+        assert!(b.island_item(&env).is_none());
+        // um aparelho quase sem bateria vem antes do carregador
+        let mut low = Battery::sample();
+        low.plug_event = Some((true, Instant::now()));
+        assert_eq!(low.island_item(&env).map(|i| i.alert_id), low.island_low().map(|l| alert_hash(&l.key())));
+    }
 
     fn com() {
         unsafe {
@@ -1418,7 +1848,7 @@ mod tests {
         let env_cfg = json!({"bateria": {}, "app": {}});
         let env = Env { cfg: &env_cfg, key: "bateria" };
         let mut b = Battery::sample();
-        b.roll = Some(Rolled { percent: "73".into(), status: "2 h 59 restantes".into(), header: b.header_line(), at: Instant::now() - Duration::from_millis(300) });
+        b.roll = Some(Rolled { percent: "73".into(), status: "2 h 59 restantes".into(), header: b.header_line(), under: "2 h 59 restantes".into(), at: Instant::now() - Duration::from_millis(300) });
         let mut p = b.power.clone().unwrap();
         p.secs_left = Some(3 * 3600);
         b.power = Some(p);
@@ -1429,34 +1859,50 @@ mod tests {
         }
     }
 
-    /// Os anéis do médio e do grande, com 9%, 73% e 100%, num PNG (para conferir de olho).
+    /// Todos os estados nos três tamanhos e o aparelho chegando e saindo no pequeno, quadro a
+    /// quadro, num PNG (para conferir de olho com o mockup):
+    ///
+    ///   cargo test --release widgets::battery::tests::sheet -- --ignored --nocapture
     #[test]
     #[ignore]
-    fn ring_sheet() {
+    fn sheet() {
         com();
         let env_cfg = json!({"bateria": {}, "app": {}});
         let env = Env { cfg: &env_cfg, key: "bateria" };
         let s = 2.0;
-        let mut sheet = Canvas::new((3.0 * WIDE * s) as u32, (520.0 * s) as u32, s);
-        sheet.fill_round_rect(0.0, 0.0, 3.0 * WIDE, 520.0, 0.0, Rgba::rgb(40, 40, 52));
-        // 9% na bateria; 73% e 100% carregando (com o raio dentro do anel)
-        for (i, v) in [9.0, 73.0, 100.0].into_iter().enumerate() {
-            let mut b = Battery::sample();
-            let p = b.power.as_mut().unwrap();
-            p.percent = v;
-            (p.plugged, p.charging) = (i > 0, i > 0);
-            for (mode, y) in [(Mode::M, 0.0), (Mode::G, 160.0)] {
-                let l = Layout::of(mode);
-                let mut c = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
-                b.draw(&mut c, mode, &env);
-                let g = b.ring_of(mode).unwrap();
-                // as guias: o centro do anel
-                c.fill_round_rect(g.cx - 0.25, g.cy - g.r, g.cx + 0.25, g.cy + g.r, 0.0, Rgba(255, 0, 0, 160));
-                c.fill_round_rect(g.cx - g.r, g.cy - 0.25, g.cx + g.r, g.cy + 0.25, 0.0, Rgba(255, 0, 0, 160));
-                sheet.image(&c.finish(), i as f32 * WIDE, y);
-            }
+        let rows: Vec<Battery> = vec![Battery::sample(), Battery::sample_charging(), Battery::sample_low(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing()];
+        let (cw, ch) = (WIDE + SMALL + WIDE + 48.0, super::super::LARGE_H + 16.0);
+        let frames = [0u64, 120, 250, 500, 900];
+        let leaving = [0u64, 120, 240, 400];
+        let total_h = ch * rows.len() as f32 + 2.0 * (SMALL + 16.0);
+        let mut sheet = Canvas::new((cw * s) as u32, (total_h * s) as u32, s);
+        sheet.fill_round_rect(0.0, 0.0, cw, total_h, 0.0, Rgba::rgb(46, 40, 80));
+        let card = |b: &Battery, mode: Mode| {
+            let l = Layout::of(mode);
+            let mut c = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
+            c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba(28, 24, 48, 235));
+            b.draw(&mut c, mode, &env);
+            c.finish()
+        };
+        for (i, b) in rows.iter().enumerate() {
+            let y = i as f32 * ch + 8.0;
+            sheet.image(&card(b, Mode::G), 8.0, y);
+            sheet.image(&card(b, Mode::M), WIDE + 24.0, y);
+            sheet.image(&card(b, Mode::P), WIDE + 24.0, y + SMALL + 16.0);
+            sheet.image(&card(b, Mode::P), WIDE + 24.0 + SMALL + 16.0, y + SMALL + 16.0);
         }
-        let path = std::env::temp_dir().join("bateria_aneis.png");
+        let y = rows.len() as f32 * ch + 8.0;
+        for (k, ms) in frames.into_iter().enumerate() {
+            sheet.image(&card(&Battery::sample_connecting(ms), Mode::P), 8.0 + k as f32 * (SMALL + 12.0), y);
+        }
+        for (k, ms) in leaving.into_iter().enumerate() {
+            let mut b = Battery::sample_connecting(0);
+            b.devices[0].connected = false;
+            b.changes[0].arriving = false;
+            b.changes[0].since = Instant::now() - Duration::from_millis(ms);
+            sheet.image(&card(&b, Mode::P), 8.0 + k as f32 * (SMALL + 12.0), y + SMALL + 16.0);
+        }
+        let path = std::env::temp_dir().join("bateria_folha.png");
         crate::gfx::save_png(&sheet.finish(), &path).unwrap();
         println!("{}", path.display());
     }
@@ -1581,6 +2027,108 @@ mod tests {
         assert!(!out.iter().any(|r| matches!(r, super::super::Request::Notify(..))), "avisou de novo");
     }
 
+    /// Os nomes nos quatro lugares do pequeno (None: o notebook; "" : vazio).
+    fn cells(b: &Battery) -> Vec<Option<String>> {
+        b.small_cells()
+            .into_iter()
+            .map(|c| match c {
+                Spot::Laptop => None,
+                Spot::Dev(d) => Some(d.name.clone()),
+                Spot::Empty => Some(String::new()),
+            })
+            .collect()
+    }
+
+    /// No pequeno, os lugares que sobram ficam com o anel vazio; um aparelho que sai deixa o lugar
+    /// vazio (os outros não andam) e um que chega ocupa o primeiro vazio.
+    #[test]
+    fn small_spots_stay_put_and_fill_the_first_empty_one() {
+        let s = |v: &str| Some(v.to_string());
+        let e = || Some(String::new());
+        assert_eq!(cells(&Battery::sample_alone()), [None, e(), e(), e()], "só o notebook: três vazios");
+        assert_eq!(cells(&Battery::sample_nothing()), [e(), e(), e(), e()], "sem nada: os quatro vazios");
+        let mut b = Battery::sample();
+        let list = b.devices.clone();
+        let _ = ctx_run(|ctx| b.apply_devices(list.clone(), ctx));
+        assert_eq!(cells(&b), [None, s("Teclado K380"), s("Mouse MX Master 3S"), s("Fone WH-1000XM5")]);
+        // o mouse desconecta: no meio da saída ainda está lá; depois, o lugar fica vazio
+        let mut gone = list.clone();
+        gone.iter_mut().find(|d| d.name.starts_with("Mouse")).unwrap().connected = false;
+        let _ = ctx_run(|ctx| b.apply_devices(gone.clone(), ctx));
+        assert_eq!(cells(&b)[2], s("Mouse MX Master 3S"));
+        b.changes.clear();
+        assert_eq!(cells(&b), [None, s("Teclado K380"), e(), s("Fone WH-1000XM5")], "o fone não andou");
+        // o controle conecta: no lugar vazio do mouse
+        let mut back = gone.clone();
+        back.iter_mut().find(|d| d.name == "Controle Xbox").unwrap().connected = true;
+        let _ = ctx_run(|ctx| b.apply_devices(back, ctx));
+        assert_eq!(cells(&b), [None, s("Teclado K380"), s("Controle Xbox"), s("Fone WH-1000XM5")]);
+        assert_eq!(b.change_of("Controle Xbox").map(|c| c.0), Some(true), "e entra com a animação");
+    }
+
+    /// Conectando, o anel enche do zero até a carga, o ícone passa do tamanho e volta e o número
+    /// aparece por último.
+    #[test]
+    fn connecting_fills_the_ring_from_zero() {
+        assert_eq!(connect_icon(0.0), (0.5, 0.0));
+        assert!(connect_icon(250.0).0 > 1.1, "o \"pop\"");
+        assert!((connect_icon(900.0).0 - 1.0).abs() < 1e-4 && connect_icon(900.0).1 == 1.0);
+        // desenha em cada ponto do caminho, e no começo o arco do fone não aparece
+        com();
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let green_at = |ms: u64| {
+            let b = Battery::sample_connecting(ms);
+            let mut c = Canvas::new(SMALL as u32, SMALL as u32, 1.0);
+            b.draw(&mut c, Mode::P, &env);
+            let img = c.finish();
+            // um ponto no meio do arco do fone (o segundo lugar), a 40% do caminho
+            let (cx, cy) = Battery::cell_center(1);
+            let a = (START + SWEEP * 0.4).to_radians();
+            let (x, y) = ((cx + MINI_R * a.cos()).round() as u32, (cy + MINI_R * a.sin()).round() as u32);
+            let i = ((y * img.w + x) * 4) as usize;
+            img.px[i + 1] as i32 - img.px[i + 2] as i32
+        };
+        assert!(green_at(50) < 30, "o arco já estava lá");
+        assert!(green_at(1500) > 60, "o arco não encheu");
+    }
+
+    /// No pequeno, o anel do notebook abre a energia e os outros (mesmo vazios) o Bluetooth.
+    #[test]
+    fn small_rings_open_power_or_bluetooth() {
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let b = Battery::sample_alone();
+        let (x, y) = Battery::cell_center(0);
+        assert_eq!(b.hit(x, y, Mode::P, &env), Some(OPEN_POWER));
+        let (x, y) = Battery::cell_center(3);
+        assert_eq!(b.hit(x, y, Mode::P, &env), Some(OPEN_BLUETOOTH));
+        let (x, y) = Battery::cell_center(0);
+        assert_eq!(Battery::sample_nothing().hit(x, y, Mode::P, &env), Some(OPEN_BLUETOOTH));
+    }
+
+    /// Uma lista nova de dispositivos que chega do fio entra no próximo tick (sem esperar meio
+    /// minuto), e o widget confere o canal a cada meio segundo.
+    #[test]
+    fn device_lists_from_the_watcher_apply_on_the_next_tick() {
+        let mut b = Battery::sample();
+        b.fixed_now = None;
+        let (tx, rx) = mpsc::channel();
+        b.feed = Some(rx);
+        assert!(b.next_tick().is_some_and(|t| t <= Instant::now() + CHECK_EVERY));
+        let mut list = b.devices.clone();
+        list.iter_mut().find(|d| d.name == "Controle Xbox").unwrap().connected = true;
+        tx.send(b.devices.clone()).unwrap();
+        tx.send(list).unwrap();
+        let (redraw, _) = ctx_run(|ctx| b.tick(ctx));
+        assert!(redraw);
+        assert!(b.devices.iter().any(|d| d.name == "Controle Xbox" && d.connected), "ficou a última lista");
+        // o fio acabou: o widget larga o canal
+        drop(tx);
+        let _ = ctx_run(|ctx| b.tick(ctx));
+        assert!(b.feed.is_none());
+    }
+
     #[test]
     fn the_history_keeps_a_day_and_fills_the_stats() {
         let b = Battery::sample();
@@ -1606,14 +2154,14 @@ mod tests {
     fn a_full_charge_shrinks_to_fit_inside_the_ring() {
         com();
         let c = Canvas::new(10, 10, 1.0);
-        for (g, size) in [(RING_P, 38.0), (RING_M, 30.0), (RING_G, 40.0)] {
+        for (g, size) in [(RING_M, 31.0), (RING_G, 42.0)] {
             let max = inner_width(g);
             // dois dígitos: o tamanho de sempre; o "100%": menor, e cabendo com o respiro
             let two = fit_size(&c, "73", size, max);
             let three = fit_size(&c, "100", size, max);
             assert_eq!(two, size, "{g:?}: o 73% diminuiu");
             assert!(three < size, "{g:?}: o 100% não diminuiu");
-            let w = c.text_width("100", NUM, three) + 1.0 + c.text_width("%", NUM, three * 0.42);
+            let w = c.text_width("100", NUM, three) + 1.5 + c.text_width("%", NUM, three * PCT);
             assert!(w <= max + 0.01 && w < 2.0 * (g.r - g.w / 2.0) - 20.0, "{g:?}: {w} de {max}");
         }
     }
@@ -1626,7 +2174,8 @@ mod tests {
         // (a onda de ligar na tomada em vários pontos do caminho: dependendo de quanto demorava o
         // teste, ela passava ou não perto da borda)
         let waves = [100, 300, 450, 600].map(Battery::sample_plugging);
-        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)].into_iter().chain(waves) {
+        let connecting = [0, 120, 250, 500, 900].map(Battery::sample_connecting);
+        for b in [Battery::sample(), Battery::sample_charging(), Battery::sample_desktop(), Battery::sample_alone(), Battery::sample_nothing(), Battery::sample_full(400), Battery::sample_changing(300), Battery::sample_rolling(300)].into_iter().chain(waves).chain(connecting) {
             for mode in Mode::ALL {
                 let l = Layout::of(mode);
                 let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
@@ -1642,6 +2191,196 @@ mod tests {
             }
         }
         // as linhas do grande cabem embaixo do gráfico
-        assert!(342.0 + 3.0 * 25.0 + 22.0 <= super::super::LARGE_H - 6.0);
+        assert!(334.0 + 3.0 * 25.0 + 21.0 <= super::super::LARGE_H - 16.0);
+    }
+}
+
+// ---------- na ilha ----------
+
+/// Um aparelho (ou o notebook) com a carga e o ícone, para a ilha.
+#[derive(Clone, Debug, PartialEq)]
+struct Low {
+    name: String,
+    level: f32,
+    icon: &'static str,
+}
+
+impl Low {
+    /// "Fones|15": o aviso de cada aparelho em cada nível (abaixo de `ISLAND_LOW` e de `ISLAND_URGENT`).
+    fn key(&self) -> String {
+        format!("{}|{}", self.name, if self.level < ISLAND_URGENT { ISLAND_URGENT } else { ISLAND_LOW })
+    }
+}
+
+fn kind_icon(kind: DevKind) -> &'static str {
+    match kind {
+        DevKind::Headphones => "fones",
+        DevKind::Speaker => "caixa",
+        DevKind::Mouse => "mouse",
+        DevKind::Keyboard => "teclado",
+        DevKind::Gamepad => "controle",
+        DevKind::Phone => "celular",
+        DevKind::Pen => "caneta",
+        DevKind::Other => "bateria",
+    }
+}
+
+fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, (f32, f32, f32, f32))> {
+    match form {
+        IslandForm::Medium => vec![(DISMISS, (w - 74.0, h / 2.0 - 16.0, w - 18.0, h / 2.0 + 16.0))],
+        IslandForm::Large => vec![(DISMISS, (w - 82.0, h - 46.0, w - 22.0, h - 14.0))],
+        _ => Vec::new(),
+    }
+}
+
+impl Battery {
+    /// O notebook e os aparelhos conectados que dizem a carga, o notebook primeiro.
+    fn island_list(&self) -> Vec<Low> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.power {
+            out.push(Low { name: "Notebook".into(), level: p.percent, icon: "notebook" });
+        }
+        for d in self.devices.iter().filter(|d| d.connected) {
+            if let Some(l) = d.level {
+                out.push(Low { name: d.name.clone(), level: l as f32, icon: kind_icon(d.kind) });
+            }
+        }
+        out
+    }
+
+    /// O mais fraco abaixo de `ISLAND_LOW` (o notebook só fora da tomada), se ninguém dispensou o aviso.
+    fn island_low(&self) -> Option<Low> {
+        let plugged = self.power.as_ref().is_some_and(|p| p.plugged);
+        self.island_list()
+            .into_iter()
+            .filter(|l| l.level < ISLAND_LOW && !(l.icon == "notebook" && plugged))
+            .filter(|l| !self.island_ok.contains(&l.key()))
+            .min_by(|a, b| a.level.total_cmp(&b.level))
+    }
+
+    /// Acabou de entrar (true) ou sair (false) da tomada: a ilha mostra a carga por alguns segundos.
+    fn plug_shown(&self) -> Option<bool> {
+        self.power.as_ref()?;
+        self.plug_event.filter(|e| e.1.elapsed() < PLUG_SHOW).map(|e| e.0)
+    }
+
+    /// A linha da tomada na ilha: "cheia em 1 h 10", "3 h 20 restantes" (vazia sem a conta).
+    fn plug_line(&self) -> String {
+        let Some(p) = &self.power else { return String::new() };
+        if p.plugged {
+            match (p.charging, p.secs_to_full) {
+                (true, Some(s)) => format!("cheia em {}", duration(s as f64)),
+                (true, None) => String::new(),
+                (false, _) if p.percent >= 99.0 => "carga completa".into(),
+                (false, _) => "sem carregar".into(),
+            }
+        } else {
+            self.secs_left().map_or(String::new(), |s| format!("{} restantes", duration(s)))
+        }
+    }
+
+    /// A ilha logo depois de entrar ou sair da tomada: o raio e a carga, "⚡ 64% · cheia em 1 h 10".
+    fn draw_plug(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, plugged: bool) {
+        let (x, y, w, h) = r;
+        let cy = y + h / 2.0;
+        let level = self.power.as_ref().map_or(0.0, |p| p.percent);
+        let col = if plugged { OK } else { level_color(level) };
+        let pct = format!("{level:.0}%");
+        let (glyph, title) = if plugged { ("carregando", "Carregando") } else { ("bateria", "Na bateria") };
+        let line = self.plug_line();
+        let icon = |c: &mut Canvas, cx: f32, size: f32| {
+            c.text(cx, cy, crate::theme::icon(glyph), Face::Icons, size, col, Anchor::MM, None);
+        };
+        match form {
+            IslandForm::Bubble => icon(c, x + w / 2.0, 17.0),
+            IslandForm::Compact => {
+                icon(c, x + 26.0, 15.0);
+                iu::compact_text(c, x + 46.0, r, title, &pct, col);
+            }
+            IslandForm::Banner => {
+                icon(c, x + 26.0, 15.0);
+                let label = if line.is_empty() { title.to_string() } else { format!("{title} · {line}") };
+                iu::compact_text(c, x + 46.0, r, &label, &pct, col);
+            }
+            IslandForm::Medium => {
+                iu::badge_icon(c, x + 39.0, cy, 22.0, glyph, col);
+                let sub = if line.is_empty() { pct } else { format!("{pct} · {line}") };
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, title, &sub, col);
+                for (a, b) in island_buttons(form, w, h) {
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(a));
+                }
+            }
+            // aberta: a lista de sempre (o notebook com a carga e os aparelhos)
+            IslandForm::Large => self.draw_island_list(c, r, hot, "Notebook"),
+        }
+    }
+
+    /// Os avisos dispensados voltam a valer quando o aparelho carrega (ou some).
+    fn prune_island_ok(&mut self) {
+        let list = self.island_list();
+        self.island_ok.retain(|k| list.iter().any(|l| l.key() == *k || (k.starts_with(&format!("{}|", l.name)) && l.level < ISLAND_LOW + 5.0)));
+    }
+
+    fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
+        if self.island_low().is_none() {
+            if let Some(plugged) = self.plug_shown() {
+                return self.draw_plug(c, form, r, hot, plugged);
+            }
+        }
+        let (x, y, w, h) = r;
+        let cy = y + h / 2.0;
+        let low = self.island_low().unwrap_or(Low { name: "Bateria".into(), level: 100.0, icon: "bateria" });
+        let col = level_color(low.level);
+        let pct = format!("{:.0}%", low.level);
+        let glyph = |c: &mut Canvas, cx: f32, cy: f32, size: f32, color: Rgba| {
+            c.text(cx, cy, crate::theme::icon(low.icon), Face::Icons, size, color, Anchor::MM, None);
+        };
+        match form {
+            IslandForm::Bubble => glyph(c, x + w / 2.0, cy, 17.0, col),
+            IslandForm::Compact | IslandForm::Banner => {
+                glyph(c, x + 26.0, cy, 15.0, col);
+                let label = if form == IslandForm::Banner { format!("{} com pouca bateria", low.name) } else { low.name.clone() };
+                iu::compact_text(c, x + 46.0, r, &label, &pct, col);
+            }
+            IslandForm::Medium => {
+                c.fill_circle(x + 39.0, cy, 22.0, col.alpha(0.18));
+                glyph(c, x + 39.0, cy, 19.0, col);
+                let sub = if low.level < ISLAND_URGENT { format!("{pct} · quase no fim") } else { format!("{pct} · carregue logo") };
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &low.name, &sub, col);
+                for (a, b) in island_buttons(form, w, h) {
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(a));
+                }
+            }
+            IslandForm::Large => self.draw_island_list(c, r, hot, &low.name),
+        }
+    }
+
+    /// A ilha aberta: o notebook e os aparelhos, cada um com a carga (`strong`: o do aviso), e a
+    /// linha do notebook embaixo.
+    fn draw_island_list(&self, c: &mut Canvas, r: Rect4, hot: Option<u32>, strong: &str) {
+        let (x, y, w, h) = r;
+        let list = self.island_list();
+        let count = if list.len() == 1 { "1 aparelho".to_string() } else { format!("{} aparelhos", list.len()) };
+        iu::header(c, r, "BATERIA", OK, &count, SOFT);
+        for (n, d) in list.iter().take(4).enumerate() {
+            let ry = y + 56.0 + n as f32 * 28.0;
+            let dc = level_color(d.level);
+            let strong = d.name == strong;
+            c.text(x + 30.0, ry, crate::theme::icon(d.icon), Face::Icons, 14.0, if strong { dc } else { SOFT }, Anchor::MM, None);
+            c.text(x + 48.0, ry, &d.name, if strong { Face::Semibold } else { Face::Regular }, 12.0, FG, Anchor::LM, Some(104.0));
+            iu::bar(c, x + 160.0, x + w - 70.0, ry, d.level / 100.0, dc);
+            c.text(x + w - 22.0, ry, &format!("{:.0}%", d.level), Face::Semibold, 12.0, if strong { dc } else { SOFT }, Anchor::RM, None);
+        }
+        let foot = match &self.power {
+            // logo depois de entrar ou sair da tomada: "Carregando · cheia às 15:03"
+            Some(_) if self.plug_shown().is_some() => self.header_line(),
+            Some(p) if p.charging => "Notebook carregando".to_string(),
+            Some(p) if p.plugged => "Notebook na tomada".to_string(),
+            _ => "Carregue para o aviso sumir".to_string(),
+        };
+        c.text(x + 22.0, y + h - 30.0, &foot, Face::Regular, 12.0, SOFT, Anchor::LM, Some(w - 130.0));
+        for (a, b) in island_buttons(IslandForm::Large, w, h) {
+            iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", true, hot == Some(a));
+        }
     }
 }

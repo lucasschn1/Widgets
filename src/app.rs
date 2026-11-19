@@ -147,8 +147,11 @@ pub struct App {
     next_screens: Instant,
     /// ao abrir com outros monitores: os widgets nascem na posição guardada, mesmo fora da tela
     keep_saved_pos: bool,
-    /// o Tocando agora como ilha flutuante (o cartão fica escondido no lugar dele)
+    /// a ilha flutuante: o Tocando agora (o cartão fica escondido no lugar dele) e os outros
+    /// widgets com algo para mostrar
     island: Option<island::Island>,
+    /// quando perguntar de novo aos widgets o que eles têm para a ilha
+    island_sync_at: Instant,
     /// o Clawd na barra de tarefas
     perch: Option<perch::Perch>,
     /// as pilhas de widgets (vários no mesmo lugar, trocando com a roda do mouse)
@@ -223,6 +226,7 @@ impl App {
             next_screens: Instant::now() + screens::SCREENS_EVERY,
             keep_saved_pos: false,
             island: None,
+            island_sync_at: Instant::now() + Duration::from_secs(2),
             perch: None,
             stacks: Vec::new(),
             stack_wheel: (0.0, Instant::now()),
@@ -660,7 +664,7 @@ impl App {
                 let followers = if reflow && !in_stack { self.stack_below(i, None) } else { Vec::new() };
                 let shift = self.cards[i].card_size().1 + (WIDGET_GAP * self.cards[i].s).round() as i32;
                 if key == "midia" {
-                    self.drop_island();
+                    self.island_forget_media();
                     self.sh.cfg.obj_mut("midia").insert("ilha".into(), json!(false));
                 }
                 if key == "claude" {
@@ -952,7 +956,11 @@ impl App {
                 return;
             }
             Act::Retry => self.with_kind(i, |k, ctx| k.retry(ctx)),
-            Act::Kind(n) => self.with_kind(i, |k, ctx| k.act(n, ctx)),
+            Act::Kind(n) => {
+                self.with_kind(i, |k, ctx| k.act(n, ctx));
+                let key = self.cards[i].key();
+                self.island_touch(key);
+            }
         }
         if let Some(card) = self.cards.get_mut(i) {
             if !card.animating() {
@@ -1226,42 +1234,57 @@ impl App {
                 .collect(),
         };
         let mut entries = vec![
-            MenuItem::Sub("Widgets".into(), widgets_menu),
-            MenuItem::Sub("Layouts".into(), layouts),
+            MenuItem::Sub("Widgets".into(), widgets_menu).icon("widgets"),
+            MenuItem::Sub("Layouts".into(), layouts).icon("layouts"),
             MenuItem::Sep,
-            MenuItem::Cmd((if self.sh.editing { "Concluir edição" } else { "Editar widgets" }).into(), M_EDIT),
-            MenuItem::Cmd("Mostrar na frente".into(), M_PEEK),
-            MenuItem::Sub("Modo foco".into(), focus),
-            MenuItem::Cmd("Organizar widgets".into(), M_ARRANGE),
-            MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK),
+            MenuItem::Cmd((if self.sh.editing { "Concluir edição" } else { "Editar widgets" }).into(), M_EDIT).icon("edit"),
+            MenuItem::Cmd("Mostrar na frente".into(), M_PEEK).icon("frente"),
+            MenuItem::Sub("Modo foco".into(), focus).icon("foco"),
+            MenuItem::Check("Travar posições".into(), self.sh.locked(), M_LOCK).icon("lock"),
             MenuItem::Sep,
-            MenuItem::Cmd("Configurações…".into(), M_SETTINGS),
-            MenuItem::Cmd("Dicas".into(), M_TIPS),
+            MenuItem::Cmd("Configurações…".into(), M_SETTINGS).icon("geral"),
+            MenuItem::Cmd("Dicas".into(), M_TIPS).icon("dicas"),
             MenuItem::Sep,
         ];
         if with_close {
-            entries.push(MenuItem::Cmd("Fechar este widget".into(), M_CLOSE));
+            entries.push(MenuItem::Cmd("Fechar este widget".into(), M_CLOSE).icon("close"));
         }
-        entries.push(MenuItem::Cmd("Sair".into(), M_QUIT));
+        entries.push(MenuItem::Cmd("Sair".into(), M_QUIT).icon("sair"));
         entries
+    }
+
+    /// O começo de todo menu: o widget que o abriu (se foi um) e o "Organizar widgets" em
+    /// destaque.
+    fn menu_head(&self, card: Option<usize>) -> Vec<MenuItem> {
+        let mut items = Vec::new();
+        if let Some(i) = card {
+            let key = self.cards[i].key();
+            items.push(MenuItem::Title(widgets::title(key).into(), widget_icon(key)));
+        }
+        items.push(MenuItem::Primary("Organizar widgets".into(), M_ARRANGE, "organizar"));
+        items.push(MenuItem::Sep);
+        items
     }
 
     fn show_menu(&mut self, card: Option<usize>) {
         self.tooltip.hide();
-        let mut items = Vec::new();
+        let mut items = self.menu_head(card);
         if let Some(i) = card {
             let c = &self.cards[i];
             let sizes = c.kind.sizes();
             if sizes.len() > 1 {
                 let current = c.mode;
                 let temp = c.temp;
-                items.push(MenuItem::Sub(
-                    "Tamanho".into(),
-                    sizes.iter().enumerate().map(|(n, &m)| MenuItem::Radio(m.name().into(), m == current && !temp, M_SIZE + n as u32)).collect(),
-                ));
+                items.push(
+                    MenuItem::Sub(
+                        "Tamanho".into(),
+                        sizes.iter().enumerate().map(|(n, &m)| MenuItem::Radio(m.name().into(), m == current && !temp, M_SIZE + n as u32)).collect(),
+                    )
+                    .icon("tamanho"),
+                );
             }
             if self.stack_of(c.key()).is_some() {
-                items.push(MenuItem::Cmd("Tirar da pilha".into(), M_UNSTACK));
+                items.push(MenuItem::Cmd("Tirar da pilha".into(), M_UNSTACK).icon("pilha"));
             }
             let env = widgets::Env { cfg: &self.sh.cfg, key: c.key() };
             let own = c.kind.menu(&env);
@@ -1272,6 +1295,7 @@ impl App {
             items.push(MenuItem::Sep);
         }
         items.extend(self.common_entries(card.is_some()));
+        let items = tidy_separators(items);
         let (x, y) = win::pointer();
         let context = card.map(|i| self.cards[i].key());
         self.menu.popup(items, x, y, context);
@@ -1546,7 +1570,7 @@ impl App {
         // voltam entrando (já invisíveis antes de as janelas aparecerem)
         self.play_entrances(|_| true);
         for i in 0..self.cards.len() {
-            if self.island.is_some() && self.cards[i].key() == "midia" {
+            if self.media_in_island() && self.cards[i].key() == "midia" {
                 continue; // está como ilha
             }
             if self.cards[i].stacked {
@@ -1690,15 +1714,13 @@ impl App {
         self.alert_cpu = (idle, total);
         let cpu = if total > last_total { 1.0 - (idle - last_idle) as f64 / (total - last_total) as f64 } else { 0.0 };
         let (used, total_mem) = win::memory();
-        for (kind, value, text) in [
-            ("cpu", cpu, "A CPU está acima de 90% há 3 minutos."),
-            ("ram", used as f64 / total_mem as f64, "A memória está acima de 90% há 3 minutos."),
-        ] {
-            if value >= 0.9 && config::notify_enabled(&self.sh.cfg, kind) {
+        for (kind, value, what) in [("cpu", cpu, "A CPU"), ("ram", used as f64 / total_mem as f64, "A memória")] {
+            if value >= config::HIGH_USE as f64 && config::notify_enabled(&self.sh.cfg, kind) {
                 let since = *self.high_since.entry(kind).or_insert(now);
-                if now - since >= 180.0 {
+                if now - since >= config::HIGH_USE_SECS as f64 {
                     let title = if kind == "cpu" { "CPU alta" } else { "Memória quase cheia" };
-                    self.notify(kind, title, text, 1800.0, Some((NotifyAction::Open("taskmgr.exe".into()), None)));
+                    let text = format!("{what} está acima de {} há {}.", config::high_use_pct(), config::high_use_time());
+                    self.notify(kind, title, &text, 1800.0, Some((NotifyAction::Open("taskmgr.exe".into()), None)));
                 }
             } else {
                 self.high_since.remove(kind);
@@ -1901,6 +1923,7 @@ impl App {
         self.tooltip.tick();
         self.menu.watch();
         self.panels_tick();
+        self.island_sync();
         self.island_tick();
         if self.welcome_at.is_some_and(|t| now >= t) {
             self.welcome_at = None;
@@ -2175,4 +2198,33 @@ mod tests {
         // longe demais: não está encaixado
         assert!(stack_in(&rects, 0, (0, 0, 400, 150), 25).is_empty());
     }
+}
+
+/// O ícone (de `theme::icon`) de cada widget, no título do menu.
+fn widget_icon(key: &str) -> &'static str {
+    match key {
+        "tempo" => "clima",
+        "sistema" => "sistema",
+        "midia" => "midia",
+        "github" => "github",
+        "pomodoro" => "pomodoro",
+        "claude" => "claude",
+        "bateria" => "bateria",
+        _ => "widgets",
+    }
+}
+
+/// Sem linhas repetidas, nem no começo ou no fim do menu.
+fn tidy_separators(items: Vec<MenuItem>) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if matches!(item, MenuItem::Sep) && out.last().is_none_or(|l| matches!(l, MenuItem::Sep)) {
+            continue;
+        }
+        out.push(item);
+    }
+    while out.last().is_some_and(|l| matches!(l, MenuItem::Sep)) {
+        out.pop();
+    }
+    out
 }
