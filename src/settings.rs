@@ -414,6 +414,8 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
         Row("Widgets na ilha".into(), Some("O Pomodoro correndo, a CPU alta, pedidos de revisão, a bateria (fraca ou na tomada) e a chuva chegando aparecem na ilha, ao lado da música".into()), setting_switch(v, "ilha_widgets")),
         Row("Onde fica".into(), Some("Na barra de tarefas, à esquerda do Iniciar. Arraste para qualquer lugar; clique direito nela para voltar".into()), Control::None),
     ]);
+    let y = section(ui, x, y, "O mundo lá fora, na ilha");
+    let y = rows(ui, x, y, w, outside_rows(v));
     let y = section(ui, x, y, "Organizar");
     let y = rows(ui, x, y, w, vec![
         Row("Modo edição".into(), Some("Feche, redimensione e mova todos os widgets de uma vez".into()), Control::Button("editar", "Editar widgets".into(), A::Edit, "primary", Some("edit"))),
@@ -438,6 +440,38 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     ));
     let y = rows(ui, x, y, w, layout_rows);
     restore(ui, x, y, w, "geral")
+}
+
+/// O interruptor de cada fonte do mundo lá fora (o pôr do sol, a lua...).
+fn outside_id(key: &str) -> &'static str {
+    match key {
+        "saudacao" => "na_ilha:saudacao",
+        "sol" => "na_ilha:sol",
+        "lua" => "na_ilha:lua",
+        "iss" => "na_ilha:iss",
+        "cotacao" => "na_ilha:cotacao",
+        _ => "na_ilha:expediente",
+    }
+}
+
+/// As fontes do mundo lá fora (cada uma liga e desliga) e o horário do fim do expediente.
+fn outside_rows(v: &View) -> Vec<Row> {
+    use widgets::outside::{self, workday_end_choices, DEFAULT_END};
+    let cfg = &v.sh.cfg;
+    let mut r: Vec<Row> = outside::KEYS
+        .iter()
+        .map(|&key| {
+            let mut desc = outside::description(key).to_string();
+            if matches!(key, "sol" | "lua" | "iss") && outside::location(cfg).is_none() {
+                desc.push_str(". Escolha a cidade no widget Tempo");
+            }
+            Row(outside::title(key).into(), Some(desc), sw(outside_id(key), widgets::on_island(cfg, key), A::Toggle(outside_id(key))))
+        })
+        .collect();
+    let options = workday_end_choices().iter().map(|h| (h.to_string(), h.to_string())).collect();
+    let end = cfg["expediente"].str_of("fim").unwrap_or(DEFAULT_END).to_string();
+    r.push(Row("O expediente termina às".into(), None, Control::Seg("fim_expediente", options, end)));
+    r
 }
 
 fn page_aparencia(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
@@ -997,6 +1031,7 @@ mod tests {
         let pages = ["geral", "aparencia", "widgets", "pomodoro", "midia", "avisos", "dicas", "sobre"];
         let mut list: Vec<(&'static str, bool)> = pages.iter().map(|p| (*p, false)).collect();
         list.push(("widgets", true));
+        list.push(("geral", true));
         for (name, end) in list {
             let (_, _, max_scroll) = page(name, 0.0, 1.25);
             let (img, _, _) = page(name, if end { max_scroll } else { 0.0 }, 1.25);

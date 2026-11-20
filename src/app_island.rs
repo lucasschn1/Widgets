@@ -54,6 +54,10 @@ const DOCK_GAP: f32 = 10.0;
 const DOCK_SNAP: f32 = 36.0;
 /// na barra, de quanto em quanto tempo ver se o botão Iniciar andou (abrir e fechar apps mexe nele)
 const DOCK_CHECK: Duration = Duration::from_secs(1);
+/// a ilha aparecendo do nada (uma gota que acende e estica até a pílula) e sumindo (o conteúdo
+/// apaga, a pílula encolhe numa gota e a gota some)
+const APPEAR_MS: f32 = 620.0;
+const VANISH_MS: f32 = 440.0;
 /// um aviso estica a ilha por este tempo
 const BANNER_FOR: Duration = Duration::from_secs(4);
 /// espaço entre a pílula e as bolhas (e entre as bolhas)
@@ -134,8 +138,9 @@ pub(super) struct Scene<'a> {
 }
 
 impl<'a> Scene<'a> {
-    fn of(info: Option<&'a IslandInfo>, cards: &'a [Card], cfg: &'a Value) -> Scene<'a> {
-        Scene { info, kinds: cards.iter().map(|c| c.kind.as_ref()).collect(), cfg }
+    fn of(info: Option<&'a IslandInfo>, cards: &'a [Card], feeds: &'a [Box<dyn Kind>], cfg: &'a Value) -> Scene<'a> {
+        let kinds = cards.iter().map(|c| c.kind.as_ref()).chain(feeds.iter().map(|f| f.as_ref())).collect();
+        Scene { info, kinds, cfg }
     }
     /// Só a música (os quadros do README e os testes).
     #[cfg(test)]
@@ -148,6 +153,19 @@ impl<'a> Scene<'a> {
     fn env(&self, key: &'static str) -> Env<'a> {
         Env { cfg: self.cfg, key }
     }
+}
+
+/// A ilha nascendo ou sumindo (sem a música: porque algum widget tem, ou deixou de ter, o que
+/// mostrar).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pop {
+    Appear,
+    Vanish,
+}
+
+/// Rampa suave de 0 a 1 entre `a` e `b`.
+fn ramp(p: f32, a: f32, b: f32) -> f32 {
+    ease_in_out(((p - a) / (b - a)).clamp(0.0, 1.0))
 }
 
 /// O estado da ilha com vários widgets.
@@ -172,8 +190,8 @@ struct Multi {
     strip_out: Option<Instant>,
     /// quando a primeira bolha apareceu (ela entra esmaecendo)
     bubbles_at: Instant,
-    /// sem nada para mostrar: a pílula encolhe e some
-    vanish: bool,
+    /// nascendo ou sumindo, e desde quando
+    pop: Option<(Pop, Instant)>,
     /// o widget do clique direito
     menu_key: &'static str,
     /// a capa pequena (na bolha), já reduzida
@@ -194,7 +212,7 @@ impl Multi {
             strip: false,
             strip_out: None,
             bubbles_at: now,
-            vanish: false,
+            pop: None,
             menu_key: KEY,
             bubble_art: None,
         }
@@ -337,7 +355,76 @@ impl Island {
     }
 
     fn animating(&self) -> bool {
-        self.progress() < 1.0 || self.shape_at.elapsed().as_secs_f32() < 0.5
+        self.progress() < 1.0 || self.shape_at.elapsed().as_secs_f32() < 0.5 || self.multi.pop.is_some()
+    }
+
+    /// Sumindo (ninguém mais tem o que mostrar)?
+    fn vanishing(&self) -> bool {
+        matches!(self.multi.pop, Some((Pop::Vanish, _)))
+    }
+
+    /// Nascendo (ainda sem as bolhas)?
+    fn appearing(&self) -> bool {
+        matches!(self.multi.pop, Some((Pop::Appear, _)))
+    }
+
+    /// Quanto já andou do nascer ou do sumir (0 a 1).
+    fn pop_progress(&self) -> f32 {
+        let p = match self.multi.pop {
+            Some((Pop::Appear, at)) => at.elapsed().as_secs_f32() * 1000.0 / APPEAR_MS,
+            Some((Pop::Vanish, at)) => at.elapsed().as_secs_f32() * 1000.0 / VANISH_MS,
+            None => 1.0,
+        };
+        p.min(1.0)
+    }
+
+    /// Opacidade (da janela, do conteúdo) nascendo ou sumindo. Nascendo, a gota acende primeiro
+    /// e o conteúdo aparece quando a pílula já está quase no tamanho; sumindo, o conteúdo apaga
+    /// primeiro e a gota some no fim.
+    fn pop_alpha(&self) -> (f32, f32) {
+        let p = self.pop_progress();
+        match self.multi.pop {
+            Some((Pop::Appear, _)) => (ramp(p, 0.0, 0.25), ramp(p, 0.4, 0.85)),
+            Some((Pop::Vanish, _)) => (1.0 - ramp(p, 0.55, 1.0), 1.0 - ramp(p, 0.0, 0.3)),
+            None => (1.0, 1.0),
+        }
+    }
+
+    /// A gota de onde a ilha nasce (e onde ela some), `k` da altura da pílula `g`: do lado do
+    /// botão Iniciar na barra de tarefas; fora dela, no meio.
+    fn drop_of(&self, g: Geo, k: f32) -> Geo {
+        let d = g.h * k;
+        let cx = if self.docked { g.x + g.w - g.h / 2.0 } else { g.x + g.w / 2.0 };
+        let cy = g.y + g.h / 2.0;
+        Geo { x: cx - d / 2.0, y: cy - d / 2.0, w: d, h: d, r: d / 2.0 }
+    }
+
+    /// Começa a sumir: o conteúdo apaga e a pílula encolhe numa gota (`animate`: sem animação,
+    /// some no próximo quadro).
+    fn start_vanish(&mut self, animate: bool, now: Instant) {
+        let done = if animate { Duration::ZERO } else { Duration::from_millis(VANISH_MS as u64) };
+        self.multi.pop = Some((Pop::Vanish, now - done));
+        self.multi.strip = false;
+        self.from = self.geo();
+        self.to = self.drop_of(self.target(Shape::Compact), 0.4);
+        self.anim_at = now;
+        self.anim_ms = if animate { VANISH_MS } else { 0.0 };
+        self.next_frame = now;
+    }
+
+    /// Voltou alguém enquanto ela sumia: a pílula estica de novo, de onde estava.
+    fn cancel_vanish(&mut self, now: Instant) {
+        let (wa, _) = self.pop_alpha();
+        // a janela ainda inteira: o conteúdo volta a acender; já apagando, a gota acende de onde
+        // estava (o passo do nascer com a mesma opacidade: o inverso da rampa)
+        let unease = |y: f32| if y < 0.5 { (y / 4.0).cbrt() } else { 1.0 - (2.0 * (1.0 - y)).cbrt() / 2.0 };
+        let back = if wa >= 0.999 { 0.4 } else { 0.25 * unease(wa) };
+        self.multi.pop = Some((Pop::Appear, now - Duration::from_millis((back * APPEAR_MS) as u64)));
+        self.from = self.geo();
+        self.to = self.target(self.shape);
+        self.anim_at = now;
+        self.anim_ms = STATE_MS;
+        self.next_frame = now;
     }
 
     fn geo(&self) -> Geo {
@@ -347,7 +434,14 @@ impl Island {
         }
         // entre as formas da ilha, mola (estica e volta, como uma ilha de verdade); voando entre
         // a ilha e o cartão, sem passar do ponto
-        let e = if self.morph == Morph::None { ease_spring(t) } else { ease_settle(t) };
+        let e = if self.vanishing() {
+            // sumindo: sai devagar e acelera para dentro da gota, sem mola
+            ease_in_out(t)
+        } else if self.morph == Morph::None {
+            ease_spring(t)
+        } else {
+            ease_settle(t)
+        };
         Geo::lerp(self.from, self.to, e)
     }
 
@@ -462,7 +556,7 @@ impl Island {
     /// Quantas bolhas aparecem: a primeira; com o mouse em cima, todas.
     fn bubble_count(&self) -> usize {
         let extra = self.bubble_entries().len();
-        if self.morph != Morph::None || self.multi.vanish {
+        if self.morph != Morph::None || self.multi.pop.is_some() {
             0
         } else if self.multi.strip {
             extra
@@ -631,6 +725,9 @@ impl Island {
         c.stroke_round_rect(ox, oy, ox + lw, oy + lh, lr, WHITE.with_a(26), 1.0 / s);
         c.push_round_clip(ox, oy, ox + lw, oy + lh, lr);
         let (a_prev, a_cur) = self.layer_alpha();
+        // nascendo ou sumindo, o conteúdo acende depois e apaga antes da pílula
+        let (_, a_pop) = self.pop_alpha();
+        let (a_prev, a_cur) = (a_prev * a_pop, a_cur * a_pop);
         let (prev_key, cur_key) = (self.multi.prev_key, self.key_for(self.shape));
         if a_prev > 0.01 && (self.prev_shape != self.shape || prev_key != cur_key) {
             self.draw_layer(&mut c, self.prev_shape, prev_key, scene, ox, oy, lw, lh, a_prev);
@@ -638,7 +735,7 @@ impl Island {
         if a_cur > 0.01 {
             self.draw_layer(&mut c, self.shape, cur_key, scene, ox, oy, lw, lh, a_cur);
         }
-        if let (Some(i), Morph::None, true) = (scene.info, self.morph, cur_key == KEY) {
+        if let (Some(i), Morph::None, true, None) = (scene.info, self.morph, cur_key == KEY, self.multi.pop) {
             self.draw_volume(&mut c, i, ox, oy, lw, lh);
         }
         // o cartão de verdade, esticado na forma de agora: na volta, termina exatamente como o
@@ -657,6 +754,15 @@ impl Island {
             let a = if self.shape == Shape::Banner { a_cur } else { a_prev };
             let col = self.accent_of(self.key_for(Shape::Banner));
             c.stroke_round_rect(ox + 0.75, oy + 0.75, ox + lw - 0.75, oy + lh - 0.75, lr - 0.75, col.alpha(0.75 * a), 1.5);
+        }
+        // nascendo: um brilho na cor de quem chegou, que acende com a gota e apaga quando a
+        // pílula chega no tamanho
+        if self.appearing() {
+            let glow = (self.pop_progress() * std::f32::consts::PI).sin().max(0.0);
+            let col = self.accent_of(self.key_for(self.shape));
+            for (e, a) in [(0.0, 0.85), (1.75, 0.3)] {
+                c.stroke_round_rect(ox + 0.75 - e, oy + 0.75 - e, ox + lw - 0.75 + e, oy + lh - 0.75 + e, lr - 0.75 + e, col.alpha(a * glow), 1.5);
+            }
         }
         self.draw_bubbles(&mut c, &bubbles, scene, wx, wy);
         (c.finish(), (wx as i32, wy as i32))
@@ -1020,7 +1126,7 @@ impl App {
         }
         let hwnd = isl.hwnd;
         {
-            let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
+            let scene = Scene::of(info.as_ref(), &self.cards, &self.feeds, &self.sh.cfg);
             let (img, pos) = isl.render(&scene);
             win::blit(hwnd, &img, Some(pos), 255);
         }
@@ -1047,9 +1153,10 @@ impl App {
         let (anchor, docked) = self.island_start(near, s0);
         let mut isl = self.new_island(anchor, docked, false);
         if self.sh.animations {
-            let to = isl.to;
-            isl.from = Geo { x: to.x + to.w - to.h, y: to.y, w: to.h, h: to.h, r: to.h / 2.0 };
-            isl.anim_ms = STATE_MS;
+            // uma gota que acende e estica até a pílula, com a mola
+            isl.from = isl.drop_of(isl.to, 0.5);
+            isl.anim_ms = APPEAR_MS;
+            isl.multi.pop = Some((Pop::Appear, isl.anim_at));
         }
         win::set_z(isl.hwnd, Z::Topmost);
         events::show(isl.hwnd, !self.sh.focus);
@@ -1185,6 +1292,16 @@ impl App {
                     found.push(Entry { key, item });
                 }
             }
+            // o mundo lá fora (o pôr do sol, a lua, a ISS, a cotação, o expediente)
+            for f in &self.feeds {
+                let key = f.key();
+                if !widgets::on_island(&self.sh.cfg, key) {
+                    continue;
+                }
+                if let Some(item) = f.island_item(&Env { cfg: &self.sh.cfg, key }) {
+                    found.push(Entry { key, item });
+                }
+            }
         }
         if self.media_in_island() {
             let (info, _) = self.island_info();
@@ -1200,26 +1317,14 @@ impl App {
         }
         let Some(isl) = &mut self.island else { return };
         if found.is_empty() && !isl.media {
-            // ninguém mais: a pílula encolhe até uma bolinha e some
-            if !isl.multi.vanish && isl.morph == Morph::None {
-                isl.multi.vanish = true;
-                isl.multi.strip = false;
-                isl.from = isl.geo();
-                let g = isl.target(Shape::Compact);
-                isl.to = Geo { x: g.x + g.w - g.h, y: g.y, w: g.h, h: g.h, r: g.h / 2.0 };
-                isl.anim_at = now;
-                isl.anim_ms = if self.sh.animations { STATE_MS * 0.6 } else { 0.0 };
-                isl.next_frame = now;
+            // ninguém mais: o conteúdo apaga, a pílula encolhe numa gota e some
+            if !isl.vanishing() && isl.morph == Morph::None {
+                isl.start_vanish(self.sh.animations, now);
             }
             return;
         }
-        if isl.multi.vanish {
-            // voltou alguém enquanto ela sumia
-            isl.multi.vanish = false;
-            isl.from = isl.geo();
-            isl.to = isl.target(isl.shape);
-            isl.anim_at = now;
-            isl.anim_ms = STATE_MS;
+        if isl.vanishing() {
+            isl.cancel_vanish(now);
         }
         isl.update_entries(found, now);
     }
@@ -1240,9 +1345,9 @@ impl App {
 
     pub(super) fn island_mouse(&mut self, kind: MouseKind, _x: i32, _y: i32, sx: i32, sy: i32) {
         let (info, _) = self.island_info();
-        let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
+        let scene = Scene::of(info.as_ref(), &self.cards, &self.feeds, &self.sh.cfg);
         let Some(isl) = &mut self.island else { return };
-        if isl.morph == Morph::Out || isl.multi.vanish {
+        if isl.morph == Morph::Out || isl.vanishing() {
             return;
         }
         match kind {
@@ -1369,9 +1474,14 @@ impl App {
             Btn::Widget(action) => {
                 let Some(isl) = &self.island else { return };
                 let key = isl.key_for(isl.shape);
-                let Some(j) = self.find(key) else { return };
-                self.with_kind(j, |k, ctx| k.act(action, ctx));
-                self.cards[j].refresh(&self.sh);
+                if let Some(j) = self.find(key) {
+                    self.with_kind(j, |k, ctx| k.act(action, ctx));
+                    self.cards[j].refresh(&self.sh);
+                } else if let Some(f) = self.feeds.iter().position(|f| f.key() == key) {
+                    self.with_feed(f, |k, ctx| k.act(action, ctx));
+                } else {
+                    return;
+                }
                 self.island_touch(key);
                 self.island_sync();
                 if let Some(isl) = &mut self.island {
@@ -1472,10 +1582,15 @@ impl App {
             return;
         }
         // terminou de sumir (ninguém mais na ilha)
-        if isl.multi.vanish && isl.progress() >= 1.0 {
+        if isl.vanishing() && isl.pop_progress() >= 1.0 {
             self.drop_island();
             self.island_sync_at = now + SYNC_IDLE;
             return;
+        }
+        // terminou de nascer: as bolhas entram esmaecendo
+        if isl.appearing() && isl.pop_progress() >= 1.0 {
+            isl.multi.pop = None;
+            isl.multi.bubbles_at = now;
         }
         if isl.morph == Morph::In && isl.progress() >= 1.0 {
             isl.morph = Morph::None;
@@ -1503,7 +1618,7 @@ impl App {
             win::stay_over_taskbar(isl.hwnd);
         }
         // na barra, acompanha o botão Iniciar (ele anda quando abrem e fecham apps)
-        if isl.docked && isl.morph == Morph::None && !isl.dragging && now >= isl.dock_check {
+        if isl.docked && isl.morph == Morph::None && !isl.dragging && !isl.vanishing() && now >= isl.dock_check {
             isl.dock_check = now + DOCK_CHECK;
             if let Some((slot, s)) = dock_slot(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10) {
                 if (slot.0 - isl.anchor.0).abs() >= 1.0 || (slot.1 - isl.anchor.1).abs() >= 1.0 || (s - isl.s).abs() > 0.01 {
@@ -1517,7 +1632,7 @@ impl App {
             }
         }
         let (px, py) = win::pointer();
-        if isl.morph == Morph::None && !isl.dragging && !isl.multi.vanish {
+        if isl.morph == Morph::None && !isl.dragging && !isl.vanishing() {
             // o mouse nas bolhas: com mais gente esperando, todas abrem
             let on_bubbles = isl.bubble_at(px, py).is_some() || (isl.multi.strip && isl.near_bubbles(px, py));
             if on_bubbles {
@@ -1589,16 +1704,21 @@ impl App {
         }
         isl.step_levels(info.as_ref(), peak);
         if !isl.hidden {
-            let scene = Scene::of(info.as_ref(), &self.cards, &self.sh.cfg);
+            let scene = Scene::of(info.as_ref(), &self.cards, &self.feeds, &self.sh.cfg);
             let (img, pos) = isl.render(&scene);
-            win::blit(isl.hwnd, &img, Some(pos), 255);
+            let (wa, _) = isl.pop_alpha();
+            win::blit(isl.hwnd, &img, Some(pos), (wa * 255.0).round() as u8);
         }
         let shown = isl.key_for(isl.shape);
         let playing = info.as_ref().is_some_and(|i| i.playing) && shown == KEY;
         // o widget na pílula pode pedir quadros (a chuva caindo na ilha aberta do Tempo)
         let fps = match (shown, isl.morph) {
             (KEY, _) | (_, Morph::In | Morph::Out) => 0,
-            _ => self.cards.iter().find(|c| c.key() == shown).map_or(0, |c| c.kind.island_fps(isl.shape.form())),
+            _ => {
+                let form = isl.shape.form();
+                let card = self.cards.iter().find(|c| c.key() == shown).map(|c| c.kind.island_fps(form));
+                card.or_else(|| self.feeds.iter().find(|f| f.key() == shown).map(|f| f.island_fps(form))).unwrap_or(0)
+            }
         };
         let near = isl.near(px, py);
         let wait = if isl.animating() || isl.dragging || isl.multi.bubbles_at.elapsed() < Duration::from_millis(300) {
@@ -1913,6 +2033,94 @@ mod tests {
         assert!(isl.multi.unseen.is_empty() && isl.multi.banner.is_none() && isl.bubble_count() == 0);
     }
 
+    /// Nascendo: a gota começa apagada e pequena, acende antes do conteúdo e termina inteira, sem
+    /// bolhas no caminho. Sumindo: o conteúdo apaga antes da janela, a pílula encolhe numa gota e
+    /// tudo some; sem animação, some de uma vez; voltando alguém, ela estica de novo sem piscar.
+    #[test]
+    fn island_pops_in_and_out() {
+        let now = Instant::now();
+        let live = IslandItem::live(WHITE);
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        isl.media = false;
+        isl.update_entries(vec![entry("pomodoro", live), entry("github", live)], now);
+        let pill = isl.target(Shape::Compact);
+        isl.to = pill;
+        isl.from = isl.drop_of(pill, 0.5);
+        isl.anim_at = now;
+        isl.anim_ms = APPEAR_MS;
+        let at = |ms: f32| Instant::now() - Duration::from_millis(ms as u64);
+
+        isl.multi.pop = Some((Pop::Appear, now));
+        let (wa, ca) = isl.pop_alpha();
+        assert!(wa < 0.01 && ca == 0.0, "nasce apagada: {wa} {ca}");
+        isl.anim_at = Instant::now();
+        let g = isl.geo();
+        assert!(g.w < pill.h * 0.6 && (g.w - g.h).abs() < 2.0, "nasce uma gota redonda: {g:?}");
+        assert!((g.x + g.w / 2.0 - (pill.x + pill.w / 2.0)).abs() < 2.0, "no meio da pílula");
+        assert_eq!(isl.bubble_count(), 0, "sem bolhas nascendo");
+        assert!(isl.animating());
+        isl.multi.pop = Some((Pop::Appear, at(APPEAR_MS * 0.3)));
+        let (wa, ca) = isl.pop_alpha();
+        assert!(wa > 0.99 && ca == 0.0, "a gota acende antes do conteúdo: {wa} {ca}");
+        isl.multi.pop = Some((Pop::Appear, at(APPEAR_MS + 10.0)));
+        assert_eq!(isl.pop_alpha(), (1.0, 1.0));
+        assert_eq!(isl.pop_progress(), 1.0);
+
+        // na barra de tarefas, nasce do lado do botão Iniciar
+        isl.docked = true;
+        let d = isl.drop_of(pill, 0.5);
+        assert!((d.x + d.w / 2.0 - (pill.x + pill.w - pill.h / 2.0)).abs() < 0.5);
+        isl.docked = false;
+
+        isl.multi.pop = None;
+        isl.from = pill;
+        isl.anim_ms = 0.0;
+        isl.start_vanish(true, now);
+        assert!(isl.vanishing() && isl.animating());
+        let (wa, ca) = isl.pop_alpha();
+        assert!(wa == 1.0 && ca > 0.99, "começa inteira: {wa} {ca}");
+        assert!(isl.to.w < pill.h && (isl.to.w - isl.to.h).abs() < 0.5, "encolhe numa gota: {:?}", isl.to);
+        assert_eq!(isl.bubble_count(), 0);
+        isl.multi.pop = Some((Pop::Vanish, at(VANISH_MS * 0.4)));
+        let (wa, ca) = isl.pop_alpha();
+        assert!(wa > 0.99 && ca == 0.0, "o conteúdo apaga antes da janela: {wa} {ca}");
+        isl.multi.pop = Some((Pop::Vanish, at(VANISH_MS + 10.0)));
+        assert_eq!(isl.pop_alpha(), (0.0, 0.0), "termina apagada");
+
+        // voltou alguém no meio: estica de novo, sem a janela piscar
+        isl.multi.pop = Some((Pop::Vanish, at(VANISH_MS * 0.75)));
+        let (before, _) = isl.pop_alpha();
+        isl.cancel_vanish(Instant::now());
+        assert!(isl.appearing());
+        let (after, _) = isl.pop_alpha();
+        assert!((after - before).abs() < 0.03, "a janela continua de onde estava: {before} -> {after}");
+        assert_eq!(isl.to.w, pill.w, "volta para o tamanho da pílula");
+
+        // sem animação: some no próximo quadro
+        isl.multi.pop = None;
+        isl.start_vanish(false, now);
+        assert!(isl.vanishing() && isl.pop_progress() >= 1.0 && isl.progress() >= 1.0);
+    }
+
+    /// Nascendo e sumindo, a ilha desenha em todos os passos (com o brilho, sem o conteúdo no
+    /// começo do nascer e no fim do sumir).
+    #[test]
+    fn island_pop_draws_every_step() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let now = Instant::now();
+        for pop in [Pop::Appear, Pop::Vanish] {
+            let total = if pop == Pop::Appear { APPEAR_MS } else { VANISH_MS };
+            for k in 0..=10 {
+                let mut isl = island(Shape::Compact, Morph::None, 1.0);
+                isl.multi.pop = Some((pop, now - Duration::from_millis((total * k as f32 / 10.0) as u64)));
+                let (img, _) = isl.render(&Scene::media(None));
+                assert!(img.w > 0 && img.h > 0);
+            }
+        }
+    }
+
     /// Com três ou mais, só uma bolha aparece (com o "+N"); abertas, todas, da pílula para a
     /// esquerda, sem se encostar; clicar numa leva o widget dela para a pílula.
     #[test]
@@ -2014,6 +2222,168 @@ mod tests {
             let path = std::env::temp_dir().join(format!("ilha_multi_{name}.png"));
             crate::gfx::save_png(&img, &path).unwrap();
             println!("{}", path.display());
+        }
+    }
+
+    /// Prévia das saudações (bom dia, boa tarde, boa noite), quadro a quadro, com a ilha de
+    /// verdade numa barra de tarefas de mentira: primeiro como ela aparece sozinha (nasce,
+    /// estica com a saudação, volta e alterna o tempo e as cotações a cada 7 s até sumir), depois
+    /// com o mouse em cima (a forma média, também alternando) e aberta com um clique.
+    /// Grava PNGs em %TEMP%/widgets-previa/<nome>/ (30 por segundo):
+    /// cargo test --release greeting_preview -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn greeting_preview() {
+        use crate::widgets::outside::{Greeting, Period};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        const S: f32 = 2.0;
+        const W: f32 = 460.0;
+        const H: f32 = 300.0;
+        const FPS: f64 = 30.0;
+        let cfg = json!({"tempo": {"lat": -23.55, "lon": -46.63, "place": "São Paulo"}, "app": {}});
+        for (name, period) in [("bom_dia", Period::Morning), ("boa_tarde", Period::Afternoon), ("boa_noite", Period::Night)] {
+            let mut greeting = Greeting::sample(period);
+            let item = greeting.island_item(&Env { cfg: &cfg, key: "saudacao" }).unwrap();
+            let dir = std::env::temp_dir().join("widgets-previa").join(name);
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+
+            // a ilha na barra de tarefas (na tela de verdade, para as contas de onde ela cabe)
+            let work = win::work_areas()[0];
+            let mut isl = island(Shape::Compact, Morph::None, 1.0);
+            isl.media = false;
+            isl.docked = true;
+            isl.s = S * SIZE;
+            let compact_h = Shape::Compact.size().1 * isl.s;
+            isl.anchor = (((work.0 + work.2) / 2) as f32, work.3 as f32 - compact_h - 40.0);
+            isl.multi.entries = vec![entry("saudacao", item)];
+            isl.multi.key = "saudacao";
+            isl.multi.prev_key = "saudacao";
+            isl.multi.bubbles_at = Instant::now() - Duration::from_secs(5);
+            isl.hot = None;
+            // onde a âncora da ilha cai no quadro (em pontos): perto da direita, no meio da barra
+            let compact_w = Shape::Compact.size().0 * SIZE;
+            let (xa, ya) = (W - 70.0 - compact_w / 2.0, H - 24.0 - Shape::Compact.size().1 * SIZE / 2.0);
+            let origin = (isl.anchor.0 - xa * S, isl.anchor.1 - ya * S);
+
+            struct Clocks {
+                t: f64,
+                anim: f64,
+                shape: f64,
+                pop: Option<(Pop, f64)>,
+                /// quando a saudação apareceu (o relógio dela anda junto com o vídeo)
+                greeted: f64,
+                visible: bool,
+                n: u32,
+            }
+            let mut k = Clocks { t: 0.0, anim: 0.0, shape: -5000.0, pop: None, greeted: 0.0, visible: false, n: 0 };
+            let sync = |isl: &mut Island, greeting: &mut Greeting, k: &Clocks| {
+                let base = Instant::now();
+                let ago = |ms: f64| base - Duration::from_secs_f64(ms.max(0.0) / 1000.0);
+                isl.anim_at = ago(k.t - k.anim);
+                isl.shape_at = ago(k.t - k.shape);
+                isl.multi.pop = k.pop.map(|(kind, at)| (kind, ago(k.t - at)));
+                greeting.preview_at((k.t - k.greeted) / 1000.0);
+            };
+            let frame = |isl: &mut Island, greeting: &Greeting, k: &mut Clocks, caption: &str| {
+                let mut c = Canvas::new((W * S) as u32, (H * S) as u32, S);
+                c.gradient_round_rect(0.0, 0.0, W, H, 0.0, &[(0.0, Rgba::rgb(38, 52, 104)), (0.55, Rgba::rgb(92, 64, 128)), (1.0, Rgba::rgb(196, 112, 120))], 0.0, H);
+                c.fill_round_rect(0.0, H - 48.0, W, H, 0.0, Rgba(22, 22, 28, 235));
+                c.fill_round_rect(0.0, H - 48.0, W, H - 47.0, 0.0, Rgba(255, 255, 255, 22));
+                // o botão Iniciar, à direita da ilha
+                let (sx, sy) = (xa + compact_w / 2.0 + 10.0 * SIZE + 14.0, H - 24.0);
+                for (dx, dy) in [(-5.5f32, -5.5f32), (0.5, -5.5), (-5.5, 0.5), (0.5, 0.5)] {
+                    c.fill_round_rect(sx + dx, sy + dy, sx + dx + 5.0, sy + dy + 5.0, 0.6, Rgba::rgb(86, 170, 255));
+                }
+                for (j, x) in [sx + 26.0, sx + 52.0, sx + 78.0].iter().enumerate() {
+                    c.fill_round_rect(*x - 8.0, sy - 8.0, *x + 8.0, sy + 8.0, 3.0, Rgba(255, 255, 255, [40u8, 30, 30][j]));
+                }
+                c.text(18.0, 26.0, period.hello_text(), Face::Semibold, 17.0, WHITE, Anchor::LM, None);
+                c.text(18.0, 48.0, caption, Face::Regular, 12.0, Rgba(255, 255, 255, 190), Anchor::LM, None);
+                if k.visible {
+                    let scene = Scene { info: None, kinds: vec![greeting], cfg: &cfg };
+                    let (img, pos) = isl.render(&scene);
+                    let (wa, _) = isl.pop_alpha();
+                    c.image_px(&img, (pos.0 as f32 - origin.0).round(), (pos.1 as f32 - origin.1).round(), img.w as f32, img.h as f32, wa);
+                }
+                crate::gfx::save_png(&c.finish(), &dir.join(format!("f{:05}.png", k.n))).unwrap();
+                k.n += 1;
+            };
+            let step = 1000.0 / FPS;
+            // roda o vídeo por `ms`, com `caption` embaixo do título
+            let mut play = |isl: &mut Island, greeting: &mut Greeting, k: &mut Clocks, ms: f64, caption: &str| {
+                let until = k.t + ms;
+                while k.t < until {
+                    if let Some((Pop::Appear, at)) = k.pop {
+                        if k.t - at >= APPEAR_MS as f64 {
+                            k.pop = None;
+                        }
+                    }
+                    sync(isl, greeting, k);
+                    frame(isl, greeting, k, caption);
+                    k.t += step;
+                }
+            };
+            let shape = |isl: &mut Island, greeting: &mut Greeting, k: &mut Clocks, to: Shape| {
+                sync(isl, greeting, k);
+                isl.set_shape(to);
+                k.anim = k.t;
+                k.shape = k.t;
+            };
+            let appear = |isl: &mut Island, k: &mut Clocks| {
+                k.visible = true;
+                isl.to = isl.target(Shape::Compact);
+                isl.from = isl.drop_of(isl.to, 0.5);
+                isl.anim_ms = APPEAR_MS;
+                k.anim = k.t;
+                k.greeted = k.t;
+                k.pop = Some((Pop::Appear, k.t));
+            };
+            let vanish = |isl: &mut Island, greeting: &mut Greeting, k: &mut Clocks| {
+                sync(isl, greeting, k);
+                isl.start_vanish(true, Instant::now());
+                k.anim = k.t;
+                k.pop = Some((Pop::Vanish, k.t));
+            };
+
+            let caption_a = "Sozinha: o tempo e as cotações se alternam a cada 7 s";
+            play(&mut isl, &mut greeting, &mut k, 700.0, caption_a);
+            // nasce: a gota acende e estica direto com a saudação (o aviso estica a ilha)
+            appear(&mut isl, &mut k);
+            isl.multi.banner = Some(("saudacao", Instant::now()));
+            play(&mut isl, &mut greeting, &mut k, 40.0, caption_a);
+            shape(&mut isl, &mut greeting, &mut k, Shape::Banner);
+            play(&mut isl, &mut greeting, &mut k, 4000.0, caption_a);
+            isl.multi.banner = None;
+            shape(&mut isl, &mut greeting, &mut k, Shape::Compact);
+            // até o tempo da saudação acabar (28 s desde que apareceu)
+            let left = 28_000.0 - (k.t - k.greeted);
+            play(&mut isl, &mut greeting, &mut k, left, caption_a);
+            // some: o conteúdo apaga, encolhe numa gota e a gota some
+            vanish(&mut isl, &mut greeting, &mut k);
+            play(&mut isl, &mut greeting, &mut k, VANISH_MS as f64 + 40.0, caption_a);
+            k.visible = false;
+            k.pop = None;
+            play(&mut isl, &mut greeting, &mut k, 900.0, caption_a);
+
+            // de novo, para mostrar com o mouse em cima e aberta
+            let caption_b = "Com o mouse em cima (também alterna) e aberta com um clique";
+            appear(&mut isl, &mut k);
+            play(&mut isl, &mut greeting, &mut k, 900.0, caption_b);
+            shape(&mut isl, &mut greeting, &mut k, Shape::Medium);
+            play(&mut isl, &mut greeting, &mut k, 8600.0, caption_b);
+            shape(&mut isl, &mut greeting, &mut k, Shape::Large);
+            play(&mut isl, &mut greeting, &mut k, 4200.0, caption_b);
+            shape(&mut isl, &mut greeting, &mut k, Shape::Compact);
+            play(&mut isl, &mut greeting, &mut k, 800.0, caption_b);
+            vanish(&mut isl, &mut greeting, &mut k);
+            play(&mut isl, &mut greeting, &mut k, VANISH_MS as f64 + 40.0, caption_b);
+            k.visible = false;
+            k.pop = None;
+            play(&mut isl, &mut greeting, &mut k, 700.0, caption_b);
+            println!("{} ({} quadros)", dir.display(), k.n);
         }
     }
 

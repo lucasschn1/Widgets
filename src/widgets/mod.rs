@@ -11,6 +11,7 @@ pub mod github;
 pub mod island_ui;
 pub mod media;
 pub mod odometer;
+pub mod outside;
 pub mod pomodoro;
 pub mod sky;
 pub mod system;
@@ -84,6 +85,8 @@ pub fn title(key: &str) -> &'static str {
         "pomodoro" => "Pomodoro",
         "claude" => "Uso do Claude",
         "bateria" => "Bateria",
+        // as fontes da ilha que não são widgets (o mundo lá fora)
+        k if outside::KEYS.contains(&k) => outside::title(k),
         _ => "Widget",
     }
 }

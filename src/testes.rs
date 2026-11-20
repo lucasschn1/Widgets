@@ -355,38 +355,11 @@ fn every_widget_answers_the_mouse_everywhere() {
 /// próprio widget.
 #[test]
 fn island_widgets_draw_and_answer_in_every_form() {
-    use crate::widgets::island_ui;
-    use crate::widgets::IslandForm;
     com();
-    let forms = [IslandForm::Bubble, IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
     let mut on_island = Vec::new();
     for (name, kind, cfg) in cases() {
-        let env = Env { cfg: &cfg, key: kind.key() };
-        let Some(item) = kind.island_item(&env) else { continue };
-        on_island.push(name.clone());
-        assert!(item.alert || !item.urgent, "{name}: só aviso é urgente");
-        for form in forms {
-            let (w, h, _) = island_ui::size(form);
-            let mut c = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
-            c.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
-            let before = ink(&{
-                let mut b = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
-                b.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
-                b.finish()
-            });
-            kind.island_draw(&mut c, form, (0.0, 0.0, w, h), None, &env);
-            let img = c.finish();
-            let lit = img.px.chunks_exact(4).filter(|p| p[0] > 40 || p[1] > 40 || p[2] > 40).count();
-            assert!(lit > 20, "{name} {form:?}: nada desenhado na ilha ({before})");
-            let mut y = -2.0;
-            while y <= h + 2.0 {
-                let mut x = -2.0;
-                while x <= w + 2.0 {
-                    let _ = kind.island_hit(form, x, y, w, h, &env);
-                    x += 3.0;
-                }
-                y += 3.0;
-            }
+        if check_island(&name, kind.as_ref(), &cfg) {
+            on_island.push(name.clone());
         }
     }
     for expected in ["pomodoro foco rodando", "sistema com a CPU alta", "github com revisões", "bateria", "bateria entrou na tomada", "bateria saiu da tomada", "tempo aviso chuva", "tempo aviso trovoada", "tempo aviso frio"] {
@@ -395,6 +368,61 @@ fn island_widgets_draw_and_answer_in_every_form() {
     for never in ["pomodoro novo", "sistema", "github", "bateria sem nada", "tempo início m", "tempo chovendo m"] {
         assert!(!on_island.iter().any(|n| n == never), "{never} não tem nada para a ilha");
     }
+}
+
+/// O mundo lá fora (o pôr do sol, a lua, a ISS, a cotação, o expediente): cada fonte, em cada
+/// estado, está na ilha, desenha em todas as formas e responde ao mouse em toda a área; cada uma
+/// tem nome e descrição nas Configurações.
+#[test]
+fn outside_feeds_draw_and_answer_in_every_form() {
+    use crate::widgets::outside;
+    com();
+    for (name, kind, cfg) in outside::samples() {
+        assert!(check_island(&name, kind.as_ref(), &cfg), "{name} devia estar na ilha");
+        assert!(outside::KEYS.contains(&kind.key()), "{name}");
+    }
+    let created: Vec<&str> = outside::create_all(&json!({})).iter().map(|k| k.key()).collect();
+    assert_eq!(created, outside::KEYS);
+    for key in outside::KEYS {
+        assert!(!outside::title(key).is_empty() && !outside::description(key).is_empty(), "{key}");
+        assert_eq!(widgets::title(key), outside::title(key));
+        assert!(!widgets::KEYS.contains(&key), "{key} não é um widget da área de trabalho");
+    }
+}
+
+/// O que `kind` mostra na ilha (se mostra algo): desenha em todas as formas e responde ao mouse
+/// em toda a área de cada uma. Devolve se ele está na ilha.
+fn check_island(name: &str, kind: &dyn Kind, cfg: &Value) -> bool {
+    use crate::widgets::island_ui;
+    use crate::widgets::IslandForm;
+    let forms = [IslandForm::Bubble, IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
+    let env = Env { cfg, key: kind.key() };
+    let Some(item) = kind.island_item(&env) else { return false };
+    assert!(item.alert || !item.urgent, "{name}: só aviso é urgente");
+    for form in forms {
+        let (w, h, _) = island_ui::size(form);
+        let mut c = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
+        c.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
+        let before = ink(&{
+            let mut b = Canvas::new((w * S).round() as u32, (h * S).round() as u32, S);
+            b.fill_round_rect(0.0, 0.0, w, h, h / 2.0, crate::theme::Rgba::rgb(0, 0, 0));
+            b.finish()
+        });
+        kind.island_draw(&mut c, form, (0.0, 0.0, w, h), None, &env);
+        let img = c.finish();
+        let lit = img.px.chunks_exact(4).filter(|p| p[0] > 40 || p[1] > 40 || p[2] > 40).count();
+        assert!(lit > 20, "{name} {form:?}: nada desenhado na ilha ({before})");
+        let mut y = -2.0;
+        while y <= h + 2.0 {
+            let mut x = -2.0;
+            while x <= w + 2.0 {
+                let _ = kind.island_hit(form, x, y, w, h, &env);
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+    }
+    true
 }
 
 #[test]
