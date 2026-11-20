@@ -543,6 +543,11 @@ impl App {
     fn segment(&mut self, id: &'static str, value: &str) {
         match id {
             "animacoes" => self.set_setting("animacoes", json!(value)),
+            "fim_expediente" => {
+                self.sh.cfg.obj_mut("expediente").insert("fim".into(), json!(value));
+                self.sh.save();
+                self.island_sync_at = Instant::now();
+            }
             "fonte" => {
                 let index = ["auto", "spotify", "youtube"].iter().position(|v| *v == value).unwrap_or(0) as u32;
                 match self.find("midia") {

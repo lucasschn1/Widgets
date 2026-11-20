@@ -152,6 +152,9 @@ pub struct App {
     island: Option<island::Island>,
     /// quando perguntar de novo aos widgets o que eles têm para a ilha
     island_sync_at: Instant,
+    /// o que só aparece na ilha, sem cartão (o pôr do sol, a lua, a ISS, a cotação, o
+    /// expediente: ver widgets::outside)
+    feeds: Vec<Box<dyn Kind>>,
     /// o Clawd na barra de tarefas
     perch: Option<perch::Perch>,
     /// as pilhas de widgets (vários no mesmo lugar, trocando com a roda do mouse)
@@ -227,12 +230,14 @@ impl App {
             keep_saved_pos: false,
             island: None,
             island_sync_at: Instant::now() + Duration::from_secs(2),
+            feeds: Vec::new(),
             perch: None,
             stacks: Vec::new(),
             stack_wheel: (0.0, Instant::now()),
             drop_target: None,
             quit: false,
         };
+        app.feeds = widgets::outside::create_all(&app.sh.cache);
         let screens_change = app.begin_screens_startup();
         // na ordem da arrumação da primeira vez (para quem ainda não tem posição guardada)
         let order = widgets::FIRST_LAYOUT.iter().flat_map(|col| col.iter().copied()).chain(widgets::KEYS.iter().copied());
@@ -291,6 +296,18 @@ impl App {
             f(self.cards[i].kind.as_mut(), &mut ctx)
         };
         self.requests(out, Some(i));
+        r
+    }
+
+    /// Chama a fonte da ilha `i` (sem cartão) com acesso à configuração.
+    fn with_feed<R>(&mut self, i: usize, f: impl FnOnce(&mut dyn Kind, &mut Ctx) -> R) -> R {
+        let mut out = Vec::new();
+        let key = self.feeds[i].key();
+        let r = {
+            let mut ctx = Ctx { cfg: &mut self.sh.cfg, cache: &mut self.sh.cache, key, out: &mut out };
+            f(self.feeds[i].as_mut(), &mut ctx)
+        };
+        self.requests(out, None);
         r
     }
 
@@ -1904,6 +1921,9 @@ impl App {
         if self.sh.peeking {
             next = next.min(Instant::now() + Duration::from_millis(250));
         }
+        for t in self.feeds.iter().filter_map(|f| f.next_tick()) {
+            next = next.min(t);
+        }
         for c in &self.cards {
             for t in [c.next_frame(), c.kind.next_tick(), c.expand_at].into_iter().flatten() {
                 next = next.min(t);
@@ -1923,6 +1943,11 @@ impl App {
         self.tooltip.tick();
         self.menu.watch();
         self.panels_tick();
+        for i in 0..self.feeds.len() {
+            if self.feeds[i].next_tick().is_some_and(|t| now >= t) {
+                self.with_feed(i, |k, ctx| k.tick(ctx));
+            }
+        }
         self.island_sync();
         self.island_tick();
         if self.welcome_at.is_some_and(|t| now >= t) {

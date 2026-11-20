@@ -8,10 +8,10 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Registry::*;
-use windows::Win32::System::SystemInformation::{GetLocalTime, GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount, GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::GetSystemTimes;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, GetAsyncKeyState, GetLastInputInfo, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, LASTINPUTINFO};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -540,6 +540,27 @@ pub fn clock_at(epoch: f64) -> String {
     let t = unsafe { GetLocalTime() };
     let local = t.wHour as f64 * 3600.0 + t.wMinute as f64 * 60.0 + t.wSecond as f64 + t.wMilliseconds as f64 / 1000.0;
     clock_with_offset(epoch, utc_offset(local, now()))
+}
+
+/// Há quantos segundos o teclado e o mouse estão parados (a pessoa longe do PC).
+pub fn idle_secs() -> f64 {
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    unsafe {
+        if GetLastInputInfo(&mut info).as_bool() {
+            GetTickCount().wrapping_sub(info.dwTime) as f64 / 1000.0
+        } else {
+            0.0
+        }
+    }
+}
+
+/// O fuso do PC agora, em segundos (-3 h = -10800).
+pub fn utc_offset_now() -> f64 {
+    let t = unsafe { GetLocalTime() };
+    let local = t.wHour as f64 * 3600.0 + t.wMinute as f64 * 60.0 + t.wSecond as f64 + t.wMilliseconds as f64 / 1000.0;
+    let off = utc_offset(local, now());
+    // os fusos vão de -12 h a +14 h
+    if off > 14.0 * 3600.0 { off - 86400.0 } else { off }
 }
 
 /// O fuso de agora em segundos (múltiplo de 1 minuto), da hora local do dia (`local`, em
