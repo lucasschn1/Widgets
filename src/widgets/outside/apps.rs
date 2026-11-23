@@ -47,10 +47,10 @@ const ACCESS_EVERY: Duration = Duration::from_secs(20);
 const LOGO_EDGE_ALPHA: u8 = 16;
 /// o tamanho do ícone do app (em pontos) em cada forma da ilha: a bolha (de 42), a pílula
 /// fechada e esticada (de 42 de altura), a média e a aberta
-const LOGO_BUBBLE: f32 = 30.0;
-const LOGO_PILL: f32 = 28.0;
-const LOGO_MEDIUM: f32 = 50.0;
-const LOGO_LARGE: f32 = 52.0;
+const LOGO_BUBBLE: f32 = 26.0;
+const LOGO_PILL: f32 = 24.0;
+const LOGO_MEDIUM: f32 = 42.0;
+const LOGO_LARGE: f32 = 44.0;
 /// a cor de quem não está na lista de cores conhecidas
 const PALETTE: [Rgba; 6] = [Rgba::rgb(10, 132, 255), Rgba::rgb(191, 90, 242), Rgba::rgb(255, 159, 10), Rgba::rgb(48, 209, 88), Rgba::rgb(255, 69, 58), Rgba::rgb(100, 210, 255)];
 
