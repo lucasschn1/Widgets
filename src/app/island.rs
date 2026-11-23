@@ -1307,7 +1307,7 @@ impl Island {
             if !self.multi.strip && self.bubble_entries().len() > 1 && lingered {
                 self.multi.strip = true;
             }
-        } else if self.multi.strip && self.multi.strip_out.get_or_insert(now).elapsed() >= HOVER_OUT {
+        } else if self.multi.strip && now.saturating_duration_since(*self.multi.strip_out.get_or_insert(now)) >= HOVER_OUT {
             self.multi.strip = false;
             self.multi.strip_out = None;
         }
@@ -1317,7 +1317,11 @@ impl Island {
     /// O mouse na pílula: com ele em cima um instante, ela estica (a forma média); longe, ou com
     /// um clique fora, recolhe. A gota só abre com cliques. Devolve true se a escolha feita só
     /// por passar o mouse acabou (a ordem da ilha volta ao normal).
-    fn follow_pointer_on_pill(&mut self, over: bool, on_bubbles: bool, now: Instant) -> bool {
+    ///
+    /// `clicked` diz se algum botão do mouse está apertado, e o tempo conta a partir de `now`
+    /// (não do relógio): quem chama lê os dois, e assim os testes não dependem do mouse de
+    /// verdade nem da velocidade do PC.
+    fn follow_pointer_on_pill(&mut self, over: bool, on_bubbles: bool, clicked: bool, now: Instant) -> bool {
         if over || on_bubbles {
             self.outside_since = None;
             self.inside_since.get_or_insert(now);
@@ -1327,7 +1331,10 @@ impl Island {
         if over {
             let since = self.inside_since.unwrap_or(now);
             let only_by_click = self.rest_item().is_some_and(|i| i.dot);
-            if !only_by_click && matches!(self.shape, Shape::Compact | Shape::Banner) && since.elapsed() >= HOVER_IN {
+            if !only_by_click
+                && matches!(self.shape, Shape::Compact | Shape::Banner)
+                && now.saturating_duration_since(since) >= HOVER_IN
+            {
                 // passou o mouse no aviso: ele fica na pílula enquanto ela está aberta
                 if self.shape == Shape::Banner {
                     if let Some((key, _)) = self.multi.banner {
@@ -1343,15 +1350,14 @@ impl Island {
             }
             return false;
         }
-        let since = *self.outside_since.get_or_insert(now);
+        let away_for = now.saturating_duration_since(*self.outside_since.get_or_insert(now));
         // a gota aberta com um clique volta a ser gota com o mouse longe
-        if self.opened_dot && self.shape.closed() && since.elapsed() >= DOT_BACK {
+        if self.opened_dot && self.shape.closed() && away_for >= DOT_BACK {
             self.opened_dot = false;
         }
-        let clicked_away = win::key_down(VK_LBUTTON) || win::key_down(VK_RBUTTON);
         let collapse = match self.shape {
-            Shape::Medium => since.elapsed() >= HOVER_OUT,
-            Shape::Large => clicked_away || since.elapsed() >= LARGE_IDLE,
+            Shape::Medium => away_for >= HOVER_OUT,
+            Shape::Large => clicked || away_for >= LARGE_IDLE,
             _ => false,
         };
         if !collapse {
@@ -2188,7 +2194,8 @@ impl App {
         if isl.morph == Morph::None && !isl.dragging && !isl.vanishing() {
             let over = isl.geo().contains(px, py);
             let on_bubbles = isl.follow_pointer_on_bubbles(px, py, now);
-            if isl.follow_pointer_on_pill(over, on_bubbles, now) {
+            let clicked = win::key_down(VK_LBUTTON) || win::key_down(VK_RBUTTON);
+            if isl.follow_pointer_on_pill(over, on_bubbles, clicked, now) {
                 self.island_sync_at = now;
             }
             isl.stretch_for_alerts(over);
@@ -2708,20 +2715,32 @@ mod tests {
     }
 
     /// Aberta inteira, a ilha volta ao tamanho normal 1 s depois que o mouse sai dela (e não
-    /// antes).
+    /// antes). O tempo é o de `now`, não o do relógio: o teste não depende da velocidade do PC.
     #[test]
     fn large_island_closes_a_second_after_the_mouse_leaves() {
+        let left_at = Instant::now();
+        let after = |ms: u64| left_at + Duration::from_millis(ms);
         let mut isl = island(Shape::Large, Morph::None, 1.0);
-        isl.outside_since = Some(Instant::now() - Duration::from_millis(900));
-        isl.follow_pointer_on_pill(false, false, Instant::now());
+        isl.outside_since = Some(left_at);
+        isl.follow_pointer_on_pill(false, false, false, after(900));
         assert_eq!(isl.shape, Shape::Large, "com 0,9 s fora, ainda aberta");
-        isl.outside_since = Some(Instant::now() - Duration::from_millis(1100));
-        isl.follow_pointer_on_pill(false, false, Instant::now());
+        isl.follow_pointer_on_pill(false, false, false, after(1100));
         assert!(isl.shape.closed(), "com 1,1 s fora, fechada: {:?}", isl.shape);
         // o mouse voltando zera a conta
         isl.set_shape(Shape::Large);
-        isl.follow_pointer_on_pill(true, false, Instant::now());
+        isl.follow_pointer_on_pill(true, false, false, after(1200));
         assert_eq!(isl.outside_since, None);
+    }
+
+    /// Aberta inteira, um clique fora fecha a ilha na hora, sem esperar o segundo.
+    #[test]
+    fn large_island_closes_at_once_with_a_click_away() {
+        let now = Instant::now();
+        let mut isl = island(Shape::Large, Morph::None, 1.0);
+        isl.follow_pointer_on_pill(false, false, false, now);
+        assert_eq!(isl.shape, Shape::Large, "sem clique, ainda aberta");
+        isl.follow_pointer_on_pill(false, false, true, now);
+        assert!(isl.shape.closed(), "com um clique fora, fechada: {:?}", isl.shape);
     }
 
     /// A gota (e a troca de gota para pílula) desenha em todos os passos.
