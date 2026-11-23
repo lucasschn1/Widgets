@@ -279,7 +279,7 @@ impl App {
         }
     }
 
-    /// A roda do mouse no painel `i` (rola as Configurações).
+    /// A roda do mouse no painel `i` (rola a página das Configurações; o menu cabe inteiro).
     pub(super) fn panel_wheel(&mut self, i: usize, delta: i32) {
         if let PanelKind::Settings(state) = &mut self.panels[i].kind {
             if state.scroll(delta as f32 / WHEEL_DELTA) {
