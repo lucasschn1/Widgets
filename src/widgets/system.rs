@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use super::odometer::draw_counting;
 use super::island_ui::{self as iu, SOFT};
 use super::{alert_hash, Ctx, Env, Hot, IslandForm, IslandItem, Kind, MenuItem, Mode, Rect4, Status, LARGE_H, SMALL, WIDE};
-use crate::drawing;
+use crate::gfx::drawing;
 use crate::gfx::{Anchor, Canvas, Face, Image};
-use crate::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
-use crate::theme::*;
-use crate::win;
+use crate::platform::sysinfo::{self, AppUse, CpuSpeed, Drive, Sampler};
+use crate::ui::theme::*;
+use crate::platform::win;
 
 const W: f32 = WIDE;
 const PAD: f32 = super::CARD_PAD;
@@ -39,6 +39,21 @@ const RING_MS: f32 = 550.0;
 /// mudança a partir da qual os anéis animam (3 pontos percentuais); menor, vão direto
 const RING_STEP: f32 = 0.03;
 const BARS_MS: f32 = 650.0;
+/// as barras da lista enchem uma depois da outra, com este atraso entre elas
+const BAR_STAGGER_MS: f32 = 55.0;
+/// o pequeno virado: as linhas sobem e aparecem uma depois da outra (atraso e duração de cada uma)
+const BACK_P_STAGGER_MS: f32 = 60.0;
+const BACK_P_RISE_MS: f32 = 380.0;
+/// as barras param de pedir quadros um pouco depois de cheias (a última começa mais tarde)
+const BARS_TAIL_MS: f32 = 300.0;
+/// animando: um quadro a cada 33 ms (30 por segundo)
+const FRAME: Duration = Duration::from_millis(33);
+/// esperando a primeira leitura dos apps: olhar de novo a cada 200 ms
+const APPS_POLL: Duration = Duration::from_millis(200);
+/// a lista acabou de aparecer: a próxima medida vem em no máximo 900 ms
+const SOON: Duration = Duration::from_millis(900);
+/// as unidades de disco são lidas de novo com a lista aberta a cada 30 s
+const DRIVES_EVERY: Duration = Duration::from_secs(30);
 
 // ações
 const SELECT: u32 = 10; // + recurso (0 CPU, 1 memória, 2 disco)
@@ -50,9 +65,9 @@ const DISMISS: u32 = 5;
 
 /// CPU ou memória acima disto por `HIGH_FOR` entram na ilha (os mesmos limites da notificação);
 /// saem abaixo de `CALM`.
-const HIGH: f32 = crate::config::HIGH_USE;
+const HIGH: f32 = crate::data::config::HIGH_USE;
 const CALM: f32 = HIGH - 0.1;
-const HIGH_FOR: Duration = Duration::from_secs(crate::config::HIGH_USE_SECS);
+const HIGH_FOR: Duration = Duration::from_secs(crate::data::config::HIGH_USE_SECS);
 const QUIET_FOR: Duration = Duration::from_secs(3600);
 
 const NAMES: [&str; 3] = ["CPU", "Memória", "Disco"];
@@ -113,13 +128,14 @@ fn app_icon(c: &mut Canvas, icon: Option<&Image>, name: &str, x: f32, y: f32, si
 /// Sombra suave logo à frente da ponta de um anel (o fim arredondado em `end` graus), como nos
 /// anéis de atividade: desenhada antes do arco, só aparece a parte que sai da frente dele e dá
 /// a impressão de a ponta estar um pouco acima do trilho.
-fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, wd: f32) {
-    let a = end.to_radians();
+fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, thickness: f32) {
+    let angle = end.to_radians();
     // a direção em que o anel anda (sentido horário na tela)
-    let (dx, dy) = (-a.sin(), a.cos());
-    let (tx, ty) = (cx + r * a.cos() + dx * wd * 0.14, cy + r * a.sin() + dy * wd * 0.14);
-    for k in 0..4 {
-        c.fill_circle(tx, ty, wd / 2.0 + 0.6 * k as f32, Rgba(0, 0, 0, 22 - 4 * k as u8));
+    let (dx, dy) = (-angle.sin(), angle.cos());
+    let (tx, ty) = (cx + r * angle.cos() + dx * thickness * 0.14, cy + r * angle.sin() + dy * thickness * 0.14);
+    // quatro círculos cada vez maiores e mais claros: a sombra esfumada
+    for layer in 0..4 {
+        c.fill_circle(tx, ty, thickness / 2.0 + 0.6 * layer as f32, Rgba(0, 0, 0, 22 - 4 * layer as u8));
     }
 }
 
@@ -135,12 +151,35 @@ fn back_p_title_size(c: &Canvas, name: &str, pct: &str, room: f32) -> f32 {
     size
 }
 
+/// Começa rápido e chega devagar (0 a 1).
 fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-fn br(v: f64, digits: usize) -> String {
-    format!("{v:.digits$}").replace('.', ",")
+/// Um número com `digits` casas e vírgula, como se escreve no Brasil ("2,84").
+fn br(value: f64, digits: usize) -> String {
+    format!("{value:.digits$}").replace('.', ",")
+}
+
+/// A última leitura dos bytes da rede: recebidos, enviados e quando.
+#[derive(Clone, Copy)]
+struct NetReading {
+    received: u64,
+    sent: u64,
+    at: Instant,
+}
+
+/// Onde ficam os três anéis em cada tamanho.
+#[derive(Clone, Copy)]
+struct RingsGeom {
+    cx: f32,
+    cy: f32,
+    /// o diâmetro do anel de fora
+    diameter: f32,
+    /// a espessura de cada anel
+    thickness: f32,
+    /// quanto o diâmetro diminui de um anel para o de dentro
+    step: f32,
 }
 
 /// Uma linha da lista: nome, valor, fração da barra, ícone.
@@ -162,7 +201,7 @@ pub struct System {
     amounts: [String; 3],
     speed: Option<CpuSpeed>,
     last_cpu: (u64, u64),
-    last_net: (u64, u64, Instant),
+    last_net: NetReading,
     rates: (f64, f64),
     next: Instant,
     sampler: Sampler,
@@ -187,13 +226,15 @@ pub struct System {
 
 impl System {
     pub fn new() -> System {
-        let mut s = System::with(Sampler::new());
-        s.speed = CpuSpeed::new();
-        s
+        let mut system = System::with(Sampler::new());
+        system.speed = CpuSpeed::new();
+        system
     }
 
+    /// O widget com os anéis zerados e uma primeira medida, lendo os apps com `sampler`.
     fn with(sampler: Sampler) -> System {
-        let mut s = System {
+        let (received, sent) = sysinfo::net_bytes();
+        let mut system = System {
             target: [0.0; 3],
             from: [0.0; 3],
             ring_since: Instant::now(),
@@ -201,7 +242,7 @@ impl System {
             amounts: Default::default(),
             speed: None,
             last_cpu: win::cpu_times(),
-            last_net: (0, 0, Instant::now()),
+            last_net: NetReading { received, sent, at: Instant::now() },
             rates: (0.0, 0.0),
             next: Instant::now(),
             sampler,
@@ -217,80 +258,79 @@ impl System {
             high_since: [None; 2],
             quiet_until: None,
         };
-        let (rx, tx) = sysinfo::net_bytes();
-        s.last_net = (rx, tx, Instant::now());
-        s.measure();
-        s
+        system.measure();
+        system
     }
 
     /// Exemplo para a galeria (sem ler o sistema de verdade).
     pub fn sample() -> System {
-        let mut s = System::with(Sampler::idle());
-        s.target = [0.24, 0.68, 0.54];
-        s.from = s.target;
-        s.amounts = ["2,84 GHz".into(), "10,9/16 GB".into(), "258/477 GB".into()];
-        s.ring_since = Instant::now() - Duration::from_secs(5);
-        s
+        let mut system = System::with(Sampler::idle());
+        system.target = [0.24, 0.68, 0.54];
+        system.from = system.target;
+        system.amounts = ["2,84 GHz".into(), "10,9/16 GB".into(), "258/477 GB".into()];
+        system.ring_since = Instant::now() - Duration::from_secs(5);
+        system
     }
 
     /// Exemplo com CPU, memória e disco escolhidos (0 a 1), já sem a animação dos anéis (a capa
     /// do README).
     #[cfg(test)]
     pub fn sample_values(values: [f32; 3]) -> System {
-        let mut s = System::sample();
-        s.target = values;
-        s.from = values;
-        s
+        let mut system = System::sample();
+        system.target = values;
+        system.from = values;
+        system
     }
 
     /// Os anéis indo de outros números aos do exemplo há `ms` milissegundos: as porcentagens
     /// contando, com os dígitos rolando.
     #[cfg(test)]
     pub fn sample_counting(ms: u64) -> System {
-        let mut s = System::sample();
-        s.from = [0.17, 0.75, 0.47];
-        s.ring_since = Instant::now() - Duration::from_millis(ms);
-        s
+        let mut system = System::sample();
+        system.from = [0.17, 0.75, 0.47];
+        system.ring_since = Instant::now() - Duration::from_millis(ms);
+        system
     }
 
     /// Exemplo virado (pequeno ou médio) mostrando os apps de um recurso (imagens do README).
     #[cfg(test)]
     pub fn sample_flipped(which: Option<usize>, mode: Mode) -> System {
-        let s = System::sample();
-        s.mode_seen.set(mode);
-        s.flipped.set(which);
-        let mut s = s;
-        // cinco, como no uso de verdade (a lista do grande mostra até `LIST_N`)
+        let mut system = System::sample();
+        system.mode_seen.set(mode);
+        system.flipped.set(which);
+        // cinco, como no uso de verdade (a lista do grande mostra até `LIST_N`): nome, % da CPU e
+        // GB de memória
         let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6), ("Explorador de Arquivos", 0.4, 0.2)];
-        s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
-        s.bars_since = Instant::now() - Duration::from_secs(5);
-        s.rates = (1.8e6, 2.4e5);
-        s
+        system.apps = apps.iter().map(|&(name, cpu, gb)| AppUse { name: name.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
+        system.bars_since = Instant::now() - Duration::from_secs(5);
+        system.rates = (1.8e6, 2.4e5);
+        system
     }
 
     /// A CPU alta há dois minutos, com os apps lidos: o aviso da ilha.
     #[cfg(test)]
     pub fn sample_alarm() -> System {
-        let mut s = System::sample_flipped(None, Mode::M);
-        s.target = [0.92, 0.68, 0.41];
-        s.from = s.target;
-        s.apps[0].cpu = 41.0;
-        s.high_since = [Some(Instant::now() - HIGH_FOR - Duration::from_secs(60)), None];
-        s
+        let mut system = System::sample_flipped(None, Mode::M);
+        system.target = [0.92, 0.68, 0.41];
+        system.from = system.target;
+        system.apps[0].cpu = 41.0;
+        system.high_since = [Some(Instant::now() - HIGH_FOR - Duration::from_secs(60)), None];
+        system
     }
 
     /// O mesmo, com ícones de 64 px nos apps (como os que o Windows dá), para desenhar o caminho
     /// dos ícones de verdade.
     #[cfg(test)]
     pub fn sample_with_icons(which: Option<usize>, mode: Mode) -> System {
-        let mut s = System::sample_flipped(which, mode);
+        let mut system = System::sample_flipped(which, mode);
         let icon = Arc::new(test_icon(64));
-        for app in s.apps.iter_mut().take(2) {
+        for app in system.apps.iter_mut().take(2) {
             app.icon = Some(icon.clone());
         }
-        s
+        system
     }
 
+    /// Lê a CPU, a memória, o disco e a rede de agora e põe os anéis e os textos em dia.
     fn measure(&mut self) {
         let (idle, total) = win::cpu_times();
         let (last_idle, last_total) = self.last_cpu;
@@ -300,26 +340,27 @@ impl System {
         let cpu = cpu.clamp(0.0, 1.0);
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         let (used, total_mem) = win::memory();
-        let (dused, dtotal, _) = win::disk_usage("C:\\");
+        let disk = win::disk_usage("C:\\");
+        let (dused, dtotal) = (disk.used, disk.total);
         let values = [cpu as f32, (used as f64 / total_mem as f64) as f32, (dused as f64 / dtotal.max(1) as f64) as f32];
         let ghz = self.speed.as_ref().and_then(CpuSpeed::ghz);
-        let speed = ghz.map(|g| format!(" · {} GHz", br(g, 2))).unwrap_or_default();
+        let speed = ghz.map(|ghz| format!(" · {} GHz", br(ghz, 2))).unwrap_or_default();
         self.details = [
             format!("{}% em uso · {cores} núcleos{speed}", (cpu * 100.0).round()),
             format!("{} de {:.0} GB em uso", br(win::gb(used), 1), win::gb(total_mem)),
             format!("C: {:.0} de {:.0} GB em uso", win::gb(dused), win::gb(dtotal)),
         ];
         self.amounts = [
-            ghz.map(|g| format!("{} GHz", br(g, 2))).unwrap_or_else(|| format!("{cores} núcleos")),
+            ghz.map(|ghz| format!("{} GHz", br(ghz, 2))).unwrap_or_else(|| format!("{cores} núcleos")),
             format!("{}/{:.0} GB", br(win::gb(used), 1), win::gb(total_mem)),
             format!("{:.0}/{:.0} GB", win::gb(dused), win::gb(dtotal)),
         ];
         self.set_rings(values);
         self.watch_high(values);
-        let (rx, tx) = sysinfo::net_bytes();
-        let secs = self.last_net.2.elapsed().as_secs_f64().max(0.1);
-        self.rates = (rx.saturating_sub(self.last_net.0) as f64 / secs, tx.saturating_sub(self.last_net.1) as f64 / secs);
-        self.last_net = (rx, tx, Instant::now());
+        let (received, sent) = sysinfo::net_bytes();
+        let secs = self.last_net.at.elapsed().as_secs_f64().max(0.1);
+        self.rates = (received.saturating_sub(self.last_net.received) as f64 / secs, sent.saturating_sub(self.last_net.sent) as f64 / secs);
+        self.last_net = NetReading { received, sent, at: Instant::now() };
         self.next = Instant::now() + EVERY;
     }
 
@@ -336,11 +377,12 @@ impl System {
         }
     }
 
+    /// Onde os anéis estão agora (0 a 1), no meio da animação até `target`.
     fn shown(&self) -> [f32; 3] {
-        let t = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS);
+        let progress = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS);
         let mut out = [0.0; 3];
         for i in 0..3 {
-            out[i] = self.from[i] + (self.target[i] - self.from[i]) * t;
+            out[i] = self.from[i] + (self.target[i] - self.from[i]) * progress;
         }
         out
     }
@@ -348,9 +390,9 @@ impl System {
     /// A porcentagem de `i` contando junto com o anel (de um inteiro ao outro, no mesmo ritmo):
     /// 43,6 é o 3 rolando para o 4; parada, o número de agora.
     fn counted(&self, i: usize) -> f64 {
-        let t = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS) as f64;
-        let (a, b) = ((self.from[i] as f64 * 100.0).round(), (self.target[i] as f64 * 100.0).round());
-        a + (b - a) * t
+        let progress = ease_out(self.ring_since.elapsed().as_secs_f32() * 1000.0 / RING_MS) as f64;
+        let (from, to) = ((self.from[i] as f64 * 100.0).round(), (self.target[i] as f64 * 100.0).round());
+        from + (to - from) * progress
     }
 
     /// A lista de apps está na tela, mas a primeira leitura ainda não chegou.
@@ -358,8 +400,9 @@ impl System {
         self.list_visible() && self.apps.is_empty() && self.showing(self.mode_seen.get()) != Some(2)
     }
 
+    /// Os anéis ou as barras da lista ainda estão andando (pedem um quadro atrás do outro)?
     fn animating(&self) -> bool {
-        self.ring_since.elapsed().as_secs_f32() * 1000.0 < RING_MS || self.bars_since.elapsed().as_secs_f32() * 1000.0 < BARS_MS + 300.0
+        self.ring_since.elapsed().as_secs_f32() * 1000.0 < RING_MS || self.bars_since.elapsed().as_secs_f32() * 1000.0 < BARS_MS + BARS_TAIL_MS
     }
 
     /// A lista está na tela?
@@ -377,31 +420,33 @@ impl System {
         if mode == Mode::G { self.current(mode) } else { self.flipped.get() }
     }
 
-    /// Botão de voltar aos anéis, no cartão virado.
-    /// O ✕ do lado virado: afastado do canto, onde o botão de tamanho do cartão aparece com o
-    /// mouse em cima (encostado nele, um clique no canto do ✕ trocava o tamanho).
+    /// O ✕ do lado virado, que volta aos anéis: afastado do canto, onde o botão de tamanho do
+    /// cartão aparece com o mouse em cima (encostado nele, um clique no canto do ✕ trocava o
+    /// tamanho).
     fn close_rect(mode: Mode) -> (f32, f32, f32, f32) {
-        let r = if mode == Mode::P { SMALL } else { W };
-        (r - 46.0, 10.0, r - 20.0, 36.0)
+        let right = if mode == Mode::P { SMALL } else { W };
+        (right - 46.0, 10.0, right - 20.0, 36.0)
     }
 
-    /// (centro x, centro y, diâmetro de fora, espessura, passo entre anéis)
-    fn rings_geom(mode: Mode) -> (f32, f32, f32, f32, f32) {
-        match mode {
+    /// Onde ficam os anéis neste tamanho.
+    fn rings_geom(mode: Mode) -> RingsGeom {
+        let (cx, cy, diameter, thickness, step) = match mode {
             Mode::P => (SMALL / 2.0, 62.0, 100.0, 10.5, 24.0),
             Mode::M => (PAD + 60.0, 75.0, 120.0, 13.0, 30.0),
             Mode::G => (PAD + 60.0, 75.0 + G_TOP, 120.0, 13.0, 30.0),
-        }
+        };
+        RingsGeom { cx, cy, diameter, thickness, step }
     }
 
+    /// O anel embaixo do ponto (x, y): 0 o de fora (CPU), 2 o de dentro (disco).
     fn ring_at(&self, x: f32, y: f32, mode: Mode) -> Option<usize> {
-        let (cx, cy, d, wd, step) = Self::rings_geom(mode);
-        let r = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-        if r > d / 2.0 + 3.0 {
+        let rings = Self::rings_geom(mode);
+        let distance = ((x - rings.cx).powi(2) + (y - rings.cy).powi(2)).sqrt();
+        if distance > rings.diameter / 2.0 + 3.0 {
             return None;
         }
         // anel 0 por fora; cada anel tem "step/2" de raio
-        let i = ((d / 2.0 - r + (step / 2.0 - wd) / 2.0) / (step / 2.0)).floor().max(0.0) as usize;
+        let i = ((rings.diameter / 2.0 - distance + (rings.step / 2.0 - rings.thickness) / 2.0) / (rings.step / 2.0)).floor().max(0.0) as usize;
         Some(i.min(2))
     }
 
@@ -417,6 +462,7 @@ impl System {
         }
     }
 
+    /// A linha (ou coluna) de recurso embaixo do ponto (x, y).
     fn metric_at(x: f32, y: f32, mode: Mode) -> Option<usize> {
         (0..3).find(|&i| {
             let (x0, y0, x1, y1) = Self::metric_rect(mode, i);
@@ -424,26 +470,30 @@ impl System {
         })
     }
 
+    /// O botão `i` da barra de escolha do grande (CPU, Memória, Disco).
     fn seg_rect(i: usize) -> (f32, f32, f32, f32) {
         let w = (W - 2.0 * PAD - 6.0) / 3.0;
         let x = PAD + 3.0 + w * i as f32;
         (x, SEG_Y + 3.0, x + w, SEG_Y + 31.0)
     }
 
+    /// As linhas da lista de um recurso: as unidades (disco) ou os apps que mais usam a CPU ou
+    /// a memória, com a barra relativa ao primeiro.
     fn rows(&self, which: usize) -> Vec<Row> {
         match which {
             2 => self
                 .drives
                 .iter()
                 .take(LIST_N)
-                .map(|d| Row {
-                    name: d.label.clone(),
-                    value: format!("{:.0} de {:.0} GB", win::gb(d.used), win::gb(d.total)),
-                    frac: d.used as f32 / d.total.max(1) as f32,
-                    icon: d.icon.clone(),
+                .map(|drive| Row {
+                    name: drive.label.clone(),
+                    value: format!("{:.0} de {:.0} GB", win::gb(drive.used), win::gb(drive.total)),
+                    frac: drive.used as f32 / drive.total.max(1) as f32,
+                    icon: drive.icon.clone(),
                 })
                 .collect(),
             _ => {
+                let use_of = |app: &AppUse| if which == 0 { app.cpu as f64 } else { app.mem as f64 };
                 let mut apps: Vec<&AppUse> = self.apps.iter().collect();
                 if which == 0 {
                     apps.sort_by(|a, b| b.cpu.total_cmp(&a.cpu));
@@ -451,16 +501,13 @@ impl System {
                     apps.sort_by(|a, b| b.mem.cmp(&a.mem));
                 }
                 let apps: Vec<&AppUse> = apps.into_iter().take(LIST_N).collect();
-                let max = apps.first().map(|a| if which == 0 { a.cpu as f64 } else { a.mem as f64 }).unwrap_or(1.0).max(1e-6);
+                let max = apps.first().map(|app| use_of(app)).unwrap_or(1.0).max(1e-6);
                 apps.into_iter()
-                    .map(|a| {
-                        let v = if which == 0 { a.cpu as f64 } else { a.mem as f64 };
-                        Row {
-                            name: a.name.clone(),
-                            value: if which == 0 { format!("{}%", br(a.cpu as f64, 1)) } else { sysinfo::fmt_bytes(a.mem) },
-                            frac: (v / max) as f32,
-                            icon: a.icon.clone(),
-                        }
+                    .map(|app| Row {
+                        name: app.name.clone(),
+                        value: if which == 0 { format!("{}%", br(app.cpu as f64, 1)) } else { sysinfo::fmt_bytes(app.mem) },
+                        frac: (use_of(app) / max) as f32,
+                        icon: app.icon.clone(),
                     })
                     .collect()
             }
@@ -468,20 +515,21 @@ impl System {
     }
 
     /// Vira (ou desvira, com None) o pequeno ou o médio para mostrar os apps de um recurso.
-    fn flip(&mut self, i: Option<usize>) {
-        self.flipped.set(i);
-        self.refresh_list(i);
+    fn flip(&mut self, which: Option<usize>) {
+        self.flipped.set(which);
+        self.refresh_list(which);
     }
 
-    fn select(&mut self, i: Option<usize>) {
-        self.selected = i;
-        self.refresh_list(i);
+    /// Escolhe o recurso da lista do grande.
+    fn select(&mut self, which: Option<usize>) {
+        self.selected = which;
+        self.refresh_list(which);
     }
 
     /// A lista vai aparecer: as barras enchem de novo e a leitura dos apps liga (ou desliga).
-    fn refresh_list(&mut self, i: Option<usize>) {
+    fn refresh_list(&mut self, which: Option<usize>) {
         self.bars_since = Instant::now();
-        if i == Some(2) || self.drives_at.is_none() {
+        if which == Some(2) || self.drives_at.is_none() {
             self.drives = sysinfo::drives();
             self.drives_at = Some(Instant::now());
         }
@@ -490,16 +538,18 @@ impl System {
             self.apps = apps;
         }
         // a leitura guardada pode ser antiga: a próxima vem logo
-        self.next = self.next.min(Instant::now() + Duration::from_millis(900));
+        self.next = self.next.min(Instant::now() + SOON);
         self.due = Instant::now();
     }
 
+    /// Marca quando o próximo `tick` precisa vir: já (animando), logo (esperando os apps) ou na
+    /// próxima medida.
     fn plan(&mut self) {
         let now = Instant::now();
         self.due = if self.animating() {
-            now + Duration::from_millis(33)
+            now + FRAME
         } else if self.waiting_apps() {
-            now + Duration::from_millis(200)
+            now + APPS_POLL
         } else {
             self.next
         };
@@ -507,22 +557,24 @@ impl System {
 
     // ---------- desenho ----------
 
+    /// Os três anéis, cada um no trilho dele, cheios até o valor de agora (no grande, os que não
+    /// estão escolhidos ficam apagados).
     fn draw_rings(&self, c: &mut Canvas, mode: Mode) {
-        let (cx, cy, d, wd, step) = Self::rings_geom(mode);
+        let RingsGeom { cx, cy, diameter, thickness, step } = Self::rings_geom(mode);
         let shown = self.shown();
-        let sel = self.current(mode);
-        for (i, v) in shown.iter().enumerate() {
-            let dim = sel.is_some_and(|s| s != i);
+        let selected = self.current(mode);
+        for (i, level) in shown.iter().enumerate() {
+            let dim = selected.is_some_and(|chosen| chosen != i);
             let col = if dim { color(i).alpha(0.32) } else { color(i) };
-            let di = d - step * i as f32;
-            let rc = di / 2.0 - wd / 2.0;
-            c.stroke_circle(cx, cy, rc, color(i).alpha(if dim { 0.1 } else { 0.22 }), wd);
-            if *v > 0.003 {
-                let end = -90.0 + 360.0 * v.min(0.999);
+            let ring_diameter = diameter - step * i as f32;
+            let radius = ring_diameter / 2.0 - thickness / 2.0;
+            c.stroke_circle(cx, cy, radius, color(i).alpha(if dim { 0.1 } else { 0.22 }), thickness);
+            if *level > 0.003 {
+                let end = -90.0 + 360.0 * level.min(0.999);
                 if !dim {
-                    ring_tip_shadow(c, cx, cy, rc, end, wd);
+                    ring_tip_shadow(c, cx, cy, radius, end, thickness);
                 }
-                c.arc(cx, cy, rc, -90.0, end, col, wd);
+                c.arc(cx, cy, radius, -90.0, end, col, thickness);
             }
         }
     }
@@ -539,17 +591,18 @@ impl System {
         c.text(W - PAD, super::LABEL_Y, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 
+    /// As medidas ao lado dos anéis: no pequeno, a porcentagem e o nome embaixo de cada um; no
+    /// médio e no grande, uma linha por recurso com nome, quanto está em uso, porcentagem e barra.
     fn draw_metrics(&self, c: &mut Canvas, mode: Mode) {
         let shown = self.shown();
-        let sel = self.current(mode);
+        let selected = self.current(mode);
         for i in 0..3 {
             let (x0, y0, x1, _) = Self::metric_rect(mode, i);
             let pct = self.counted(i);
-            let dim = sel.is_some_and(|s| s != i) && mode != Mode::G;
+            let dim = selected.is_some_and(|chosen| chosen != i) && mode != Mode::G;
             let text = if dim { MUTED } else { FG };
             if mode == Mode::P {
                 let cx = (x0 + x1) / 2.0;
-                let _ = text;
                 draw_counting(c, cx, y0 + 8.0, pct, "%", Face::Semibold, 13.5, color(i), Anchor::MM);
                 c.text(cx, y0 + 23.0, NAMES[i], Face::Regular, 10.0, MUTED, Anchor::MM, Some(x1 - x0 - 2.0));
             } else {
@@ -570,6 +623,8 @@ impl System {
         }
     }
 
+    /// A lista dos apps (ou das unidades) de `which` a partir de `y0`: até `n_max` linhas de
+    /// altura `row_h`, cada uma com ícone, nome, valor e uma barra que enche.
     fn draw_list(&self, c: &mut Canvas, which: usize, y0: f32, n_max: usize, row_h: f32) {
         let rows = self.rows(which);
         if rows.is_empty() {
@@ -578,8 +633,8 @@ impl System {
             return;
         }
         let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
-        for (n, row) in rows.iter().take(n_max).enumerate() {
-            let y = y0 + row_h * n as f32;
+        for (index, row) in rows.iter().take(n_max).enumerate() {
+            let y = y0 + row_h * index as f32;
             let icon = 26.0;
             let ix = PAD;
             app_icon(c, row.icon.as_deref(), &row.name, ix, y + 5.0, icon, 1.0);
@@ -589,14 +644,15 @@ impl System {
             let (bx0, bx1, by) = (tx, W - PAD, y + 24.0);
             c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.1));
             // as barras enchem uma depois da outra
-            let t = ease_out((since - n as f32 * 55.0) / BARS_MS);
-            let w = (bx1 - bx0) * row.frac.clamp(0.0, 1.0) * t;
+            let filling = ease_out((since - index as f32 * BAR_STAGGER_MS) / BARS_MS);
+            let w = (bx1 - bx0) * row.frac.clamp(0.0, 1.0) * filling;
             if w > 1.0 {
                 c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(which));
             }
         }
     }
 
+    /// O ✕ do lado virado.
     fn draw_close(&self, c: &mut Canvas, mode: Mode) {
         let (x0, y0, x1, y1) = Self::close_rect(mode);
         let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
@@ -637,19 +693,20 @@ impl System {
             return;
         }
         let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
-        for (n, row) in rows.iter().take(BACK_N).enumerate() {
+        for (index, row) in rows.iter().take(BACK_N).enumerate() {
             // as linhas sobem e aparecem uma depois da outra
-            let t = ease_out((since - n as f32 * 60.0) / 380.0);
-            let y = 44.0 + 36.0 * n as f32 + (1.0 - t) * 8.0;
+            let appear = ease_out((since - index as f32 * BACK_P_STAGGER_MS) / BACK_P_RISE_MS);
+            let y = 44.0 + 36.0 * index as f32 + (1.0 - appear) * 8.0;
             let icon = 22.0;
-            app_icon(c, row.icon.as_deref(), &row.name, 12.0, y + 3.0, icon, t);
+            app_icon(c, row.icon.as_deref(), &row.name, 12.0, y + 3.0, icon, appear);
             let tx = 12.0 + icon + 8.0;
             let w = SMALL - tx - 10.0;
-            c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(t), Anchor::LA, Some(w));
-            c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * t), Anchor::LA, Some(w));
+            c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(appear), Anchor::LA, Some(w));
+            c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * appear), Anchor::LA, Some(w));
         }
     }
 
+    /// A barra de escolha do grande (CPU, Memória, Disco), com `which` aceso.
     fn draw_seg(&self, c: &mut Canvas, which: usize) {
         c.fill_round_rect(PAD, SEG_Y, W - PAD, SEG_Y + 34.0, 10.0, WHITE.alpha(0.08));
         for i in 0..3 {
@@ -661,6 +718,7 @@ impl System {
         }
     }
 
+    /// O rodapé do grande: a rede (descendo e subindo) e há quanto tempo o PC está ligado.
     fn draw_footer(&self, c: &mut Canvas) {
         let y = G_FOOT_Y;
         c.hline_px(PAD, W - PAD, y, DIVIDER);
@@ -673,10 +731,10 @@ impl System {
 impl Kind for System {
     /// Na ilha só com a CPU ou a memória alta por um minuto (um aviso: não toma a pílula).
     fn island_item(&self, _env: &Env) -> Option<IslandItem> {
-        let (i, since) = self.alarm()?;
+        let (which, since) = self.alarm()?;
         // um aviso novo a cada vez que passa do limite
-        let id = alert_hash(&format!("{i}{:?}", since));
-        Some(IslandItem::alert(color(i), id))
+        let id = alert_hash(&format!("{which}{:?}", since));
+        Some(IslandItem::alert(color(which), id))
     }
 
     fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
@@ -684,7 +742,7 @@ impl Kind for System {
     }
 
     fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
-        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+        island_buttons(form, w, h).into_iter().find(|(_, rect)| iu::inside(*rect, x, y)).map(|(action, _)| action)
     }
 
     fn key(&self) -> &'static str {
@@ -737,8 +795,8 @@ impl Kind for System {
                 return (self.current(mode) == Some(2) && env.shortcuts()).then_some(OPEN_EXPLORER);
             }
         }
-        let i = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
-        Some(SELECT + i as u32)
+        let which = self.ring_at(x, y, mode).or_else(|| Self::metric_at(x, y, mode))?;
+        Some(SELECT + which as u32)
     }
 
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
@@ -747,12 +805,12 @@ impl Kind for System {
             OPEN_TASKMGR => ctx.open("taskmgr"),
             DISMISS => self.quiet_until = Some(Instant::now() + QUIET_FOR),
             CLOSE => self.flip(None),
-            a if (SELECT..SELECT + 3).contains(&a) => {
-                let i = (a - SELECT) as usize;
+            select if (SELECT..SELECT + 3).contains(&select) => {
+                let which = (select - SELECT) as usize;
                 if self.mode_seen.get() == Mode::G {
-                    self.select(Some(i));
+                    self.select(Some(which));
                 } else {
-                    self.flip(Some(i));
+                    self.flip(Some(which));
                 }
             }
             _ => {}
@@ -768,8 +826,8 @@ impl Kind for System {
             return None;
         }
         if self.ring_at(x, y, mode).is_some() {
-            let (cx, cy, d, ..) = Self::rings_geom(mode);
-            let r = d / 2.0 + 4.0;
+            let RingsGeom { cx, cy, diameter, .. } = Self::rings_geom(mode);
+            let r = diameter / 2.0 + 4.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
         if let Some(i) = Self::metric_at(x, y, mode) {
@@ -807,6 +865,8 @@ impl Kind for System {
 }
 
 impl System {
+    /// Um passo do relógio: guarda a primeira leitura dos apps quando ela chega e mede de novo
+    /// na hora. Diz se o desenho mudou.
     fn step(&mut self, _ctx: &mut Ctx) -> bool {
         let now = Instant::now();
         // a primeira leitura dos apps chegou: as barras enchem a partir de agora
@@ -824,7 +884,7 @@ impl System {
                 if let Some(apps) = self.sampler.latest() {
                     self.apps = apps;
                 }
-                if self.showing(self.mode_seen.get()) == Some(2) && self.drives_at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                if self.showing(self.mode_seen.get()) == Some(2) && self.drives_at.is_none_or(|read_at| read_at.elapsed() > DRIVES_EVERY) {
                     self.drives = sysinfo::drives();
                     self.drives_at = Some(now);
                 }
@@ -873,7 +933,7 @@ mod tests {
             assert!(probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size) <= room);
         }
         // médio: a primeira linha começa embaixo do rótulo e a última barra termina com os anéis
-        let (_, cy, d, _, _) = System::rings_geom(Mode::M);
+        let RingsGeom { cy, diameter: d, .. } = System::rings_geom(Mode::M);
         let (_, first_top, _, _) = System::metric_rect(Mode::M, 0);
         let (_, _, _, last_bottom) = System::metric_rect(Mode::M, 2);
         assert!(first_top >= super::super::LABEL_Y + super::super::LABEL_SIZE + 2.0, "a CPU encosta no rótulo");
@@ -884,8 +944,8 @@ mod tests {
     /// As porcentagens contam junto com os anéis, de um inteiro ao outro, e param no número.
     #[test]
     fn percentages_count_with_the_rings() {
-        let s = System::sample_counting(0);
-        assert_eq!(s.counted(0).round(), 17.0, "começa no número de antes");
+        let system = System::sample_counting(0);
+        assert_eq!(system.counted(0).round(), 17.0, "começa no número de antes");
         let mid = System::sample_counting((RING_MS / 3.0) as u64).counted(0);
         assert!(mid > 17.0 && mid < 24.0, "no meio do caminho: {mid}");
         assert_eq!(System::sample_counting(5000).counted(0), 24.0, "para no número");
@@ -922,19 +982,19 @@ mod tests {
 
     #[test]
     fn rings_animate_only_visible_changes() {
-        let mut s = System::sample();
-        s.ring_since = Instant::now() - Duration::from_secs(5);
-        s.bars_since = Instant::now() - Duration::from_secs(5);
-        let before = s.shown();
+        let mut system = System::sample();
+        system.ring_since = Instant::now() - Duration::from_secs(5);
+        system.bars_since = Instant::now() - Duration::from_secs(5);
+        let before = system.shown();
         // a CPU oscilou 2 pontos: vai direto, sem quadros de animação
-        s.set_rings([before[0] + 0.02, before[1], before[2]]);
-        assert!(!s.animating(), "tremor pequeno não anima");
-        assert!((s.shown()[0] - (before[0] + 0.02)).abs() < 1e-6, "já mostra o valor novo");
+        system.set_rings([before[0] + 0.02, before[1], before[2]]);
+        assert!(!system.animating(), "tremor pequeno não anima");
+        assert!((system.shown()[0] - (before[0] + 0.02)).abs() < 1e-6, "já mostra o valor novo");
         // subiu 10 pontos: anima, partindo de onde estava
-        let now = s.shown();
-        s.set_rings([now[0] + 0.10, now[1], now[2]]);
-        assert!(s.animating(), "mudança que aparece anima");
-        assert!((s.from[0] - now[0]).abs() < 1e-6);
+        let now = system.shown();
+        system.set_rings([now[0] + 0.10, now[1], now[2]]);
+        assert!(system.animating(), "mudança que aparece anima");
+        assert!((system.from[0] - now[0]).abs() < 1e-6);
     }
 
     #[test]
@@ -947,16 +1007,15 @@ mod tests {
         let apps = [("Google Chrome", 6.2, 2.1), ("Visual Studio Code", 3.4, 1.2), ("Spotify", 1.1, 0.4), ("Discord", 0.6, 0.6)];
         let flips = [(Mode::M, "m", None), (Mode::G, "g", None), (Mode::P, "p", None), (Mode::P, "p_virado", Some(1)), (Mode::M, "m_virado", Some(0))];
         for (mode, name, flip) in flips {
-            let s = System::sample();
-            s.mode_seen.set(mode);
-            s.flipped.set(flip);
-            let mut s = s;
-            s.apps = apps.iter().map(|&(n, cpu, gb)| AppUse { name: n.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
-            s.bars_since = Instant::now() - Duration::from_secs(5);
+            let mut system = System::sample();
+            system.mode_seen.set(mode);
+            system.flipped.set(flip);
+            system.apps = apps.iter().map(|&(app, cpu, gb)| AppUse { name: app.into(), cpu, mem: (gb * 1024f64.powi(3)) as u64, icon: None }).collect();
+            system.bars_since = Instant::now() - Duration::from_secs(5);
             let l = crate::widgets::Layout::of(mode);
             let mut c = Canvas::new((l.w * 1.25) as u32, (l.h * 1.25) as u32, 1.25);
             c.fill_round_rect(0.0, 0.0, l.w, l.h, l.radius, Rgba::rgb(40, 40, 50));
-            s.draw(&mut c, mode, &Env { cfg: &cfg, key: "sistema" });
+            system.draw(&mut c, mode, &Env { cfg: &cfg, key: "sistema" });
             let path = std::env::temp_dir().join(format!("sistema_{name}.png"));
             crate::gfx::save_png(&c.finish(), &path).unwrap();
             println!("{}", path.display());
@@ -976,8 +1035,8 @@ fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, (f32, f32, f32,
 
 /// "há 2 min" (desde quando está alto).
 fn ago(since: Instant) -> String {
-    let m = (since.elapsed().as_secs() / 60).max(1);
-    if m < 60 { format!("há {m} min") } else { format!("há {} h", m / 60) }
+    let minutes = (since.elapsed().as_secs() / 60).max(1);
+    if minutes < 60 { format!("há {minutes} min") } else { format!("há {} h", minutes / 60) }
 }
 
 impl System {
@@ -995,7 +1054,7 @@ impl System {
                 _ => {}
             }
         }
-        if self.quiet_until.is_some_and(|t| Instant::now() >= t) {
+        if self.quiet_until.is_some_and(|until| Instant::now() >= until) {
             self.quiet_until = None;
         }
     }
@@ -1005,25 +1064,27 @@ impl System {
         if self.quiet_until.is_some() {
             return None;
         }
-        (0..2).find_map(|i| self.high_since[i].filter(|t| t.elapsed() >= HIGH_FOR).map(|t| (i, t)))
+        (0..2).find_map(|i| self.high_since[i].filter(|since| since.elapsed() >= HIGH_FOR).map(|since| (i, since)))
     }
 
-    /// Os apps que mais gastam do recurso `i` (os três primeiros): nome e fração.
-    fn top_apps(&self, i: usize) -> Vec<(String, f32)> {
+    /// Os apps que mais gastam do recurso `which` (os três primeiros): nome e fração.
+    fn top_apps(&self, which: usize) -> Vec<(String, f32)> {
         let total_mem = win::memory().1.max(1) as f32;
-        let mut list: Vec<(String, f32)> = self.apps.iter().map(|a| (a.name.clone(), if i == 0 { a.cpu / 100.0 } else { a.mem as f32 / total_mem })).collect();
+        let mut list: Vec<(String, f32)> = self.apps.iter().map(|app| (app.name.clone(), if which == 0 { app.cpu / 100.0 } else { app.mem as f32 / total_mem })).collect();
         list.sort_by(|a, b| b.1.total_cmp(&a.1));
         list.truncate(3);
         list
     }
 
+    /// O aviso de CPU ou memória alta em cada forma da ilha: o anel, as três barrinhas, quem
+    /// mais gasta e, aberta, os três anéis, a lista e os botões.
     fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
         let (x, y, w, h) = r;
         let (i, since) = self.alarm().unwrap_or((0, Instant::now()));
         let col = color(i);
         let value = format!("{:.0}%", self.target[i] * 100.0);
         let top = self.top_apps(i);
-        let who = top.first().map(|a| a.0.clone());
+        let who = top.first().map(|(app, _)| app.clone());
         let cy = y + h / 2.0;
         match form {
             IslandForm::Bubble => {
@@ -1032,11 +1093,11 @@ impl System {
             }
             IslandForm::Compact | IslandForm::Banner => {
                 // as três barrinhas, de baixo para cima
-                for k in 0..3 {
-                    let bx = x + 16.0 + k as f32 * 7.0;
+                for bar in 0..3 {
+                    let bx = x + 16.0 + bar as f32 * 7.0;
                     c.fill_round_rect(bx, cy - 10.0, bx + 4.0, cy + 10.0, 2.0, Rgba(255, 255, 255, 30));
-                    let fh = (20.0 * self.target[k]).max(3.0);
-                    c.fill_round_rect(bx, cy + 10.0 - fh, bx + 4.0, cy + 10.0, 2.0, color(k));
+                    let fill_h = (20.0 * self.target[bar]).max(3.0);
+                    c.fill_round_rect(bx, cy + 10.0 - fill_h, bx + 4.0, cy + 10.0, 2.0, color(bar));
                 }
                 let label = match (&who, form) {
                     (Some(app), IslandForm::Banner) => format!("{} alta · {app}", NAMES[i]),
@@ -1049,7 +1110,7 @@ impl System {
                 drawing::ring(c, x + 39.0, cy, 50.0, 4.5, self.target[i], col);
                 c.text(x + 39.0, cy, &value, Face::Semibold, 12.0, FG, Anchor::MM, None);
                 let title = match &top.first() {
-                    Some((app, f)) => format!("{app} usa {:.0}% {}", f * 100.0, if i == 0 { "da CPU" } else { "da memória" }),
+                    Some((app, share)) => format!("{app} usa {:.0}% {}", share * 100.0, if i == 0 { "da CPU" } else { "da memória" }),
                     None => format!("{} em {value}", TITLES[i]),
                 };
                 let lines = c.wrap(&title, Face::Semibold, 13.5, w - 96.0, 2);
@@ -1065,28 +1126,28 @@ impl System {
             IslandForm::Large => {
                 iu::header(c, r, "SISTEMA", PINK.mix(WHITE, 0.12), &format!("{} alta {}", NAMES[i], ago(since)), AMBER);
                 // os três anéis
-                for k in 0..3 {
-                    let (rx, ry) = (x + 22.0 + k as f32 * 108.0, y + 62.0);
-                    drawing::ring(c, rx + 20.0, ry, 40.0, 4.0, self.target[k], color(k));
-                    c.text(rx + 20.0, ry, &format!("{:.0}", self.target[k] * 100.0), Face::Semibold, 11.0, FG, Anchor::MM, None);
-                    c.text(rx + 48.0, ry, NAMES[k], Face::Regular, 12.0, if k == i { FG } else { SOFT }, Anchor::LM, None);
+                for which in 0..3 {
+                    let (rx, ry) = (x + 22.0 + which as f32 * 108.0, y + 62.0);
+                    drawing::ring(c, rx + 20.0, ry, 40.0, 4.0, self.target[which], color(which));
+                    c.text(rx + 20.0, ry, &format!("{:.0}", self.target[which] * 100.0), Face::Semibold, 11.0, FG, Anchor::MM, None);
+                    c.text(rx + 48.0, ry, NAMES[which], Face::Regular, 12.0, if which == i { FG } else { SOFT }, Anchor::LM, None);
                 }
                 // quem mais gasta
-                for (n, (app, f)) in top.iter().enumerate() {
-                    let ry = y + 104.0 + n as f32 * 22.0;
+                for (index, (app, share)) in top.iter().enumerate() {
+                    let ry = y + 104.0 + index as f32 * 22.0;
                     c.text(x + 22.0, ry, app, Face::Regular, 12.0, FG, Anchor::LM, Some(96.0));
-                    iu::bar(c, x + 126.0, x + w - 64.0, ry, *f, col);
-                    c.text(x + w - 22.0, ry, &format!("{:.0}%", f * 100.0), Face::Regular, 12.0, SOFT, Anchor::RM, None);
+                    iu::bar(c, x + 126.0, x + w - 64.0, ry, *share, col);
+                    c.text(x + w - 22.0, ry, &format!("{:.0}%", share * 100.0), Face::Regular, 12.0, SOFT, Anchor::RM, None);
                 }
                 if top.is_empty() {
                     c.text(x + 22.0, y + 104.0, "Lendo os apps…", Face::Regular, 12.0, SOFT, Anchor::LM, None);
                 }
-                for (a, b) in island_buttons(form, w, h) {
-                    let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
-                    if a == OPEN_TASKMGR {
-                        iu::pill_button(c, rect, "Gerenciador de Tarefas", false, hot == Some(a));
+                for (action, button) in island_buttons(form, w, h) {
+                    let rect = (x + button.0, y + button.1, x + button.2, y + button.3);
+                    if action == OPEN_TASKMGR {
+                        iu::pill_button(c, rect, "Gerenciador de Tarefas", false, hot == Some(action));
                     } else {
-                        iu::link(c, x + b.2, (rect.1 + rect.3) / 2.0, "Dispensar por 1 hora", true, hot == Some(a));
+                        iu::link(c, x + button.2, (rect.1 + rect.3) / 2.0, "Dispensar por 1 hora", true, hot == Some(action));
                     }
                 }
             }

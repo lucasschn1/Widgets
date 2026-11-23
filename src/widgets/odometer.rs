@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::Rgba;
+use crate::ui::theme::Rgba;
 
 /// Quanto dura o rolar, normalmente (ms).
 pub const ROLL_MS: f32 = 650.0;
@@ -55,14 +55,14 @@ impl Odometer {
     /// do que estava escrito (o primeiro texto só aparece). Devolve a largura escrita.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&self, c: &mut Canvas, x: f32, y: f32, text: &str, face: Face, size: f32, color: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
-        let (before, t) = self.track(text);
-        draw_rolling(c, x, y, text, before.as_deref(), t, face, size, color, anchor, max_w)
+        let (before, progress) = self.track(text);
+        draw_rolling(c, x, y, text, before.as_deref(), progress, face, size, color, anchor, max_w)
     }
 
     /// Está rolando agora (o widget precisa de quadros)? Um pouco além do fim, para o último
     /// quadro sair com os dígitos parados no lugar.
     pub fn animating(&self) -> bool {
-        self.state.borrow().as_ref().is_some_and(|s| s.before.is_some() && ms_since(s.at) < self.ms + LAST_FRAME_MS)
+        self.state.borrow().as_ref().is_some_and(|shown| shown.before.is_some() && ms_since(shown.at) < self.ms + LAST_FRAME_MS)
     }
 
     /// Guarda `text` como o escrito agora e diz de onde ele rola: (o de antes, 0 a 1 do caminho).
@@ -73,15 +73,15 @@ impl Odometer {
                 *state = Some(Shown { text: text.to_string(), before: None, at: Instant::now(), frozen: None });
                 (None, 1.0)
             }
-            Some(s) if s.text != text => {
-                s.before = Some(std::mem::replace(&mut s.text, text.to_string()));
-                s.at = Instant::now();
-                s.frozen = None;
-                (s.before.clone(), 0.0)
+            Some(shown) if shown.text != text => {
+                shown.before = Some(std::mem::replace(&mut shown.text, text.to_string()));
+                shown.at = Instant::now();
+                shown.frozen = None;
+                (shown.before.clone(), 0.0)
             }
-            Some(Shown { before: Some(b), frozen: Some(t), .. }) => (Some(b.clone()), *t),
-            Some(s) => match &s.before {
-                Some(b) if ms_since(s.at) < self.ms => (Some(b.clone()), ease_out(ms_since(s.at) / self.ms)),
+            Some(Shown { before: Some(before), frozen: Some(at), .. }) => (Some(before.clone()), *at),
+            Some(shown) => match &shown.before {
+                Some(before) if ms_since(shown.at) < self.ms => (Some(before.clone()), ease_out(ms_since(shown.at) / self.ms)),
                 _ => (None, 1.0),
             },
         }
@@ -91,19 +91,19 @@ impl Odometer {
     /// testes).
     #[cfg(test)]
     pub fn rolled(before: &str, text: &str, ms: f32) -> Odometer {
-        let o = Odometer::default();
+        let odometer = Odometer::default();
         let at = Instant::now() - std::time::Duration::from_secs_f32(ms / 1000.0);
-        *o.state.borrow_mut() = Some(Shown { text: text.to_string(), before: Some(before.to_string()), at, frozen: None });
-        o
+        *odometer.state.borrow_mut() = Some(Shown { text: text.to_string(), before: Some(before.to_string()), at, frozen: None });
+        odometer
     }
 
-    /// Rolando de `before` para `text`, parado a `t` (0 a 1) do caminho (para as imagens e os
+    /// Rolando de `before` para `text`, parado a `at` (0 a 1) do caminho (para as imagens e os
     /// testes de desenho, que comparam quadros desenhados em momentos diferentes).
     #[cfg(test)]
-    pub fn frozen(before: &str, text: &str, t: f32) -> Odometer {
-        let o = Odometer::default();
-        *o.state.borrow_mut() = Some(Shown { text: text.to_string(), before: Some(before.to_string()), at: Instant::now(), frozen: Some(t) });
-        o
+    pub fn frozen(before: &str, text: &str, at: f32) -> Odometer {
+        let odometer = Odometer::default();
+        *odometer.state.borrow_mut() = Some(Shown { text: text.to_string(), before: Some(before.to_string()), at: Instant::now(), frozen: Some(at) });
+        odometer
     }
 }
 
@@ -112,12 +112,12 @@ impl Odometer {
 /// 4). Devolve a largura escrita.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_counting(c: &mut Canvas, x: f32, y: f32, at: f64, suffix: &str, face: Face, size: f32, color: Rgba, anchor: Anchor) -> f32 {
-    let (lo, t) = counting_step(at);
-    let text = |n: i64| format!("{n}{suffix}");
-    if t <= 0.0 {
-        return c.text(x, y, &text(lo), face, size, color, anchor, None);
+    let (whole, progress) = counting_step(at);
+    let text = |value: i64| format!("{value}{suffix}");
+    if progress <= 0.0 {
+        return c.text(x, y, &text(whole), face, size, color, anchor, None);
     }
-    draw_rolling(c, x, y, &text(lo + 1), Some(&text(lo)), t, face, size, color, anchor, None)
+    draw_rolling(c, x, y, &text(whole + 1), Some(&text(whole)), progress, face, size, color, anchor, None)
 }
 
 /// O inteiro de baixo e quanto do caminho até o de cima (0 a 1) num número contando.
@@ -127,43 +127,45 @@ fn counting_step(at: f64) -> (i64, f32) {
     if (at - near).abs() < 0.005 {
         return (near as i64, 0.0);
     }
-    let lo = at.floor();
-    (lo as i64, (at - lo) as f32)
+    let whole = at.floor();
+    (whole as i64, (at - whole) as f32)
 }
 
-fn ms_since(t: Instant) -> f32 {
-    t.elapsed().as_secs_f32() * 1000.0
+/// Quantos milésimos se passaram desde `since`.
+fn ms_since(since: Instant) -> f32 {
+    since.elapsed().as_secs_f32() * 1000.0
 }
 
+/// Começa rápido e chega devagar (0 a 1).
 fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
 /// Os dois textos têm o mesmo formato (os mesmos caracteres, com dígitos nos mesmos lugares)?
 /// Só aí os dígitos rolam: "3 h 20 restantes" → "3 h 05 restantes" sim; "99" → "100" não.
-fn same_shape(a: &str, b: &str) -> bool {
-    let shape = |s: &str| s.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect::<String>();
-    shape(a) == shape(b)
+fn same_shape(first: &str, second: &str) -> bool {
+    let shape = |text: &str| text.chars().map(|ch| if ch.is_ascii_digit() { '0' } else { ch }).collect::<String>();
+    shape(first) == shape(second)
 }
 
 /// Escreve `text` como `Canvas::text`, mas com os dígitos que mudaram desde `before` rolando como
-/// num hodômetro (`t`, de 0 a 1, do caminho): cada dígito é uma coluna de 0 a 9 que sobe quando
+/// num hodômetro (`progress`, de 0 a 1, do caminho): cada dígito é uma coluna de 0 a 9 que sobe quando
 /// ele aumenta e desce quando diminui, passando pelos do meio, como no mockup. Sem `before`, ou
 /// de outro formato, escreve parado. Devolve a largura escrita.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&str>, t: f32, face: Face, size: f32, color: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
+pub fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&str>, progress: f32, face: Face, size: f32, color: Rgba, anchor: Anchor, max_w: Option<f32>) -> f32 {
     let total = c.text_width(text, face, size);
-    let Some(before) = before.filter(|b| t < 1.0 && b != &text && same_shape(b, text) && max_w.is_none_or(|m| total <= m)) else {
+    let Some(before) = before.filter(|before| progress < 1.0 && before != &text && same_shape(before, text) && max_w.is_none_or(|max| total <= max)) else {
         return c.text(x, y, text, face, size, color, anchor, max_w);
     };
-    let (h, v) = anchor.parts();
-    let x0 = match h {
+    let (horizontal, vertical) = anchor.parts();
+    let x0 = match horizontal {
         'm' => x - total / 2.0,
         'r' => x - total,
         _ => x,
     };
     // os dígitos que rolam são escritos pela linha de base; os parados, como o resto do texto
-    let (base, left_anchor) = match v {
+    let (base, left_anchor) = match vertical {
         'a' => (y + c.baseline(face, size), Anchor::LA),
         'm' => (y + size * 0.36, Anchor::LM),
         _ => (y, Anchor::LS),
@@ -175,7 +177,7 @@ pub fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&
     // (dígitos não descem da linha de base: embaixo, a janela termina logo nela, senão o topo
     // do dígito seguinte aparece embaixo do número no fim do caminho)
     let (top, bottom) = (base - size * 0.9, base + size * 0.05);
-    let digit_w = (0..10).map(|d| c.text_width(&d.to_string(), face, size)).fold(0.0, f32::max);
+    let digit_w = (0..10).map(|digit| c.text_width(&digit.to_string(), face, size)).fold(0.0, f32::max);
     let rising = digits_of(text) > digits_of(before);
     for ((i, ch), old) in text.char_indices().zip(before.chars()) {
         let left = x0 + c.text_width(&text[..i], face, size);
@@ -185,15 +187,16 @@ pub fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&
             continue;
         };
         let cx = left + c.text_width(ch.encode_utf8(&mut [0; 4]), face, size) / 2.0;
-        let at = from as f32 + odometer_steps(from, to, rising) as f32 * t;
+        let at = from as f32 + odometer_steps(from, to, rising) as f32 * progress;
         c.push_round_clip(cx - digit_w / 2.0 - 1.0, top, cx + digit_w / 2.0 + 1.0, bottom, 0.0);
-        let lo = at.floor() as i32;
-        for d in [lo, lo + 1] {
-            let off = d as f32 - at;
-            let fade = (1.0 - off.abs()).clamp(0.0, 1.0).powf(1.6);
+        // os dois dígitos da coluna que aparecem na janela (o que sai e o que entra)
+        let below = at.floor() as i32;
+        for digit in [below, below + 1] {
+            let offset = digit as f32 - at;
+            let fade = (1.0 - offset.abs()).clamp(0.0, 1.0).powf(1.6);
             if fade > 0.01 {
                 let col = color.with_a((color.3 as f32 * fade).round() as u8);
-                c.text(cx, base + off * step, &d.rem_euclid(10).to_string(), face, size, col, Anchor::MS, None);
+                c.text(cx, base + offset * step, &digit.rem_euclid(10).to_string(), face, size, col, Anchor::MS, None);
             }
         }
         c.pop_clip();
@@ -202,8 +205,8 @@ pub fn draw_rolling(c: &mut Canvas, x: f32, y: f32, text: &str, before: Option<&
 }
 
 /// Só os dígitos de um texto, para saber se o número subiu ou desceu.
-fn digits_of(s: &str) -> String {
-    s.chars().filter(char::is_ascii_digit).collect()
+fn digits_of(text: &str) -> String {
+    text.chars().filter(char::is_ascii_digit).collect()
 }
 
 /// Quantas casas um dígito anda de `from` até `to`, como num hodômetro: todos para o mesmo lado

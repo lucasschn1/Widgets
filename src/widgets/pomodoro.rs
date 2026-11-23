@@ -8,12 +8,12 @@ use serde_json::{json, Value};
 use super::odometer::{Odometer, ROLL_MS};
 use super::island_ui::{self as iu, SOFT};
 use super::{Ctx, Env, Hot, IslandForm, IslandItem, Kind, MenuItem, Mode, NotifyAction, Rect4, LARGE_H, MEDIUM_H, SMALL, WIDE};
-use crate::config::Get;
-use crate::drawing;
+use crate::data::config::Get;
+use crate::gfx::drawing;
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::*;
-use crate::util;
-use crate::win;
+use crate::ui::theme::*;
+use crate::data::util;
+use crate::platform::win;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -23,6 +23,7 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Como a fase fica guardada nas opções ("foco", "pausa", "longa").
     pub fn code(self) -> &'static str {
         match self {
             Phase::Foco => "foco",
@@ -30,13 +31,14 @@ impl Phase {
             Phase::Longa => "longa",
         }
     }
-    fn from_code(s: &str) -> Phase {
-        match s {
+    fn from_code(code: &str) -> Phase {
+        match code {
             "pausa" => Phase::Pausa,
             "longa" => Phase::Longa,
             _ => Phase::Foco,
         }
     }
+    /// O nome da fase na tela.
     pub fn label(self) -> &'static str {
         match self {
             Phase::Foco => "Foco",
@@ -44,6 +46,7 @@ impl Phase {
             Phase::Longa => "Pausa longa",
         }
     }
+    /// A cor do anel e dos pontos da fase.
     pub fn color(self) -> Rgba {
         match self {
             Phase::Foco => RED,
@@ -51,6 +54,7 @@ impl Phase {
             Phase::Longa => BLUE,
         }
     }
+    /// A duração de fábrica, em minutos.
     fn default_minutes(self) -> i64 {
         match self {
             Phase::Foco => 25,
@@ -58,6 +62,7 @@ impl Phase {
             Phase::Longa => 15,
         }
     }
+    /// As durações oferecidas no menu, em minutos.
     fn choices(self) -> &'static [i64] {
         match self {
             Phase::Foco => &[15, 20, 25, 30, 40, 45, 50, 60, 90],
@@ -79,13 +84,22 @@ pub const START_IF_IDLE: u32 = 6;
 const TOGGLE_AUTO: u32 = 7;
 /// um minuto a mais (o "+1 min" da ilha)
 pub const ADD_MINUTE: u32 = 8;
-const DURATION: u32 = 1000; // + fase * 1000 + minutos
-const EVERY: u32 = 900; // + n
+pub(crate) const DURATION: u32 = 1000; // + fase * 1000 + minutos
+pub(crate) const EVERY: u32 = 900; // + quantos focos até a pausa longa
 
 const W: f32 = WIDE;
 const PAD: f32 = super::CARD_PAD;
-const C_RING: (f32, f32, f32, f32) = (SMALL / 2.0, 62.0, 104.0, 9.0); // cx, cy, diâmetro, espessura
-const M_RING: (f32, f32, f32, f32) = (77.0, MEDIUM_H / 2.0, 110.0, 8.0);
+/// Onde fica o anel do tempo em cada tamanho.
+#[derive(Clone, Copy)]
+struct RingGeom {
+    cx: f32,
+    cy: f32,
+    diameter: f32,
+    thickness: f32,
+}
+
+const C_RING: RingGeom = RingGeom { cx: SMALL / 2.0, cy: 62.0, diameter: 104.0, thickness: 9.0 };
+const M_RING: RingGeom = RingGeom { cx: 77.0, cy: MEDIUM_H / 2.0, diameter: 110.0, thickness: 8.0 };
 const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
 const M_CTRL_Y: f32 = 120.0;
 const M_DOTS_Y: f32 = 86.0;
@@ -95,32 +109,58 @@ const M_DATE_Y: f32 = 60.0;
 const M_PLAY_D: f32 = 34.0;
 // grande: cabeçalho, o anel grande no meio, os ciclos, os botões e, no pé, a próxima fase
 const G_HEAD_LINE: f32 = 92.0;
-const G_RING: (f32, f32, f32, f32) = (W / 2.0, 206.0, 176.0, 12.0);
+const G_RING: RingGeom = RingGeom { cx: W / 2.0, cy: 206.0, diameter: 176.0, thickness: 12.0 };
 const G_DOTS_Y: f32 = 320.0;
 const G_CTRL_Y: f32 = 362.0;
 const G_PLAY_D: f32 = 44.0;
 const G_FOOT_Y: f32 = LARGE_H - 24.0;
+/// a roda do mouse não deixa a fase com menos de 1 minuto nem mais de 3 horas
 const MIN_S: f64 = 60.0;
 const MAX_S: f64 = 180.0 * 60.0;
+/// a fase acaba no último minuto: a ilha passa o Pomodoro na frente da música
+const HURRY_S: f64 = 60.0;
+/// a fase acabou há mais que isso (o PC dormiu ou o app estava fechado): termina sem avisar
+const LATE_S: f64 = 60.0;
+/// o `tick` vem um pouco depois da virada do segundo, para não cair antes dela
+const AFTER_TURN_MS: u64 = 15;
 
+/// "24:59" ou, com hora, "1:05:00" (o tempo que falta, arredondado para cima).
 pub fn fmt_timer(seconds: f64) -> String {
-    let s = seconds.max(0.0).ceil() as i64;
-    let (h, m, sec) = (s / 3600, s / 60 % 60, s % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{sec:02}")
+    let secs = seconds.max(0.0).ceil() as i64;
+    let (hours, minutes, rest) = (secs / 3600, secs / 60 % 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{rest:02}")
     } else {
-        format!("{m:02}:{sec:02}")
+        format!("{minutes:02}:{rest:02}")
     }
 }
 
+/// "25 min", "2h" ou "1h30".
 pub fn fmt_minutes(minutes: f64) -> String {
     let total = minutes.round() as i64;
-    let (h, m) = (total / 60, total % 60);
-    match (h, m) {
-        (0, m) => format!("{m} min"),
-        (h, 0) => format!("{h}h"),
-        (h, m) => format!("{h}h{m:02}"),
+    match (total / 60, total % 60) {
+        (0, mins) => format!("{mins} min"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, mins) => format!("{hours}h{mins:02}"),
     }
+}
+
+/// Um botão do médio e do grande (reiniciar, começar/pausar, pular), pelo centro.
+#[derive(Clone, Copy)]
+struct Button {
+    control: Control,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    /// o botão principal, num círculo cheio
+    circle: bool,
+}
+
+/// Os focos de hoje: a data, quantos pomodoros e quantos minutos.
+struct DayStats {
+    date: String,
+    pomodoros: i64,
+    minutes: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -156,8 +196,8 @@ impl Pomodoro {
         let wcfg = &cfg["pomodoro"];
         let state = &wcfg["estado"];
         let phase = Phase::from_code(state.str_of("fase").unwrap_or("foco"));
-        let total = state.f64_of("total").filter(|t| *t > 0.0).unwrap_or(duration(wcfg, phase) as f64 * 60.0);
-        let mut p = Pomodoro {
+        let total = state.f64_of("total").filter(|total| *total > 0.0).unwrap_or(duration(wcfg, phase) as f64 * 60.0);
+        let mut pomodoro = Pomodoro {
             phase,
             cycle: state.i64_of("ciclo").unwrap_or(0),
             total,
@@ -168,8 +208,8 @@ impl Pomodoro {
             clock_roll: Odometer::new(ROLL_MS),
             frame_at: Cell::new(Instant::now()),
         };
-        p.schedule();
-        p
+        pomodoro.schedule();
+        pomodoro
     }
 
     /// Correndo: na próxima virada de segundo; parado: na próxima virada de minuto (só o relógio muda).
@@ -177,12 +217,12 @@ impl Pomodoro {
         let now = win::now();
         let delay = match self.end {
             Some(end) => {
-                let d = (end - now).rem_euclid(1.0);
-                if d < 0.001 { 1.0 } else { d }
+                let to_turn = (end - now).rem_euclid(1.0);
+                if to_turn < 0.001 { 1.0 } else { to_turn }
             }
             None => 60.0 - now.rem_euclid(60.0),
         };
-        self.next = Instant::now() + Duration::from_millis((delay * 1000.0) as u64 + 15);
+        self.next = Instant::now() + Duration::from_millis((delay * 1000.0) as u64 + AFTER_TURN_MS);
     }
 
     /// Os dígitos estão rolando (precisa de quadros)?
@@ -194,27 +234,29 @@ impl Pomodoro {
     /// caminho.
     #[cfg(test)]
     pub fn sample_rolling(cfg: &Value, at: f32) -> Pomodoro {
-        let mut p = Pomodoro::new(cfg);
-        let ((t0, t1), (c0, c1)) = p.last_changes();
-        p.timer_roll = Odometer::frozen(&t0, &t1, at);
-        p.clock_roll = Odometer::frozen(&c0, &c1, at);
-        p
+        let mut pomodoro = Pomodoro::new(cfg);
+        let ((timer_before, timer_now), (clock_before, clock_now)) = pomodoro.last_changes();
+        pomodoro.timer_roll = Odometer::frozen(&timer_before, &timer_now, at);
+        pomodoro.clock_roll = Odometer::frozen(&clock_before, &clock_now, at);
+        pomodoro
     }
 
     /// O tempo que falta e o relógio de agora, cada um com o de um passo antes (para os exemplos
     /// rolando).
     #[cfg(test)]
     fn last_changes(&self) -> ((String, String), (String, String)) {
-        let t = win::local_time();
-        let clock = format!("{:02}:{:02}", t.hour, t.minute);
-        let before = format!("{:02}:{:02}", t.hour, (t.minute + 59) % 60);
+        let local = win::local_time();
+        let clock = format!("{:02}:{:02}", local.hour, local.minute);
+        let before = format!("{:02}:{:02}", local.hour, (local.minute + 59) % 60);
         ((fmt_timer(self.left() + 1.0), fmt_timer(self.left())), (before, clock))
     }
 
+    /// O tempo está correndo?
     pub fn running(&self) -> bool {
         self.end.is_some()
     }
 
+    /// Quantos segundos faltam para a fase acabar.
     pub fn left(&self) -> f64 {
         match self.end {
             Some(end) => (end - win::now()).max(0.0),
@@ -222,14 +264,17 @@ impl Pomodoro {
         }
     }
 
+    /// A fase já começou (correndo, ou pausada no meio)?
     fn started(&self) -> bool {
         self.running() || self.remaining < self.total - 0.5
     }
 
+    /// Quantos focos até a pausa longa.
     fn every(wcfg: &Value) -> i64 {
         wcfg.i64_of("longa_a_cada").unwrap_or(4)
     }
 
+    /// A fase seguinte ao concluir ou pular esta (o ciclo atual já contado).
     fn next_phase(&self, wcfg: &Value) -> Phase {
         if self.phase == Phase::Foco {
             if self.cycle >= Self::every(wcfg) {
@@ -251,6 +296,7 @@ impl Pomodoro {
         }
     }
 
+    /// Começa `phase` do zero, parada, com a duração escolhida.
     fn set_phase(&mut self, phase: Phase, wcfg: &Value) {
         self.phase = phase;
         self.total = duration(wcfg, phase) as f64 * 60.0;
@@ -258,6 +304,7 @@ impl Pomodoro {
         self.end = None;
     }
 
+    /// Remarca o próximo `tick` e guarda o estado nas opções (para continuar depois de fechar).
     fn store(&mut self, ctx: &mut Ctx) {
         self.schedule();
         let left = self.left();
@@ -268,6 +315,7 @@ impl Pomodoro {
         ctx.save();
     }
 
+    /// Começa ou pausa.
     pub fn toggle(&mut self, ctx: &mut Ctx) {
         if self.running() {
             self.remaining = self.left();
@@ -278,6 +326,7 @@ impl Pomodoro {
         self.store(ctx);
     }
 
+    /// Volta esta fase ao começo, parada.
     fn reset(&mut self, ctx: &mut Ctx) {
         let wcfg = ctx.cfg[ctx.key].clone();
         self.set_phase(self.phase, &wcfg);
@@ -295,19 +344,21 @@ impl Pomodoro {
         self.store(ctx);
     }
 
+    /// Zera os pomodoros de hoje e o ciclo.
     fn reset_day(&mut self, ctx: &mut Ctx) {
         ctx.wcfg().remove("hoje");
         self.cycle = 0;
         self.store(ctx);
     }
 
+    /// A fase acabou: conta o foco no dia, passa para a próxima (começando sozinha, se pedido)
+    /// e avisa. Com `late` (acabou faz tempo), não começa nada nem avisa.
     fn complete(&mut self, late: bool, ctx: &mut Ctx) {
         let finished = self.phase;
         if finished == Phase::Foco {
             let minutes = (self.total / 60.0).round() as i64;
             let stats = today(ctx.cfg, true);
-            let w = ctx.wcfg();
-            w.insert("hoje".into(), json!({"data": stats.0, "pomodoros": stats.1 + 1, "minutos": stats.2 + minutes}));
+            ctx.wcfg().insert("hoje".into(), json!({"data": stats.date, "pomodoros": stats.pomodoros + 1, "minutos": stats.minutes + minutes}));
             self.cycle += 1;
         }
         let wcfg = ctx.cfg[ctx.key].clone();
@@ -325,10 +376,10 @@ impl Pomodoro {
             return;
         }
         let (title, mut text) = if finished == Phase::Foco {
-            let n = today(ctx.cfg, false).1;
+            let done = today(ctx.cfg, false).pomodoros;
             (
                 "Pomodoro concluído 🍅".to_string(),
-                format!("{n}º do dia. Hora de uma {} de {}.", next.label().to_lowercase(), fmt_minutes(self.total / 60.0)),
+                format!("{done}º do dia. Hora de uma {} de {}.", next.label().to_lowercase(), fmt_minutes(self.total / 60.0)),
             )
         } else {
             ("Fim da pausa".to_string(), format!("Bora focar por {}.", fmt_minutes(self.total / 60.0)))
@@ -340,6 +391,7 @@ impl Pomodoro {
         ctx.notify("pomodoro", title, text, action);
     }
 
+    /// Muda a duração de uma fase (e a de agora, se ela ainda não começou).
     fn set_duration(&mut self, phase: Phase, minutes: i64, ctx: &mut Ctx) {
         ctx.wcfg().obj_mut_or("duracoes").insert(phase.code().into(), json!(minutes));
         if phase == self.phase && !self.started() {
@@ -349,15 +401,17 @@ impl Pomodoro {
         self.store(ctx);
     }
 
-    fn set_every(&mut self, n: i64, ctx: &mut Ctx) {
-        ctx.wcfg().insert("longa_a_cada".into(), json!(n));
-        self.cycle = self.cycle.min(n);
+    /// Muda quantos focos vêm antes da pausa longa.
+    fn set_every(&mut self, count: i64, ctx: &mut Ctx) {
+        ctx.wcfg().insert("longa_a_cada".into(), json!(count));
+        self.cycle = self.cycle.min(count);
         self.store(ctx);
     }
 
     // --- geometria ---
 
-    fn ring(mode: Mode) -> (f32, f32, f32, f32) {
+    /// O anel do tempo neste tamanho.
+    fn ring(mode: Mode) -> RingGeom {
         match mode {
             Mode::P => C_RING,
             Mode::M => M_RING,
@@ -365,32 +419,35 @@ impl Pomodoro {
         }
     }
 
-    /// (controle, x, y, tamanho, em círculo) de cada botão.
-    fn controls(&self, mode: Mode) -> Vec<(Control, f32, f32, f32, bool)> {
-        let (cx, y, d, gap) = match mode {
+    /// Os três botões do médio e do grande (o pequeno não tem: o anel é o botão).
+    fn controls(&self, mode: Mode) -> Vec<Button> {
+        let (cx, cy, play, gap) = match mode {
             Mode::M => ((M_COL_X + W - 16.0) / 2.0, M_CTRL_Y, M_PLAY_D, 52.0),
             Mode::G => (W / 2.0, G_CTRL_Y, G_PLAY_D, 70.0),
             Mode::P => return Vec::new(),
         };
         vec![
-            (Control::Restart, cx - gap, y, d * 0.5, false),
-            (Control::Toggle(self.running()), cx, y, d, true),
-            (Control::Skip, cx + gap, y, d * 0.42, false),
+            Button { control: Control::Restart, cx: cx - gap, cy, size: play * 0.5, circle: false },
+            Button { control: Control::Toggle(self.running()), cx, cy, size: play, circle: true },
+            Button { control: Control::Skip, cx: cx + gap, cy, size: play * 0.42, circle: false },
         ]
     }
 
-    fn control_at(&self, x: f32, y: f32, mode: Mode) -> Option<(Control, f32, f32, f32, bool)> {
-        self.controls(mode).into_iter().find(|&(_, cx, cy, size, circle)| {
-            let reach = if circle { size / 2.0 + 2.0 } else { size.max(14.0) * 0.9 };
-            ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() <= reach
+    /// O botão embaixo do ponto (x, y).
+    fn control_at(&self, x: f32, y: f32, mode: Mode) -> Option<Button> {
+        self.controls(mode).into_iter().find(|button| {
+            let reach = if button.circle { button.size / 2.0 + 2.0 } else { button.size.max(14.0) * 0.9 };
+            ((x - button.cx).powi(2) + (y - button.cy).powi(2)).sqrt() <= reach
         })
     }
 
+    /// O ponto está em cima do anel (o botão de começar e pausar)?
     fn on_ring(x: f32, y: f32, mode: Mode) -> bool {
-        let (cx, cy, d, _) = Self::ring(mode);
-        ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() <= d / 2.0 + 2.0
+        let ring = Self::ring(mode);
+        ((x - ring.cx).powi(2) + (y - ring.cy).powi(2)).sqrt() <= ring.diameter / 2.0 + 2.0
     }
 
+    /// Onde fica o relógio (que abre o Relógio do Windows).
     fn clock_rect(mode: Mode) -> (f32, f32, f32, f32) {
         match mode {
             Mode::P => (6.0, 120.0, SMALL - 6.0, SMALL - 6.0),
@@ -406,21 +463,23 @@ impl Pomodoro {
     }
 }
 
+/// A duração escolhida para uma fase, em minutos.
 fn duration(wcfg: &Value, phase: Phase) -> i64 {
-    wcfg.get("duracoes").and_then(|d| d.i64_of(phase.code())).unwrap_or(phase.default_minutes())
+    wcfg.get("duracoes").and_then(|durations| durations.i64_of(phase.code())).unwrap_or(phase.default_minutes())
 }
 
-/// (data de hoje, pomodoros, minutos) — zera sozinho quando muda o dia.
-fn today(cfg: &Value, _for_write: bool) -> (String, i64, i64) {
+/// Os focos de hoje: zera sozinho quando muda o dia.
+fn today(cfg: &Value, _for_write: bool) -> DayStats {
     let date = win::local_time().iso_date();
     let stats = &cfg["pomodoro"]["hoje"];
     if stats.str_of("data") == Some(date.as_str()) {
-        (date, stats.i64_of("pomodoros").unwrap_or(0), stats.i64_of("minutos").unwrap_or(0))
+        DayStats { date, pomodoros: stats.i64_of("pomodoros").unwrap_or(0), minutes: stats.i64_of("minutos").unwrap_or(0) }
     } else {
-        (date, 0, 0)
+        DayStats { date, pomodoros: 0, minutes: 0 }
     }
 }
 
+/// O objeto `key` de dentro de um objeto JSON, criado vazio se ainda não existe.
 trait ObjMutOr {
     fn obj_mut_or(&mut self, key: &str) -> &mut serde_json::Map<String, Value>;
 }
@@ -443,7 +502,7 @@ impl Kind for Pomodoro {
         }
         let mut item = IslandItem::live(self.phase.color());
         item.idle = !self.running();
-        item.hurry = self.running() && self.left() <= 60.0;
+        item.hurry = self.running() && self.left() <= HURRY_S;
         Some(item)
     }
 
@@ -452,7 +511,7 @@ impl Kind for Pomodoro {
     }
 
     fn island_hit(&self, form: IslandForm, x: f32, y: f32, w: f32, h: f32, _env: &Env) -> Option<u32> {
-        island_buttons(form, w, h).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+        island_buttons(form, w, h).into_iter().find(|(_, rect)| iu::inside(*rect, x, y)).map(|(action, _)| action)
     }
 
     fn key(&self) -> &'static str {
@@ -465,11 +524,11 @@ impl Kind for Pomodoro {
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env) {
         let wcfg = env.wcfg();
         let color = self.phase.color();
-        let (cx, cy, diameter, width) = Self::ring(mode);
+        let RingGeom { cx, cy, diameter, thickness } = Self::ring(mode);
         let frac = if self.total > 0.0 { (self.left() / self.total) as f32 } else { 0.0 };
-        drawing::ring(c, cx, cy, diameter, width, frac, color);
-        let t = win::local_time();
-        let clock = format!("{:02}:{:02}", t.hour, t.minute);
+        drawing::ring(c, cx, cy, diameter, thickness, frac, color);
+        let local = win::local_time();
+        let clock = format!("{:02}:{:02}", local.hour, local.minute);
         let timer = fmt_timer(self.left());
         let every = Self::every(wcfg);
 
@@ -486,7 +545,7 @@ impl Kind for Pomodoro {
             self.timer_roll.draw(c, cx, cy + 4.0, &timer, Face::Light, 24.0, if paused { MUTED } else { FG }, Anchor::MM, None);
             let foot = match self.end.filter(|_| self.running()) {
                 Some(end) => format!("até {}", win::clock_at(end)),
-                None => format!("hoje: {}", today(env.cfg, false).1),
+                None => format!("hoje: {}", today(env.cfg, false).pomodoros),
             };
             c.text(14.0, 136.0, &foot, Face::Semibold, 12.0, FG, Anchor::LM, Some(62.0));
             let mut status = self.phase.label().to_string();
@@ -502,19 +561,19 @@ impl Kind for Pomodoro {
 
         // um ponto por pomodoro do ciclo até a pausa longa
         let (spacing, r) = (14.0, 3.5);
-        let (x0, dy) = if mode == Mode::M { (M_COL_X + r, M_DOTS_Y) } else { (W / 2.0 - (every - 1) as f32 * spacing / 2.0, G_DOTS_Y) };
+        let (x0, dots_y) = if mode == Mode::M { (M_COL_X + r, M_DOTS_Y) } else { (W / 2.0 - (every - 1) as f32 * spacing / 2.0, G_DOTS_Y) };
         let focus = Phase::Foco.color();
         for i in 0..every {
             let x = x0 + i as f32 * spacing;
             if i < self.cycle {
-                c.fill_circle(x, dy, r, focus);
+                c.fill_circle(x, dots_y, r, focus);
             } else if i == self.cycle && self.phase == Phase::Foco {
-                c.stroke_circle(x, dy, r - 0.75, focus, 1.5);
+                c.stroke_circle(x, dots_y, r - 0.75, focus, 1.5);
             } else {
-                c.fill_circle(x, dy, r, WHITE.alpha(0.22));
+                c.fill_circle(x, dots_y, r, WHITE.alpha(0.22));
             }
         }
-        for (control, bx, by, size, circle) in self.controls(mode) {
+        for Button { control, cx: bx, cy: by, size, circle } in self.controls(mode) {
             let (glyph, glyph_color) = if circle {
                 c.fill_circle(bx, by, size / 2.0, FG);
                 (size * 0.38, DARK_GLYPH)
@@ -543,17 +602,17 @@ impl Kind for Pomodoro {
             // a coluna da direita: o rótulo, a hora e a data (os anéis ocupam a altura toda)
             super::draw_label(c, M_COL_X, super::LABEL_Y, "POMODORO", focus);
             self.clock_roll.draw(c, M_COL_X - 2.0, M_CLOCK_Y, &clock, Face::Light, 30.0, FG, Anchor::LA, None);
-            c.text(M_COL_X, M_DATE_Y, &util::short_date(&t), Face::Regular, 11.0, MUTED, Anchor::LA, None);
-            c.text(W - 16.0, M_DOTS_Y, &format!("hoje: {}", stats.1), Face::Regular, 10.5, MUTED, Anchor::RM, None);
+            c.text(M_COL_X, M_DATE_Y, &util::short_date(&local), Face::Regular, 11.0, MUTED, Anchor::LA, None);
+            c.text(W - 16.0, M_DOTS_Y, &format!("hoje: {}", stats.pomodoros), Face::Regular, 10.5, MUTED, Anchor::RM, None);
             return;
         }
 
         super::draw_label(c, PAD, super::LABEL_Y, "POMODORO", focus);
-        c.text(W - PAD, super::LABEL_Y, &util::long_date(&t), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
+        c.text(W - PAD, super::LABEL_Y, &util::long_date(&local), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
         self.clock_roll.draw(c, PAD - 2.0, 32.0, &clock, Face::Light, 40.0, FG, Anchor::LA, None);
-        let n = stats.1;
-        c.text(W - PAD, 46.0, &format!("{n} pomodoro{} hoje", if n != 1 { "s" } else { "" }), Face::Semibold, 13.0, FG, Anchor::RA, None);
-        c.text(W - PAD, 66.0, &format!("{} de foco", fmt_minutes(stats.2 as f64)), Face::Regular, 11.0, MUTED, Anchor::RA, None);
+        let done = stats.pomodoros;
+        c.text(W - PAD, 46.0, &format!("{done} pomodoro{} hoje", if done != 1 { "s" } else { "" }), Face::Semibold, 13.0, FG, Anchor::RA, None);
+        c.text(W - PAD, 66.0, &format!("{} de foco", fmt_minutes(stats.minutes as f64)), Face::Regular, 11.0, MUTED, Anchor::RA, None);
         c.hline_px(PAD, W - PAD, G_HEAD_LINE, DIVIDER);
         if paused {
             c.text(cx, cy - 40.0, "PAUSADO", Face::Semibold, 9.5, MUTED, Anchor::MM, None);
@@ -571,7 +630,7 @@ impl Kind for Pomodoro {
     }
 
     fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
-        if let Some((control, ..)) = self.control_at(x, y, mode) {
+        if let Some(Button { control, .. }) = self.control_at(x, y, mode) {
             return Some(match control {
                 Control::Restart => RESET,
                 Control::Toggle(_) => TOGGLE,
@@ -605,23 +664,23 @@ impl Kind for Pomodoro {
                 ctx.wcfg().insert("auto".into(), json!(!auto));
                 ctx.save();
             }
-            a if (EVERY + 2..=EVERY + 6).contains(&a) => self.set_every((a - EVERY) as i64, ctx),
-            a if a >= DURATION => {
-                let phase = PHASES[((a - DURATION) / 1000) as usize % 3];
-                self.set_duration(phase, ((a - DURATION) % 1000) as i64, ctx);
+            every if (EVERY + 2..=EVERY + 6).contains(&every) => self.set_every((every - EVERY) as i64, ctx),
+            duration if duration >= DURATION => {
+                let phase = PHASES[((duration - DURATION) / 1000) as usize % 3];
+                self.set_duration(phase, ((duration - DURATION) % 1000) as i64, ctx);
             }
             _ => {}
         }
     }
 
     fn hot_rect(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<Hot> {
-        if let Some((_, cx, cy, size, circle)) = self.control_at(x, y, mode) {
+        if let Some(Button { cx, cy, size, circle, .. }) = self.control_at(x, y, mode) {
             let r = if circle { size / 2.0 + 4.0 } else { size.max(14.0) * 0.9 };
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
         if Self::on_ring(x, y, mode) {
-            let (cx, cy, d, _) = Self::ring(mode);
-            let r = d / 2.0 + 5.0;
+            let RingGeom { cx, cy, diameter, .. } = Self::ring(mode);
+            let r = diameter / 2.0 + 5.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
         if Self::on_clock(x, y, mode) {
@@ -637,7 +696,7 @@ impl Kind for Pomodoro {
 
     fn tooltip(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<String> {
         let wcfg = env.wcfg();
-        if let Some((control, ..)) = self.control_at(x, y, mode) {
+        if let Some(Button { control, .. }) = self.control_at(x, y, mode) {
             return match control {
                 Control::Skip => Some(format!("Pular para: {}", self.next_phase(wcfg).label().to_lowercase())),
                 _ => None,
@@ -658,27 +717,28 @@ impl Kind for Pomodoro {
     /// Roda do mouse: um minuto a mais ou a menos (parado no início, muda a duração da fase).
     fn uses_wheel(&self, x: f32, y: f32, mode: Mode) -> bool {
         // numa pilha, o tempo pela roda só em cima do anel
-        let (cx, cy, d, _) = Self::ring(mode);
-        (x - cx).hypot(y - cy) <= d / 2.0 + 6.0
+        let ring = Self::ring(mode);
+        (x - ring.cx).hypot(y - ring.cy) <= ring.diameter / 2.0 + 6.0
     }
 
     fn wheel(&mut self, _x: f32, _y: f32, steps: f32, _mode: Mode, ctx: &mut Ctx) {
-        let n = steps.round();
-        let delta = 60.0 * if n != 0.0 { n as f64 } else if steps > 0.0 { 1.0 } else { -1.0 };
-        let rem = self.left();
+        // um minuto por passo da roda (um toque de touchpad, menor que um passo, ainda conta um)
+        let whole = steps.round();
+        let delta = 60.0 * if whole != 0.0 { whole as f64 } else if steps > 0.0 { 1.0 } else { -1.0 };
+        let left = self.left();
         if !self.started() {
-            self.total = (rem + delta).clamp(MIN_S, MAX_S);
+            self.total = (left + delta).clamp(MIN_S, MAX_S);
             self.remaining = self.total;
             let minutes = (self.total / 60.0).round() as i64;
             ctx.wcfg().obj_mut_or("duracoes").insert(self.phase.code().into(), json!(minutes));
         } else {
-            let new = (rem + delta).max(rem.min(MIN_S)).min(MAX_S);
-            let change = new - rem;
-            self.total = (self.total + change).max(new).max(MIN_S);
+            let new_left = (left + delta).max(left.min(MIN_S)).min(MAX_S);
+            let change = new_left - left;
+            self.total = (self.total + change).max(new_left).max(MIN_S);
             if let Some(end) = self.end.as_mut() {
                 *end += change;
             } else {
-                self.remaining = new;
+                self.remaining = new_left;
             }
         }
         self.store(ctx);
@@ -698,7 +758,7 @@ impl Kind for Pomodoro {
                 }
                 let items = options
                     .into_iter()
-                    .map(|m| MenuItem::Radio(fmt_minutes(m as f64), m == current, DURATION + i as u32 * 1000 + m as u32))
+                    .map(|minutes| MenuItem::Radio(fmt_minutes(minutes as f64), minutes == current, DURATION + i as u32 * 1000 + minutes as u32))
                     .collect();
                 MenuItem::Sub(phase.label().into(), items)
             })
@@ -706,7 +766,7 @@ impl Kind for Pomodoro {
         let every = Self::every(wcfg);
         durations.push(MenuItem::Sub(
             "Pausa longa a cada".into(),
-            (2..=6).map(|n| MenuItem::Radio(format!("{n} pomodoros"), n == every, EVERY + n as u32)).collect(),
+            (2..=6).map(|count| MenuItem::Radio(format!("{count} pomodoros"), count == every, EVERY + count as u32)).collect(),
         ));
         let next = self.next_phase(wcfg);
         let article = if next == Phase::Foco { "o" } else { "a" };
@@ -735,7 +795,7 @@ impl Kind for Pomodoro {
             let now = win::now();
             if now >= end {
                 // muito atrasado: o PC dormiu ou o app estava fechado
-                self.complete(now - end > 60.0, ctx);
+                self.complete(now - end > LATE_S, ctx);
             }
         }
         self.schedule();
@@ -775,7 +835,7 @@ mod tests {
         }
         let texts = |p: &Pomodoro, cfg: &Value| -> Vec<String> {
             let env = Env { cfg, key: "pomodoro" };
-            crate::morph::record(p, Mode::P, 1.0, 1.0, &env)
+            crate::card::morph::record(p, Mode::P, 1.0, 1.0, &env)
                 .ops
                 .into_iter()
                 .filter_map(|r| match r.op {
@@ -784,7 +844,7 @@ mod tests {
                 })
                 .collect()
         };
-        let (cx, cy, ..) = Pomodoro::ring(Mode::P);
+        let RingGeom { cx, cy, .. } = Pomodoro::ring(Mode::P);
         let running = serde_json::json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 0, "total": 1500.0, "fim": win::now() + 600.0}}});
         let p = Pomodoro::new(&running);
         let end = format!("até {}", win::clock_at(p.end.unwrap()));
@@ -824,17 +884,19 @@ impl Pomodoro {
     /// "2 de 4": o foco de agora no ciclo até a pausa longa.
     fn cycle_text(&self, wcfg: &Value) -> (i64, i64) {
         let every = Self::every(wcfg);
-        let n = if self.phase == Phase::Foco { self.cycle + 1 } else { self.cycle.max(1) };
-        (n.clamp(1, every), every)
+        let current = if self.phase == Phase::Foco { self.cycle + 1 } else { self.cycle.max(1) };
+        (current.clamp(1, every), every)
     }
 
+    /// O Pomodoro em cada forma da ilha: o anel do que já passou, o tempo, o ciclo e, aberta,
+    /// os botões e os focos do ciclo.
     fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, env: &Env) {
         let (x, y, w, h) = r;
         let color = self.phase.color();
         let running = self.running();
         let time = fmt_timer(self.left());
-        let (n, every) = self.cycle_text(env.wcfg());
-        let is_hot = |a: u32| hot == Some(a);
+        let (current, every) = self.cycle_text(env.wcfg());
+        let is_hot = |action: u32| hot == Some(action);
         match form {
             IslandForm::Bubble => {
                 drawing::ring(c, x + w / 2.0, y + h / 2.0, 30.0, 3.5, self.done_frac(), color);
@@ -844,49 +906,49 @@ impl Pomodoro {
             }
             IslandForm::Compact | IslandForm::Banner => {
                 drawing::ring(c, x + 21.0, y + h / 2.0, 24.0, 3.5, self.done_frac(), color);
-                let label = if running { format!("{} · {n} de {every}", self.phase.label()) } else { "Pausado".to_string() };
+                let label = if running { format!("{} · {current} de {every}", self.phase.label()) } else { "Pausado".to_string() };
                 iu::compact_text(c, x + 42.0, r, &label, &time, if running { FG } else { SOFT });
             }
             IslandForm::Medium => {
                 let (cx, cy) = (x + 39.0, y + h / 2.0);
                 drawing::ring(c, cx, cy, 50.0, 4.5, self.done_frac(), color);
-                c.text(cx, cy, &format!("{n}/{every}"), Face::Semibold, 11.0, SOFT, Anchor::MM, None);
+                c.text(cx, cy, &format!("{current}/{every}"), Face::Semibold, 11.0, SOFT, Anchor::MM, None);
                 let label = if running { self.phase.label().to_string() } else { format!("{} · pausado", self.phase.label()) };
                 c.text(x + 78.0, cy - 13.0, &label, Face::Semibold, 11.5, color, Anchor::LM, None);
                 c.text(x + 78.0, cy + 9.0, &time, Face::Semibold, 24.0, FG, Anchor::LM, None);
-                for (a, b) in island_buttons(form, w, h) {
-                    let (bx, by, br) = (x + (b.0 + b.2) / 2.0, y + (b.1 + b.3) / 2.0, (b.2 - b.0) / 2.0);
-                    let glyph = if a == TOGGLE { if running { "pause" } else { "play" } } else { "next" };
-                    iu::round_button(c, bx, by, br, glyph, is_hot(a));
+                for (action, button) in island_buttons(form, w, h) {
+                    let (bx, by, radius) = (x + (button.0 + button.2) / 2.0, y + (button.1 + button.3) / 2.0, (button.2 - button.0) / 2.0);
+                    let glyph = if action == TOGGLE { if running { "pause" } else { "play" } } else { "next" };
+                    iu::round_button(c, bx, by, radius, glyph, is_hot(action));
                 }
             }
             IslandForm::Large => {
                 let upcoming = self.upcoming(env.wcfg()).label().to_lowercase();
-                iu::header(c, r, &self.phase.label().to_uppercase(), color, &format!("Ciclo {n} de {every}"), SOFT);
+                iu::header(c, r, &self.phase.label().to_uppercase(), color, &format!("Ciclo {current} de {every}"), SOFT);
                 c.text(x + 22.0, y + 72.0, &time, Face::Semibold, 42.0, FG, Anchor::LM, None);
-                let today = today(env.cfg, false).1;
+                let today = today(env.cfg, false).pomodoros;
                 let sub = match (running, self.end) {
                     (true, Some(end)) => format!("Termina às {} · depois, {upcoming}", win::clock_at(end)),
                     _ => format!("Pausado · {today} hoje"),
                 };
                 c.text(x + 22.0, y + 108.0, &sub, Face::Regular, 12.0, SOFT, Anchor::LM, Some(w - 120.0));
                 drawing::ring(c, x + w - 54.0, y + 82.0, 60.0, 6.0, self.done_frac(), color);
-                for (a, b) in island_buttons(form, w, h) {
-                    let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
-                    let label = match a {
+                for (action, button) in island_buttons(form, w, h) {
+                    let rect = (x + button.0, y + button.1, x + button.2, y + button.3);
+                    let label = match action {
                         TOGGLE if running => "Pausar",
                         TOGGLE => "Continuar",
                         SKIP => "Pular fase",
                         _ => "+1 min",
                     };
-                    iu::pill_button(c, rect, label, a == TOGGLE, is_hot(a));
+                    iu::pill_button(c, rect, label, action == TOGGLE, is_hot(action));
                 }
                 // os focos do ciclo, em pontinhos
-                for k in 0..every {
-                    let done = k < n - i64::from(self.phase == Phase::Foco);
-                    let now = k == n - 1 && self.phase == Phase::Foco;
+                for focus in 0..every {
+                    let done = focus < current - i64::from(self.phase == Phase::Foco);
+                    let now = focus == current - 1 && self.phase == Phase::Foco;
                     let col = if done || now { color } else { Rgba(255, 255, 255, 46) };
-                    c.fill_circle(x + 26.0 + k as f32 * 13.0, y + h - 24.0, if now { 4.0 } else { 3.2 }, col);
+                    c.fill_circle(x + 26.0 + focus as f32 * 13.0, y + h - 24.0, if now { 4.0 } else { 3.2 }, col);
                 }
                 c.text(x + w - 22.0, y + h - 24.0, &format!("{today} pomodoros hoje"), Face::Regular, 11.5, SOFT, Anchor::RM, None);
             }

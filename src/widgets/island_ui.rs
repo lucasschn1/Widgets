@@ -3,7 +3,7 @@
 //! com a mesma cara da ilha do Tocando agora.
 
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{icon, Rgba, FG, MUTED, WHITE};
+use crate::ui::theme::{icon, Rgba, FG, MUTED, WHITE};
 
 use super::{IslandForm, Rect4};
 
@@ -13,20 +13,33 @@ pub const SOFT: Rgba = Rgba(255, 255, 255, 150);
 const BUTTON: Rgba = Rgba(255, 255, 255, 34);
 const BUTTON_HOT: Rgba = Rgba(255, 255, 255, 58);
 
-/// Tamanho (largura, altura, raio) de cada forma, em pixels lógicos (a bolha é um círculo).
-pub fn size(form: IslandForm) -> (f32, f32, f32) {
+/// O tamanho de uma forma da ilha, em pixels lógicos.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FormSize {
+    pub w: f32,
+    pub h: f32,
+    /// o raio dos cantos (metade da altura na pílula; na bolha, um círculo)
+    pub radius: f32,
+}
+
+const fn form_size(w: f32, h: f32, radius: f32) -> FormSize {
+    FormSize { w, h, radius }
+}
+
+/// O tamanho de cada forma (a bolha é um círculo).
+pub fn size(form: IslandForm) -> FormSize {
     match form {
-        IslandForm::Bubble => (42.0, 42.0, 21.0),
-        IslandForm::Compact => (236.0, 42.0, 21.0),
-        IslandForm::Banner => (300.0, 42.0, 21.0),
-        IslandForm::Medium => (340.0, 78.0, 30.0),
-        IslandForm::Large => (364.0, 220.0, 38.0),
+        IslandForm::Bubble => form_size(42.0, 42.0, 21.0),
+        IslandForm::Compact => form_size(236.0, 42.0, 21.0),
+        IslandForm::Banner => form_size(300.0, 42.0, 21.0),
+        IslandForm::Medium => form_size(340.0, 78.0, 30.0),
+        IslandForm::Large => form_size(364.0, 220.0, 38.0),
     }
 }
 
 /// O ponto (x, y) está dentro do retângulo (x0, y0, x1, y1)?
-pub fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
-    x >= r.0 && x <= r.2 && y >= r.1 && y <= r.3
+pub fn inside(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3
 }
 
 /// Botão redondo com um ícone (das fontes de ícones do Windows).
@@ -35,18 +48,18 @@ pub fn round_button(c: &mut Canvas, cx: f32, cy: f32, r: f32, glyph: &str, hot: 
     c.text(cx, cy, icon(glyph), Face::Icons, r * 0.7, FG, Anchor::MM, None);
 }
 
-/// Pílula com texto no retângulo `r` (x0, y0, x1, y1): `primary` é a clara (a ação principal),
+/// Pílula com texto no retângulo `rect` (x0, y0, x1, y1): `primary` é a clara (a ação principal),
 /// as outras são de vidro.
-pub fn pill_button(c: &mut Canvas, r: (f32, f32, f32, f32), label: &str, primary: bool, hot: bool) {
+pub fn pill_button(c: &mut Canvas, rect: (f32, f32, f32, f32), label: &str, primary: bool, hot: bool) {
     let (fill, text) = match (primary, hot) {
         (true, false) => (Rgba::rgb(245, 245, 247), Rgba::rgb(18, 18, 20)),
         (true, true) => (WHITE, Rgba::rgb(18, 18, 20)),
         (false, false) => (BUTTON, FG),
         (false, true) => (BUTTON_HOT, FG),
     };
-    let h = r.3 - r.1;
-    c.fill_round_rect(r.0, r.1, r.2, r.3, h / 2.0, fill);
-    c.text((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0, label, Face::Semibold, 12.0, text, Anchor::MM, Some(r.2 - r.0 - 8.0));
+    let (x0, y0, x1, y1) = rect;
+    c.fill_round_rect(x0, y0, x1, y1, (y1 - y0) / 2.0, fill);
+    c.text((x0 + x1) / 2.0, (y0 + y1) / 2.0, label, Face::Semibold, 12.0, text, Anchor::MM, Some(x1 - x0 - 8.0));
 }
 
 /// Retângulo (x0, y0, x1, y1) de um círculo.
@@ -75,9 +88,9 @@ pub fn header(c: &mut Canvas, r: Rect4, label: &str, color: Rgba, right: &str, r
 /// Barra fina de progresso.
 pub fn bar(c: &mut Canvas, x0: f32, x1: f32, cy: f32, frac: f32, color: Rgba) {
     c.fill_round_rect(x0, cy - 2.5, x1, cy + 2.5, 2.5, Rgba(255, 255, 255, 26));
-    let f = frac.clamp(0.0, 1.0);
-    if f > 0.0 {
-        c.fill_round_rect(x0, cy - 2.5, x0 + ((x1 - x0) * f).max(5.0), cy + 2.5, 2.5, color);
+    let filled = frac.clamp(0.0, 1.0);
+    if filled > 0.0 {
+        c.fill_round_rect(x0, cy - 2.5, x0 + ((x1 - x0) * filled).max(5.0), cy + 2.5, 2.5, color);
     }
 }
 
@@ -95,10 +108,10 @@ pub fn two_lines(c: &mut Canvas, x: f32, cy: f32, max_w: f32, title: &str, sub: 
 
 /// Texto da forma fechada (o nome, apagado) e o valor forte à direita.
 pub fn compact_text(c: &mut Canvas, x: f32, r: Rect4, label: &str, value: &str, value_color: Rgba) {
-    let (rx, ry, w, h) = r;
-    let cy = ry + h / 2.0;
-    let vw = c.text(rx + w - 16.0, cy, value, Face::Semibold, 14.5, value_color, Anchor::RM, None);
-    c.text(x, cy, label, Face::Regular, 12.0, MUTED, Anchor::LM, Some((rx + w - 16.0 - vw - 10.0 - x).max(10.0)));
+    let (left, top, w, h) = r;
+    let cy = top + h / 2.0;
+    let vw = c.text(left + w - 16.0, cy, value, Face::Semibold, 14.5, value_color, Anchor::RM, None);
+    c.text(x, cy, label, Face::Regular, 12.0, MUTED, Anchor::LM, Some((left + w - 16.0 - vw - 10.0 - x).max(10.0)));
 }
 
 #[cfg(test)]
@@ -108,10 +121,10 @@ mod tests {
     #[test]
     fn forms_grow_in_order() {
         let order = [IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
-        for w in order.windows(2) {
-            let (a, b) = (size(w[0]), size(w[1]));
-            assert!(b.0 > a.0 && b.1 >= a.1, "{w:?}");
+        for pair in order.windows(2) {
+            let (smaller, bigger) = (size(pair[0]), size(pair[1]));
+            assert!(bigger.w > smaller.w && bigger.h >= smaller.h, "{pair:?}");
         }
-        assert_eq!(size(IslandForm::Bubble).1, size(IslandForm::Compact).1, "a bolha tem a altura da pílula fechada");
+        assert_eq!(size(IslandForm::Bubble).h, size(IslandForm::Compact).h, "a bolha tem a altura da pílula fechada");
     }
 }

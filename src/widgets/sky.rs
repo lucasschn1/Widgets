@@ -13,7 +13,7 @@ use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
 use crate::gfx::{Canvas, Fill, Image};
-use crate::theme::{Rgba, WHITE};
+use crate::ui::theme::{Rgba, WHITE};
 
 /// O clima, nos mesmos grupos do app Tempo da Apple.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,7 +60,7 @@ impl Weather {
             61..=67 | 80..=82 => Weather::Rain,
             71..=77 | 85 | 86 => Weather::Snow,
             96 | 99 => Weather::Hail,
-            c if c >= 95 => Weather::Storm,
+            _ if code >= 95 => Weather::Storm,
             _ => Weather::Cloudy,
         }
     }
@@ -75,6 +75,7 @@ impl Weather {
         !matches!(self, Weather::Clear | Weather::Partly | Weather::Cloudy | Weather::Fog)
     }
 
+    /// As cores e as nuvens deste clima.
     fn look(self) -> Look {
         let look = |cloud, sky, dark, layers| Look { cloud, sky, dark, layers };
         match self {
@@ -107,7 +108,7 @@ struct Look {
 /// Uma camada de nuvens: quantas (num cartão de 320 de largura), o tamanho, a opacidade, a faixa
 /// de altura em que ficam (frações da parte de cima do cartão) e o quanto são mais escuras.
 struct Layer {
-    n: f32,
+    count: f32,
     min: usize,
     size: (f32, f32),
     alpha: f32,
@@ -115,9 +116,11 @@ struct Layer {
     dark: f32,
 }
 
+/// Uma camada de nuvens, na ordem de `Layer` (os pares por extenso: de `size0` a `size1`, de
+/// `y0` a `y1`).
 #[allow(clippy::too_many_arguments)]
-const fn layer(n: f32, min: usize, s0: f32, s1: f32, alpha: f32, y0: f32, y1: f32, dark: f32) -> Layer {
-    Layer { n, min, size: (s0, s1), alpha, y: (y0, y1), dark }
+const fn layer(count: f32, min: usize, size0: f32, size1: f32, alpha: f32, y0: f32, y1: f32, dark: f32) -> Layer {
+    Layer { count, min, size: (size0, size1), alpha, y: (y0, y1), dark }
 }
 
 const FEW: [Layer; 1] = [layer(2.4, 1, 0.5, 0.8, 0.92, 0.05, 0.4, 0.0)];
@@ -129,12 +132,14 @@ const HEAVY: [Layer; 2] = [layer(5.0, 3, 1.4, 2.0, 0.85, -0.3, 0.15, 0.45), laye
 const SNOW: [Layer; 1] = [layer(4.0, 2, 1.3, 1.8, 0.55, -0.25, 0.12, 0.2)];
 const WINDY: [Layer; 1] = [layer(3.0, 1, 0.45, 0.7, 0.9, 0.05, 0.45, 0.0)];
 
-fn hex(v: u32) -> Rgba {
-    Rgba::rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+/// A cor de um 0xRRGGBB.
+fn hex(rgb: u32) -> Rgba {
+    Rgba::rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
-fn smooth(a: f32, b: f32, x: f32) -> f32 {
-    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+/// Sobe suave de 0 (em `from`) a 1 (em `to`), sem quinas nas pontas (o "smoothstep").
+fn smooth(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -142,6 +147,7 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
 struct Rnd(u32);
 
 impl Rnd {
+    /// O próximo número, de 0 a 1.
     fn f(&mut self) -> f32 {
         self.0 = self.0.wrapping_mul(1_103_515_245).wrapping_add(12345);
         (self.0 >> 8) as f32 / (1u32 << 24) as f32
@@ -158,21 +164,34 @@ pub struct Clock {
     pub set: f32,
 }
 
-/// As cores-chave do céu limpo: (âncora, horas a partir dela, topo, base). Âncoras: 0 = meia-noite,
-/// 1 = nascer do sol, 2 = meio do dia, 3 = pôr do sol, 4 = a meia-noite seguinte.
-const KEYS: [(u8, f32, u32, u32); 12] = [
-    (0, 0.0, 0x0a1430, 0x1b2a55),
-    (1, -1.6, 0x0c1736, 0x22305e),
-    (1, -0.7, 0x2b3670, 0x9a6f9c), // aurora
-    (1, 0.0, 0x4566b0, 0xf0a07c),  // nascer do sol
-    (1, 1.1, 0x3a80d4, 0xa9cdef),
-    (2, 0.0, 0x2675d6, 0x66a8eb), // meio-dia
-    (3, -2.4, 0x357ccd, 0x8bb9e6),
-    (3, -0.9, 0x4a6ab6, 0xf2b56e), // tarde dourada
-    (3, 0.0, 0x38408c, 0xf27a52),  // pôr do sol
-    (3, 0.7, 0x222a62, 0x8d4d7c),  // crepúsculo
-    (3, 1.5, 0x111a40, 0x2b3566),
-    (4, 0.0, 0x0a1430, 0x1b2a55),
+/// Uma cor-chave do céu limpo: `offset` horas depois da âncora (0 = meia-noite, 1 = nascer do
+/// sol, 2 = meio do dia, 3 = pôr do sol, 4 = a meia-noite seguinte), o topo e a base.
+#[derive(Clone, Copy)]
+struct SkyKey {
+    anchor: u8,
+    offset: f32,
+    top: u32,
+    bottom: u32,
+}
+
+const fn key(anchor: u8, offset: f32, top: u32, bottom: u32) -> SkyKey {
+    SkyKey { anchor, offset, top, bottom }
+}
+
+/// As cores-chave do céu limpo ao longo do dia.
+const KEYS: [SkyKey; 12] = [
+    key(0, 0.0, 0x0a1430, 0x1b2a55),
+    key(1, -1.6, 0x0c1736, 0x22305e),
+    key(1, -0.7, 0x2b3670, 0x9a6f9c), // aurora
+    key(1, 0.0, 0x4566b0, 0xf0a07c),  // nascer do sol
+    key(1, 1.1, 0x3a80d4, 0xa9cdef),
+    key(2, 0.0, 0x2675d6, 0x66a8eb), // meio-dia
+    key(3, -2.4, 0x357ccd, 0x8bb9e6),
+    key(3, -0.9, 0x4a6ab6, 0xf2b56e), // tarde dourada
+    key(3, 0.0, 0x38408c, 0xf27a52),  // pôr do sol
+    key(3, 0.7, 0x222a62, 0x8d4d7c),  // crepúsculo
+    key(3, 1.5, 0x111a40, 0x2b3566),
+    key(4, 0.0, 0x0a1430, 0x1b2a55),
 ];
 
 impl Clock {
@@ -193,27 +212,29 @@ impl Clock {
         let mut prev = 0.0f32;
         let hours: Vec<f32> = KEYS
             .iter()
-            .map(|&(anchor, off, _, _)| {
-                let base = match anchor {
+            .map(|key| {
+                let base = match key.anchor {
                     0 => 0.0,
                     1 => self.rise,
                     2 => (self.rise + self.set) / 2.0,
                     3 => self.set,
                     _ => 24.0,
                 };
-                prev = (base + off).clamp(prev, 24.0);
+                // as horas nunca voltam (com o nascer e o pôr do sol muito perto, as chaves se
+                // juntam)
+                prev = (base + key.offset).clamp(prev, 24.0);
                 prev
             })
             .collect();
         for i in 0..KEYS.len() - 1 {
             let (h0, h1) = (hours[i], hours[i + 1]);
             if self.now >= h0 && self.now <= h1 {
-                let t = if h1 > h0 { smooth(0.0, 1.0, (self.now - h0) / (h1 - h0)) } else { 1.0 };
-                let (a, b) = (KEYS[i], KEYS[i + 1]);
-                return (hex(a.2).mix(hex(b.2), t), hex(a.3).mix(hex(b.3), t));
+                let between = if h1 > h0 { smooth(0.0, 1.0, (self.now - h0) / (h1 - h0)) } else { 1.0 };
+                let (from, to) = (KEYS[i], KEYS[i + 1]);
+                return (hex(from.top).mix(hex(to.top), between), hex(from.bottom).mix(hex(to.bottom), between));
             }
         }
-        (hex(KEYS[0].2), hex(KEYS[0].3))
+        (hex(KEYS[0].top), hex(KEYS[0].bottom))
     }
 }
 
@@ -224,9 +245,9 @@ pub fn colors(weather: Weather, clock: &Clock) -> (Rgba, Rgba) {
     if look.cloud <= 0.0 {
         return (top, bottom);
     }
-    let d = clock.daylight();
-    let [dt, db, nt, nb] = look.sky.map(hex);
-    (top.mix(nt.mix(dt, d), look.cloud), bottom.mix(nb.mix(db, d), look.cloud))
+    let daylight = clock.daylight();
+    let [day_top, day_bottom, night_top, night_bottom] = look.sky.map(hex);
+    (top.mix(night_top.mix(day_top, daylight), look.cloud), bottom.mix(night_bottom.mix(day_bottom, daylight), look.cloud))
 }
 
 // ---------- a camada de baixo ----------
@@ -258,12 +279,13 @@ fn lights(c: &mut Canvas, w: f32, h: f32, cloud: f32, clock: &Clock) {
     if clear < 0.01 {
         return;
     }
-    let light = |c: &mut Canvas, f: f32, col: Rgba, amount: f32, rad: f32| {
+    // uma luz a `along` (0 a 1) do caminho de um lado ao outro do céu
+    let light = |c: &mut Canvas, along: f32, col: Rgba, amount: f32, rad: f32| {
         if amount <= 0.005 {
             return;
         }
-        let x = -w * 0.08 + w * 1.16 * f;
-        let y = -12.0 + (1.0 - (PI * f.clamp(0.0, 1.0)).sin()) * h.min(170.0) * 0.55;
+        let x = -w * 0.08 + w * 1.16 * along;
+        let y = -12.0 + (1.0 - (PI * along.clamp(0.0, 1.0)).sin()) * h.min(170.0) * 0.55;
         c.fill_radial(x, y, rad, rad, &[(0.0, col.alpha(amount)), (0.35, col.alpha(amount * 0.45)), (1.0, col.alpha(0.0))]);
     };
     let up = (clock.now - clock.rise) / (clock.set - clock.rise);
@@ -288,8 +310,8 @@ fn stars(c: &mut Canvas, w: f32, h: f32, cloud: f32, day: f32) {
     let zone = h.min(160.0);
     let mut rnd = Rnd(7);
     for _ in 0..(w * zone / 900.0) as usize {
-        let (x, y, r, a) = (rnd.f() * w, rnd.f() * zone * 0.9, 0.4 + rnd.f() * 0.8, 0.25 + rnd.f() * 0.5);
-        c.fill_circle(x, y, r, WHITE.alpha(a * amount));
+        let (x, y, r, brightness) = (rnd.f() * w, rnd.f() * zone * 0.9, 0.4 + rnd.f() * 0.8, 0.25 + rnd.f() * 0.5);
+        c.fill_circle(x, y, r, WHITE.alpha(brightness * amount));
     }
 }
 
@@ -302,78 +324,101 @@ fn clouds(c: &mut Canvas, w: f32, h: f32, weather: Weather, look: &Look, clock: 
     }
     let day = clock.daylight();
     let (clear_top, clear_bottom) = clock.clear_sky();
-    let shade = |col: Rgba, k: f32| Rgba::rgb((col.0 as f32 * k) as u8, (col.1 as f32 * k) as u8, (col.2 as f32 * k) as u8);
+    let shade = |col: Rgba, factor: f32| Rgba::rgb((col.0 as f32 * factor) as u8, (col.1 as f32 * factor) as u8, (col.2 as f32 * factor) as u8);
     let top = shade(Rgba::rgb(80, 88, 110).mix(Rgba::rgb(210, 215, 226), day), look.dark).mix(clear_top, 0.1);
     let bottom = shade(Rgba::rgb(40, 46, 62).mix(Rgba::rgb(132, 142, 160), day), look.dark).mix(clear_bottom, if weather.lightning() { 0.09 } else { 0.3 });
     let zone = h.min(230.0);
     let mut rnd = Rnd(3);
-    for l in look.layers {
-        let n = ((l.n * w / 320.0 * if h > 200.0 { 1.4 } else { 1.0 }).round() as usize).max(l.min);
-        let (lt, lb) = (top.mix(bottom, l.dark), bottom.mix(Rgba::rgb(0, 0, 0), l.dark * 0.6));
-        for _ in 0..n {
-            let v = (rnd.f() * 6.0) as usize % 6;
-            let k = l.size.0 + rnd.f() * (l.size.1 - l.size.0);
-            let (cw, ch) = (180.0 * k, 100.0 * k);
+    for layer in look.layers {
+        let count = ((layer.count * w / 320.0 * if h > 200.0 { 1.4 } else { 1.0 }).round() as usize).max(layer.min);
+        let (layer_top, layer_bottom) = (top.mix(bottom, layer.dark), bottom.mix(Rgba::rgb(0, 0, 0), layer.dark * 0.6));
+        for _ in 0..count {
+            let shape = (rnd.f() * 6.0) as usize % 6;
+            let size = layer.size.0 + rnd.f() * (layer.size.1 - layer.size.0);
+            let (cw, ch) = (180.0 * size, 100.0 * size);
             let x = rnd.f() * (w + cw * 1.2) - cw * 0.6;
-            let y = (l.y.0 + (l.y.1 - l.y.0) * rnd.f()) * zone - ch * 0.35;
+            let y = (layer.y.0 + (layer.y.1 - layer.y.0) * rnd.f()) * zone - ch * 0.35;
             // em meia resolução e em tamanhos arredondados (desfocada, esticar não aparece, e o
             // desfoque custa 4 vezes menos e se repete entre nuvens parecidas)
-            let img = cloud_sprite(v, lt, lb, (k * c.s * 5.0).round() / 10.0);
+            let img = cloud_sprite(shape, layer_top, layer_bottom, (size * c.s * 5.0).round() / 10.0);
             let s = c.s;
-            c.image_px(&img, ((x - cw * 0.1) * s).round(), (y * s).round(), (cw * 1.2 * s).round(), (ch * 1.2 * s).round(), l.alpha);
+            c.image_px(&img, ((x - cw * 0.1) * s).round(), (y * s).round(), (cw * 1.2 * s).round(), (ch * 1.2 * s).round(), layer.alpha);
         }
     }
 }
 
-/// As bolhas de uma nuvem (180 × 100): (x, y, raio x, raio y, é a base achatada).
-fn puffs(v: usize) -> Vec<(f32, f32, f32, f32, bool)> {
-    let mut seed: u64 = 11 + v as u64 * 97;
-    let mut r = || {
+/// Uma bolha de nuvem: o centro, os raios e se é a base achatada (um retângulo arredondado).
+struct Puff {
+    x: f32,
+    y: f32,
+    rx: f32,
+    ry: f32,
+    base: bool,
+}
+
+/// As bolhas da nuvem `shape` (0 a 5), num quadro de 180 × 100: a base e de 4 a 6 bolhas em
+/// cima, maiores no meio.
+fn puffs(shape: usize) -> Vec<Puff> {
+    let mut seed: u64 = 11 + shape as u64 * 97;
+    let mut random = || {
         seed = seed * 16807 % 2_147_483_647;
         seed as f32 / 2_147_483_647.0
     };
-    let mut out = vec![(90.0, 74.0, 78.0, 20.0, true)];
-    let k = 4 + (r() * 3.0) as usize;
-    for i in 0..k {
-        let x = 30.0 + 120.0 * (i as f32 + 0.5) / k as f32 + (r() - 0.5) * 14.0;
-        let rad = 18.0 + r() * 16.0 + (1.0 - (i as f32 - (k as f32 - 1.0) / 2.0).abs() / k as f32) * 14.0;
-        out.push((x, 74.0 - rad * 0.55, rad, rad, false));
+    let mut out = vec![Puff { x: 90.0, y: 74.0, rx: 78.0, ry: 20.0, base: true }];
+    let count = 4 + (random() * 3.0) as usize;
+    for i in 0..count {
+        let x = 30.0 + 120.0 * (i as f32 + 0.5) / count as f32 + (random() - 0.5) * 14.0;
+        let rad = 18.0 + random() * 16.0 + (1.0 - (i as f32 - (count as f32 - 1.0) / 2.0).abs() / count as f32) * 14.0;
+        out.push(Puff { x, y: 74.0 - rad * 0.55, rx: rad, ry: rad, base: false });
     }
     out
 }
 
+/// Qual nuvem pronta serve: a forma, as cores (arredondadas) e a escala (em centésimos).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SpriteKey {
+    shape: usize,
+    top: u32,
+    bottom: u32,
+    scale: u32,
+}
+
+/// nuvens prontas guardadas, no máximo (passando disso, o guardado recomeça do zero)
+const SPRITES_MAX: usize = 64;
+
 thread_local! {
     /// nuvens prontas (desenhar e desfocar custa; elas só mudam de cor devagar)
-    static SPRITES: RefCell<HashMap<(usize, u32, u32, u32), Image>> = RefCell::new(HashMap::new());
+    static SPRITES: RefCell<HashMap<SpriteKey, Image>> = RefCell::new(HashMap::new());
 }
 
 /// Uma nuvem desfocada nas bordas (216 × 120 unidades com a margem do desfoque) na escala `scale`
 /// (pixels por unidade), com o degradê de `top` a `bottom`.
-fn cloud_sprite(v: usize, top: Rgba, bottom: Rgba, scale: f32) -> Image {
-    let q = |c: Rgba| ((c.0 / 6) as u32) << 16 | ((c.1 / 6) as u32) << 8 | (c.2 / 6) as u32;
-    let key = (v, q(top), q(bottom), (scale * 100.0).round() as u32);
-    if let Some(img) = SPRITES.with(|m| m.borrow().get(&key).cloned()) {
+fn cloud_sprite(shape: usize, top: Rgba, bottom: Rgba, scale: f32) -> Image {
+    // as cores em passos de 6: um tom a mais ou a menos usa a mesma nuvem
+    let rounded = |col: Rgba| ((col.0 / 6) as u32) << 16 | ((col.1 / 6) as u32) << 8 | (col.2 / 6) as u32;
+    let key = SpriteKey { shape, top: rounded(top), bottom: rounded(bottom), scale: (scale * 100.0).round() as u32 };
+    if let Some(img) = SPRITES.with(|sprites| sprites.borrow().get(&key).cloned()) {
         return img;
     }
     let mut c = Canvas::new((216.0 * scale).ceil() as u32, (120.0 * scale).ceil() as u32, scale);
-    let f = Fill::VGrad(24.0, 106.0, top, bottom);
-    for (x, y, rx, ry, base) in puffs(v) {
+    let fill = Fill::VGrad(24.0, 106.0, top, bottom);
+    for Puff { x, y, rx, ry, base } in puffs(shape) {
         let (x, y) = (x + 18.0, y + 10.0);
         if base {
-            c.fill_round_rect_with(x - rx, y - ry, x + rx, y + ry, ry, f);
+            c.fill_round_rect_with(x - rx, y - ry, x + rx, y + ry, ry, fill);
         } else {
-            c.fill_circle_with(x, y, rx, f);
+            c.fill_circle_with(x, y, rx, fill);
         }
     }
     let mut img = c.finish();
     let (iw, ih) = (img.w, img.h);
-    crate::imgops::blur(&mut img.px, iw, ih, 4, 2.2 * scale);
-    SPRITES.with(|m| {
-        let mut m = m.borrow_mut();
-        if m.len() > 64 {
-            m.clear();
+    crate::gfx::imgops::blur(&mut img.px, iw, ih, 4, 2.2 * scale);
+    SPRITES.with(|sprites| {
+        let mut sprites = sprites.borrow_mut();
+        if sprites.len() > SPRITES_MAX {
+            sprites.clear();
         }
-        m.insert(key, img.clone());
+        sprites.insert(key, img.clone());
     });
     img
 }
@@ -393,6 +438,17 @@ fn fog(c: &mut Canvas, w: f32, h: f32, r: f32, day: f32) {
 }
 
 // ---------- os raios ----------
+
+/// o primeiro raio da trovoada vem 1,5 s depois de ela começar; os outros, de 3 a 8 s depois
+/// do anterior
+const FIRST_STRIKE_MS: u64 = 1500;
+const STRIKE_EVERY_MS: u64 = 3000;
+const STRIKE_JITTER_MS: f32 = 5000.0;
+/// o trovão chega de 0,7 a 1,6 s depois da luz
+const THUNDER_AFTER_MS: u64 = 700;
+const THUNDER_JITTER_MS: f32 = 900.0;
+/// os raios ficam guardados por 4 s (o clarão e o tremor já passaram)
+const STRIKE_KEEP_MS: f32 = 4000.0;
 
 /// Os raios da trovoada: o próximo vem de 3 a 8 s depois do anterior, num lugar diferente.
 pub struct Storm {
@@ -423,16 +479,18 @@ fn ms(now: Instant, at: Instant) -> f32 {
 
 /// O clarão `t` ms depois do raio (0 a 1): três piscadas que somem.
 fn flash_at(t: f32) -> f32 {
-    let pulse = |c: f32, w: f32, a: f32| a * (-((t - c) / w).powi(2)).exp();
+    // uma piscada: um sino em volta de `center` ms, com esta largura e esta força
+    let pulse = |center: f32, width: f32, strength: f32| strength * (-((t - center) / width).powi(2)).exp();
     let tail = if t > 0.0 && t < 600.0 { 0.25 * (-t / 260.0).exp() } else { 0.0 };
     (pulse(0.0, 35.0, 1.0) + pulse(110.0, 30.0, 0.7) + pulse(230.0, 45.0, 0.5) + tail).clamp(0.0, 1.0)
 }
 
 impl Storm {
+    /// O próximo número pseudoaleatório (0 a 1), repetível como o `Rnd`.
     fn rnd(&self) -> f32 {
-        let s = self.seed.get().wrapping_mul(1_103_515_245).wrapping_add(12345);
-        self.seed.set(s);
-        (s >> 8) as f32 / (1u32 << 24) as f32
+        let next = self.seed.get().wrapping_mul(1_103_515_245).wrapping_add(12345);
+        self.seed.set(next);
+        (next >> 8) as f32 / (1u32 << 24) as f32
     }
 
     /// Um raio agora, num cartão w × h: um traço que se divide ao meio várias vezes (cada metade
@@ -442,12 +500,13 @@ impl Storm {
         let y1 = (h * (0.55 + self.rnd() * 0.35)).min(240.0);
         let spread = w.min(200.0) * 0.35;
         let mut pts = vec![(x, -4.0), (x + (self.rnd() - 0.5) * spread, y1)];
-        for k in 0..5 {
+        // cinco rodadas: cada trecho ganha um ponto no meio, desviado (menos a cada rodada)
+        for round in 0..5 {
             let mut next = Vec::with_capacity(pts.len() * 2);
             for i in 0..pts.len() - 1 {
-                let (a, b) = (pts[i], pts[i + 1]);
-                next.push(a);
-                next.push(((a.0 + b.0) / 2.0 + (self.rnd() - 0.5) * spread / (k as f32 + 1.3), (a.1 + b.1) / 2.0 + (self.rnd() - 0.5) * 4.0));
+                let (from, to) = (pts[i], pts[i + 1]);
+                next.push(from);
+                next.push(((from.0 + to.0) / 2.0 + (self.rnd() - 0.5) * spread / (round as f32 + 1.3), (from.1 + to.1) / 2.0 + (self.rnd() - 0.5) * 4.0));
             }
             next.push(pts[pts.len() - 1]);
             pts = next;
@@ -460,29 +519,29 @@ impl Storm {
                 let dir = if self.rnd() < 0.5 { -1.0 } else { 1.0 };
                 let len = 18.0 + self.rnd() * 26.0;
                 let mut branch = vec![(bx, by)];
-                for j in 1..=5 {
-                    let f = j as f32 / 5.0;
-                    branch.push((bx + dir * len * f + (self.rnd() - 0.5) * 5.0, by + len * f * 0.9 + (self.rnd() - 0.5) * 3.0));
+                for step in 1..=5 {
+                    let along = step as f32 / 5.0;
+                    branch.push((bx + dir * len * along + (self.rnd() - 0.5) * 5.0, by + len * along * 0.9 + (self.rnd() - 0.5) * 3.0));
                 }
                 branches.push(branch);
             }
             i += 5 + (self.rnd() * 5.0) as usize;
         }
         // o trovão chega depois da luz
-        let thunder = now + Duration::from_millis(700 + (self.rnd() * 900.0) as u64);
+        let thunder = now + Duration::from_millis(THUNDER_AFTER_MS + (self.rnd() * THUNDER_JITTER_MS) as u64);
         let wobble = self.rnd();
         let mut list = self.strikes.borrow_mut();
-        list.retain(|s| ms(now, s.at) < 4000.0);
+        list.retain(|strike| ms(now, strike.at) < STRIKE_KEEP_MS);
         list.push(Strike { at: now, thunder, wobble, main: pts, branches });
     }
 
     /// A cada quadro da trovoada: cai o próximo raio quando chega a hora.
     fn tick(&self, w: f32, h: f32, now: Instant) {
         match self.next.get() {
-            None => self.next.set(Some(now + Duration::from_millis(1500))),
-            Some(t) if now >= t => {
+            None => self.next.set(Some(now + Duration::from_millis(FIRST_STRIKE_MS))),
+            Some(due) if now >= due => {
                 self.strike(w, h, now);
-                self.next.set(Some(now + Duration::from_millis(3000 + (self.rnd() * 5000.0) as u64)));
+                self.next.set(Some(now + Duration::from_millis(STRIKE_EVERY_MS + (self.rnd() * STRIKE_JITTER_MS) as u64)));
             }
             _ => {}
         }
@@ -490,20 +549,20 @@ impl Storm {
 
     /// O clarão agora (0 a 1).
     pub fn flash(&self, now: Instant) -> f32 {
-        self.strikes.borrow().iter().map(|s| flash_at(ms(now, s.at))).fold(0.0, f32::max)
+        self.strikes.borrow().iter().map(|strike| flash_at(ms(now, strike.at))).fold(0.0, f32::max)
     }
 
     /// O tremor do trovão agora (deslocamento em pontos; some em menos de um segundo).
     pub fn shake(&self, now: Instant) -> (f32, f32) {
         let (mut x, mut y) = (0.0, 0.0);
-        for s in self.strikes.borrow().iter().filter(|s| now >= s.thunder) {
-            let t = ms(now, s.thunder);
-            if t > 800.0 {
+        for strike in self.strikes.borrow().iter().filter(|strike| now >= strike.thunder) {
+            let since = ms(now, strike.thunder);
+            if since > 800.0 {
                 continue;
             }
-            let a = 1.8 * (-t / 220.0).exp();
-            x += (t * 0.09 + s.wobble * 9.0).sin() * a;
-            y += (t * 0.13 + s.wobble * 5.0).cos() * a * 0.6;
+            let strength = 1.8 * (-since / 220.0).exp();
+            x += (since * 0.09 + strike.wobble * 9.0).sin() * strength;
+            y += (since * 0.13 + strike.wobble * 5.0).cos() * strength * 0.6;
         }
         (x, y)
     }
@@ -517,7 +576,7 @@ struct Pane {
     oy: f32,
     w: f32,
     h: f32,
-    t: f32,
+    secs: f32,
 }
 
 /// O que cai ou sopra por cima do cartão (w × h, canto em ox, oy), e os raios. `t`: segundos
@@ -528,171 +587,199 @@ pub fn draw_front(c: &mut Canvas, ox: f32, oy: f32, w: f32, h: f32, r: f32, weat
         return;
     }
     let now = Instant::now();
-    let p = Pane { ox, oy, w, h, t };
+    let pane = Pane { ox, oy, w, h, secs: t };
     c.push_round_clip(ox, oy, ox + w, oy + h, r);
     if weather.lightning() {
         storm.tick(w, h, now);
-        bolts(c, &p, r, storm, now);
+        bolts(c, &pane, r, storm, now);
     }
     let area = w * h;
     let mut rnd = Rnd(99);
     match weather {
-        Weather::Drizzle => streaks(c, &p, &mut rnd, area / 650.0, (80.0, 130.0), (3.0, 6.0), 0.08, 0.9, 0.34),
+        Weather::Drizzle => streaks(c, &pane, &mut rnd, Drops { count: area / 650.0, speed: (80.0, 130.0), length: (3.0, 6.0), slant: 0.08, width: 0.9, alpha: 0.34 }),
         Weather::Rain => {
             // duas profundidades: as gotas de trás finas e apagadas, as da frente longas e claras
-            streaks(c, &p, &mut rnd, area / 1300.0, (150.0, 210.0), (5.0, 9.0), 0.15, 0.7, 0.2);
-            streaks(c, &p, &mut rnd, area / 1500.0, (240.0, 320.0), (11.0, 19.0), 0.18, 1.3, 0.38);
-            splashes(c, &p, &mut rnd, w / 12.0, 0.55);
+            streaks(c, &pane, &mut rnd, Drops { count: area / 1300.0, speed: (150.0, 210.0), length: (5.0, 9.0), slant: 0.15, width: 0.7, alpha: 0.2 });
+            streaks(c, &pane, &mut rnd, Drops { count: area / 1500.0, speed: (240.0, 320.0), length: (11.0, 19.0), slant: 0.18, width: 1.3, alpha: 0.38 });
+            splashes(c, &pane, &mut rnd, w / 12.0, 0.55);
         }
         Weather::Heavy | Weather::Storm => {
-            streaks(c, &p, &mut rnd, area / 1000.0, (200.0, 260.0), (6.0, 11.0), 0.26, 0.7, 0.24);
-            streaks(c, &p, &mut rnd, area / 1100.0, (300.0, 400.0), (14.0, 24.0), 0.3, 1.4, 0.42);
-            splashes(c, &p, &mut rnd, w / 6.0, 0.6);
+            streaks(c, &pane, &mut rnd, Drops { count: area / 1000.0, speed: (200.0, 260.0), length: (6.0, 11.0), slant: 0.26, width: 0.7, alpha: 0.24 });
+            streaks(c, &pane, &mut rnd, Drops { count: area / 1100.0, speed: (300.0, 400.0), length: (14.0, 24.0), slant: 0.3, width: 1.4, alpha: 0.42 });
+            splashes(c, &pane, &mut rnd, w / 6.0, 0.6);
         }
-        Weather::Snow => snow(c, &p, &mut rnd),
+        Weather::Snow => snow(c, &pane, &mut rnd),
         Weather::Hail => {
-            streaks(c, &p, &mut rnd, area / 2400.0, (220.0, 300.0), (8.0, 14.0), 0.12, 0.8, 0.22);
-            hail(c, &p, &mut rnd);
+            streaks(c, &pane, &mut rnd, Drops { count: area / 2400.0, speed: (220.0, 300.0), length: (8.0, 14.0), slant: 0.12, width: 0.8, alpha: 0.22 });
+            hail(c, &pane, &mut rnd);
         }
-        Weather::Wind => wind(c, &p, &mut rnd),
+        Weather::Wind => wind(c, &pane, &mut rnd),
         _ => {}
     }
     c.pop_clip();
 }
 
 /// O clarão no cartão inteiro e os raios (com um brilho em volta, que pisca junto).
-fn bolts(c: &mut Canvas, p: &Pane, r: f32, storm: &Storm, now: Instant) {
+fn bolts(c: &mut Canvas, pane: &Pane, r: f32, storm: &Storm, now: Instant) {
     let flash = storm.flash(now);
     if flash > 0.01 {
-        c.fill_round_rect(p.ox, p.oy, p.ox + p.w, p.oy + p.h, r, Rgba(215, 215, 255, (flash * 0.32 * 255.0) as u8));
+        c.fill_round_rect(pane.ox, pane.oy, pane.ox + pane.w, pane.oy + pane.h, r, Rgba(215, 215, 255, (flash * 0.32 * 255.0) as u8));
     }
-    let col = |r: u8, g: u8, b: u8, a: f32| Rgba(r, g, b, (a.clamp(0.0, 1.0) * 255.0) as u8);
-    for s in storm.strikes.borrow().iter() {
-        let age = ms(now, s.at);
-        let a = (flash_at(age) * 1.4).min(1.0);
-        if age > 320.0 || a < 0.03 {
+    let rgba = |red: u8, green: u8, blue: u8, alpha: f32| Rgba(red, green, blue, (alpha.clamp(0.0, 1.0) * 255.0) as u8);
+    for strike in storm.strikes.borrow().iter() {
+        let age = ms(now, strike.at);
+        let glow = (flash_at(age) * 1.4).min(1.0);
+        if age > 320.0 || glow < 0.03 {
             continue;
         }
-        let shift = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| (p.ox + x, p.oy + y)).collect::<Vec<_>>();
-        let main = shift(&s.main);
-        c.line(&main, col(190, 190, 255, a * 0.12), 9.0);
-        c.line(&main, col(200, 200, 255, a * 0.35), 4.0);
-        c.line(&main, col(255, 255, 255, a), 1.5);
-        for b in &s.branches {
-            let b = shift(b);
-            c.line(&b, col(200, 200, 255, a * 0.15), 3.5);
-            c.line(&b, col(235, 235, 255, a * 0.8), 0.9);
+        let shift = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| (pane.ox + x, pane.oy + y)).collect::<Vec<_>>();
+        let main = shift(&strike.main);
+        c.line(&main, rgba(190, 190, 255, glow * 0.12), 9.0);
+        c.line(&main, rgba(200, 200, 255, glow * 0.35), 4.0);
+        c.line(&main, rgba(255, 255, 255, glow), 1.5);
+        for branch in &strike.branches {
+            let branch = shift(branch);
+            c.line(&branch, rgba(200, 200, 255, glow * 0.15), 3.5);
+            c.line(&branch, rgba(235, 235, 255, glow * 0.8), 0.9);
         }
     }
 }
 
-/// `n` gotas em traços retos: velocidade `v` (pt/s), comprimento `l`, inclinação `slant`.
-#[allow(clippy::too_many_arguments)]
-fn streaks(c: &mut Canvas, p: &Pane, rnd: &mut Rnd, n: f32, v: (f32, f32), l: (f32, f32), slant: f32, width: f32, alpha: f32) {
-    let count = (n.round() as usize).max(4);
+/// Uma chuva de traços retos: quantas gotas, a faixa de velocidade (pt/s) e de comprimento, a
+/// inclinação, a espessura e a opacidade.
+struct Drops {
+    count: f32,
+    speed: (f32, f32),
+    length: (f32, f32),
+    slant: f32,
+    width: f32,
+    alpha: f32,
+}
+
+/// As gotas em traços retos, caindo e voltando ao topo (calculadas pelo tempo, sem estado).
+fn streaks(c: &mut Canvas, pane: &Pane, rnd: &mut Rnd, drops: Drops) {
+    let count = (drops.count.round() as usize).max(4);
     let mut segs = Vec::with_capacity(count);
     for _ in 0..count {
-        let (x0, y0, sp, ln) = (rnd.f(), rnd.f(), rnd.f(), rnd.f());
-        let speed = v.0 + sp * (v.1 - v.0);
-        let len = l.0 + ln * (l.1 - l.0);
-        let y = (y0 * (p.h + len) + p.t * speed) % (p.h + len) - len;
-        let x = (x0 * (p.w + 40.0) - p.t * speed * slant).rem_euclid(p.w + 40.0) - 20.0;
-        segs.push((p.ox + x, p.oy + y, p.ox + x - len * slant, p.oy + y + len));
+        let (x0, y0, speed_pick, length_pick) = (rnd.f(), rnd.f(), rnd.f(), rnd.f());
+        let speed = drops.speed.0 + speed_pick * (drops.speed.1 - drops.speed.0);
+        let len = drops.length.0 + length_pick * (drops.length.1 - drops.length.0);
+        let y = (y0 * (pane.h + len) + pane.secs * speed) % (pane.h + len) - len;
+        let x = (x0 * (pane.w + 40.0) - pane.secs * speed * drops.slant).rem_euclid(pane.w + 40.0) - 20.0;
+        segs.push((pane.ox + x, pane.oy + y, pane.ox + x - len * drops.slant, pane.oy + y + len));
     }
-    c.segments(&segs, Rgba(205, 222, 255, (alpha * 255.0) as u8), width);
+    c.segments(&segs, Rgba(205, 222, 255, (drops.alpha * 255.0) as u8), drops.width);
 }
 
 /// Respingos no pé do cartão: um arquinho que abre e some.
-fn splashes(c: &mut Canvas, p: &Pane, rnd: &mut Rnd, n: f32, alpha: f32) {
-    for _ in 0..n.round() as usize {
-        let (x0, ph, per, yy) = (rnd.f(), rnd.f(), 0.5 + rnd.f() * 0.6, rnd.f());
-        let u = ((p.t + ph * per) % per) / per;
-        if u > 0.45 {
+fn splashes(c: &mut Canvas, pane: &Pane, rnd: &mut Rnd, count: f32, alpha: f32) {
+    for _ in 0..count.round() as usize {
+        let (x0, phase, period, depth) = (rnd.f(), rnd.f(), 0.5 + rnd.f() * 0.6, rnd.f());
+        let cycle = ((pane.secs + phase * period) % period) / period;
+        // só aparece na primeira parte de cada ciclo
+        if cycle > 0.45 {
             continue;
         }
-        let k = u / 0.45;
-        let (cx, cy, rx, ry) = (p.ox + x0 * p.w, p.oy + p.h - 3.0 - yy * 8.0, 1.0 + k * 5.0, 0.5 + k * 1.4);
+        let open = cycle / 0.45;
+        let (cx, cy, rx, ry) = (pane.ox + x0 * pane.w, pane.oy + pane.h - 3.0 - depth * 8.0, 1.0 + open * 5.0, 0.5 + open * 1.4);
         let pts: Vec<(f32, f32)> = (0..=6)
             .map(|i| {
-                let a = PI + PI * i as f32 / 6.0;
-                (cx + rx * a.cos(), cy + ry * a.sin())
+                let angle = PI + PI * i as f32 / 6.0;
+                (cx + rx * angle.cos(), cy + ry * angle.sin())
             })
             .collect();
-        c.line(&pts, Rgba(215, 228, 255, (alpha * (1.0 - k) * 255.0) as u8), 0.8);
+        c.line(&pts, Rgba(215, 228, 255, (alpha * (1.0 - open) * 255.0) as u8), 0.8);
     }
 }
 
+/// Uma camada de flocos: quantos, as faixas de raio e de velocidade, a opacidade e se são macios
+/// (com a borda esfumada).
+struct Flakes {
+    count: f32,
+    radius: (f32, f32),
+    speed: (f32, f32),
+    alpha: f32,
+    soft: bool,
+}
+
 /// Neve: flocos pequenos ao fundo e grandes e macios na frente, balançando enquanto caem.
-fn snow(c: &mut Canvas, p: &Pane, rnd: &mut Rnd) {
-    let area = p.w * p.h;
-    for (n, r0, r1, v0, v1, a, soft) in [(area / 650.0, 0.7, 1.3, 12.0, 22.0, 0.6, false), (area / 2600.0, 1.8, 3.0, 26.0, 40.0, 0.85, true)] {
-        for _ in 0..n.round() as usize {
-            let (x0, y0, sp, rr, ph) = (rnd.f(), rnd.f(), rnd.f(), rnd.f(), rnd.f());
-            let v = v0 + sp * (v1 - v0);
-            let rad = r0 + rr * (r1 - r0);
-            let y = (y0 * (p.h + 10.0) + p.t * v) % (p.h + 10.0) - 5.0;
-            let sway = (p.t * 0.9 + ph * 6.28).sin() * if soft { 8.0 } else { 4.0 };
-            let x = (x0 * p.w + sway + p.t * 3.0).rem_euclid(p.w);
-            let (x, y) = (p.ox + x, p.oy + y);
+fn snow(c: &mut Canvas, pane: &Pane, rnd: &mut Rnd) {
+    let area = pane.w * pane.h;
+    let layers = [
+        Flakes { count: area / 650.0, radius: (0.7, 1.3), speed: (12.0, 22.0), alpha: 0.6, soft: false },
+        Flakes { count: area / 2600.0, radius: (1.8, 3.0), speed: (26.0, 40.0), alpha: 0.85, soft: true },
+    ];
+    for Flakes { count, radius, speed, alpha, soft } in layers {
+        for _ in 0..count.round() as usize {
+            let (x0, y0, speed_pick, radius_pick, phase) = (rnd.f(), rnd.f(), rnd.f(), rnd.f(), rnd.f());
+            let fall = speed.0 + speed_pick * (speed.1 - speed.0);
+            let rad = radius.0 + radius_pick * (radius.1 - radius.0);
+            let y = (y0 * (pane.h + 10.0) + pane.secs * fall) % (pane.h + 10.0) - 5.0;
+            let sway = (pane.secs * 0.9 + phase * 6.28).sin() * if soft { 8.0 } else { 4.0 };
+            let x = (x0 * pane.w + sway + pane.secs * 3.0).rem_euclid(pane.w);
+            let (x, y) = (pane.ox + x, pane.oy + y);
             if soft {
-                c.fill_radial(x, y, rad, rad, &[(0.0, WHITE.alpha(a)), (0.6, WHITE.alpha(a * 0.6)), (1.0, WHITE.alpha(0.0))]);
+                c.fill_radial(x, y, rad, rad, &[(0.0, WHITE.alpha(alpha)), (0.6, WHITE.alpha(alpha * 0.6)), (1.0, WHITE.alpha(0.0))]);
             } else {
-                c.fill_circle(x, y, rad, WHITE.alpha(a));
+                c.fill_circle(x, y, rad, WHITE.alpha(alpha));
             }
         }
     }
 }
 
 /// Granizo: pedrinhas que caem rápido (com um rastro) e quicam no pé do cartão.
-fn hail(c: &mut Canvas, p: &Pane, rnd: &mut Rnd) {
-    for _ in 0..(p.w * p.h / 1100.0).round() as usize {
-        let (x0, ph, sp, rr) = (rnd.f(), rnd.f(), rnd.f(), rnd.f());
+fn hail(c: &mut Canvas, pane: &Pane, rnd: &mut Rnd) {
+    for _ in 0..(pane.w * pane.h / 1100.0).round() as usize {
+        let (x0, phase, speed_pick, radius_pick) = (rnd.f(), rnd.f(), rnd.f(), rnd.f());
         let side = if rnd.f() < 0.5 { -1.0 } else { 1.0 };
-        let v = 240.0 + sp * 90.0;
-        let fall = (p.h + 6.0) / v;
+        let speed = 240.0 + speed_pick * 90.0;
+        // cada pedra: cai, quica e some por um instante (`period` segundos ao todo)
+        let fall = (pane.h + 6.0) / speed;
         let bounce = 0.34;
-        let per = fall + bounce + 0.15;
-        let u = (p.t + ph * per) % per;
-        let rad = 1.3 + rr;
-        let mut x = x0 * p.w;
-        let (y, a) = if u < fall {
-            let y = -6.0 + u * v;
-            c.line(&[(p.ox + x, p.oy + y - 9.0), (p.ox + x, p.oy + y)], Rgba(230, 240, 255, 64), rad);
+        let period = fall + bounce + 0.15;
+        let at = (pane.secs + phase * period) % period;
+        let rad = 1.3 + radius_pick;
+        let mut x = x0 * pane.w;
+        let (y, alpha) = if at < fall {
+            let y = -6.0 + at * speed;
+            c.line(&[(pane.ox + x, pane.oy + y - 9.0), (pane.ox + x, pane.oy + y)], Rgba(230, 240, 255, 64), rad);
             (y, 0.9)
-        } else if u < fall + bounce {
-            let b = (u - fall) / bounce;
-            x += b * 7.0 * side;
-            (p.h - 4.0 - 64.0 * b * (1.0 - b) * (1.0 - b * 0.4), 0.9 * (1.0 - b * 0.6))
+        } else if at < fall + bounce {
+            let hop = (at - fall) / bounce;
+            x += hop * 7.0 * side;
+            (pane.h - 4.0 - 64.0 * hop * (1.0 - hop) * (1.0 - hop * 0.4), 0.9 * (1.0 - hop * 0.6))
         } else {
             continue;
         };
-        c.fill_circle(p.ox + x, p.oy + y, rad, Rgba(242, 248, 255, (a * 255.0) as u8));
+        c.fill_circle(pane.ox + x, pane.oy + y, rad, Rgba(242, 248, 255, (alpha * 255.0) as u8));
     }
 }
 
 /// Ventania: rajadas em linhas finas e onduladas que atravessam o cartão, mais fortes no meio.
-fn wind(c: &mut Canvas, p: &Pane, rnd: &mut Rnd) {
-    let zone = p.h.min(230.0);
-    for _ in 0..(p.w * p.h / 6000.0).round() as usize + 3 {
-        let (x0, y0, sp, ln, ph) = (rnd.f(), rnd.f(), rnd.f(), rnd.f(), rnd.f());
-        let v = 130.0 + sp * 90.0;
-        let len = 45.0 + ln * 55.0;
-        let span = p.w + len + 80.0;
-        let x = (x0 * span + p.t * v) % span - len - 40.0;
+fn wind(c: &mut Canvas, pane: &Pane, rnd: &mut Rnd) {
+    let zone = pane.h.min(230.0);
+    for _ in 0..(pane.w * pane.h / 6000.0).round() as usize + 3 {
+        let (x0, y0, speed_pick, length_pick, phase) = (rnd.f(), rnd.f(), rnd.f(), rnd.f(), rnd.f());
+        let speed = 130.0 + speed_pick * 90.0;
+        let len = 45.0 + length_pick * 55.0;
+        let span = pane.w + len + 80.0;
+        let x = (x0 * span + pane.secs * speed) % span - len - 40.0;
         let y = 14.0 + y0 * (zone - 28.0);
-        let wav = (p.t * 2.2 + ph * 6.28).sin() * 3.0;
-        let ctrl = [(x, y), (x + len * 0.33, y - 4.0 + wav), (x + len * 0.66, y + 4.0 - wav), (x + len, y + wav * 0.5)];
-        let at = |f: f32| {
-            let g = 1.0 - f;
-            let k = [g * g * g, 3.0 * g * g * f, 3.0 * g * f * f, f * f * f];
-            (0..4).fold((p.ox, p.oy), |acc, i| (acc.0 + ctrl[i].0 * k[i], acc.1 + ctrl[i].1 * k[i]))
+        let wave = (pane.secs * 2.2 + phase * 6.28).sin() * 3.0;
+        let ctrl = [(x, y), (x + len * 0.33, y - 4.0 + wave), (x + len * 0.66, y + 4.0 - wave), (x + len, y + wave * 0.5)];
+        // o ponto a `along` (0 a 1) da curva de Bézier de `ctrl`
+        let at = |along: f32| {
+            let rest = 1.0 - along;
+            let weight = [rest * rest * rest, 3.0 * rest * rest * along, 3.0 * rest * along * along, along * along * along];
+            (0..4).fold((pane.ox, pane.oy), |acc, i| (acc.0 + ctrl[i].0 * weight[i], acc.1 + ctrl[i].1 * weight[i]))
         };
         const PIECES: usize = 6;
         for i in 0..PIECES {
             let (f0, f1) = (i as f32 / PIECES as f32, (i + 1) as f32 / PIECES as f32);
             let mid = (f0 + f1) / 2.0;
-            let a = if mid < 0.6 { 0.4 * mid / 0.6 } else { 0.4 * (1.0 - mid) / 0.4 };
-            c.line(&[at(f0), at(f1)], WHITE.alpha(a), 1.1);
+            // mais forte a 60% do caminho, sumindo nas pontas
+            let alpha = if mid < 0.6 { 0.4 * mid / 0.6 } else { 0.4 * (1.0 - mid) / 0.4 };
+            c.line(&[at(f0), at(f1)], WHITE.alpha(alpha), 1.1);
         }
     }
 }
@@ -792,6 +879,50 @@ mod tests {
         let (x, y) = storm.shake(thunder + Duration::from_millis(30));
         assert!(x.abs() + y.abs() > 0.3 && x.abs() < 3.0 && y.abs() < 3.0);
         assert_eq!(storm.shake(thunder + Duration::from_millis(900)), (0.0, 0.0));
+    }
+
+    // TEMPORÁRIO (legibilidade): impressão digital do céu com o tempo fixo.
+    #[test]
+    #[ignore]
+    fn zz_sky_fingerprint() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        fn hash(img: &Image) -> u64 {
+            img.px.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+        }
+        let mut out = String::new();
+        for w in Weather::ALL {
+            for h in [3.0, 6.2, 12.0, 18.2, 21.0] {
+                for (cw, ch) in [(320.0, 154.0), (320.0, 330.0), (154.0, 154.0)] {
+                    let mut c = Canvas::new((cw * 1.25) as u32, (ch * 1.25) as u32, 1.25);
+                    draw_back(&mut c, cw, ch, 26.0, w, &Clock::new(h, 6.2, 18.2));
+                    out += &format!("back {w:?} {h} {cw}x{ch} {:x}
+", hash(&c.finish()));
+                }
+            }
+            if !w.lightning() {
+                for t in [0.0, 3.7, 12.5] {
+                    let mut c = Canvas::new(400, 193, 1.25);
+                    draw_front(&mut c, 0.0, 0.0, 320.0, 154.0, 26.0, w, t, &Storm::default());
+                    out += &format!("front {w:?} {t} {:x}
+", hash(&c.finish()));
+                }
+            }
+        }
+        let storm = Storm::default();
+        let t0 = Instant::now();
+        storm.strike(320.0, 154.0, t0);
+        storm.strike(320.0, 330.0, t0 + Duration::from_millis(100));
+        for ms in [0u64, 30, 120, 250, 400] {
+            let now = t0 + Duration::from_millis(ms);
+            let mut c = Canvas::new(400, 413, 1.25);
+            bolts(&mut c, &Pane { ox: 2.0, oy: 3.0, w: 320.0, h: 330.0, secs: 1.0 }, 26.0, &storm, now);
+            out += &format!("bolts {ms} {:x} {} {:?}
+", hash(&c.finish()), storm.flash(now), storm.shake(now + Duration::from_millis(900)));
+        }
+        let path = std::env::var("FINGERPRINT").unwrap_or_else(|_| "sky.txt".into());
+        std::fs::write(path, out).unwrap();
     }
 
     #[test]
