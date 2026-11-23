@@ -20,12 +20,12 @@ use super::odometer::Odometer;
 use super::sky::{self, Weather};
 use super::island_ui as iu;
 use super::{alert_hash, Ctx, Env, Hot, IslandForm, IslandItem, Kind, Layout, MenuItem, Mode, NotifyAction, Status, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
-use crate::config::Get;
-use crate::drawing::weather_art;
+use crate::data::config::Get;
+use crate::gfx::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face, Image};
-use crate::theme::*;
-use crate::util;
-use crate::win;
+use crate::ui::theme::*;
+use crate::data::util;
+use crate::platform::win;
 
 const W: f32 = WIDE;
 const PAD: f32 = CARD_PAD;
@@ -227,8 +227,8 @@ fn fetch_weather(city: String, lat: Option<f64>, lon: Option<f64>, place: Option
         (Some(lat), Some(lon)) => (lat, lon, place.unwrap_or_else(|| city.clone())),
         _ => match search_cities(&city, 1) {
             Ok(found) if !found.is_empty() => {
-                let p = &found[0];
-                (p["lat"].as_f64().unwrap_or(0.0), p["lon"].as_f64().unwrap_or(0.0), p.str_of("label").unwrap_or(&city).to_string())
+                let best = &found[0];
+                (best["lat"].as_f64().unwrap_or(0.0), best["lon"].as_f64().unwrap_or(0.0), best.str_of("label").unwrap_or(&city).to_string())
             }
             Ok(_) => return Fetch::NotFound(format!("Cidade não encontrada: {}", city.split(',').next().unwrap_or("").trim())),
             Err(_) => return Fetch::Offline,
@@ -394,12 +394,13 @@ fn process(data: &Value, place: &str) -> Value {
     let gusts = cur.f64_of("wind_gusts_10m").unwrap_or(wind);
     let windy = code <= 3 && (wind >= WINDY_KMH || gusts >= WINDY_GUSTS);
     let hour_of = |i: usize| times[i].get(11..13).and_then(|h| h.parse::<i64>().ok()).unwrap_or(0);
+    // uma hora da previsão: [rótulo, ícone, temperatura, código, chance de chuva, dia, hora]
     let entry = |i: usize, label: String| -> Value {
-        let c = hourly["weather_code"][i].as_i64().unwrap_or(0);
-        let day = hourly["is_day"][i].as_i64().unwrap_or(1) != 0;
+        let hour_code = hourly["weather_code"][i].as_i64().unwrap_or(0);
+        let daylight = hourly["is_day"][i].as_i64().unwrap_or(1) != 0;
         let pop = hourly["precipitation_probability"][i].as_i64().unwrap_or(0);
-        let d = dates.iter().position(|date| !date.is_empty() && times[i].starts_with(date.as_str())).unwrap_or(0);
-        json!([label, weather_icon(c, day), round(&hourly["temperature_2m"][i]), c, pop, d, hour_of(i)])
+        let day_index = dates.iter().position(|date| !date.is_empty() && times[i].starts_with(date.as_str())).unwrap_or(0);
+        json!([label, weather_icon(hour_code, daylight), round(&hourly["temperature_2m"][i]), hour_code, pop, day_index, hour_of(i)])
     };
     // a faixa começa na hora de agora
     let now_key = cur.str_of("time").and_then(|t| t.get(..13)).unwrap_or("");
@@ -410,53 +411,15 @@ fn process(data: &Value, place: &str) -> Value {
     let day_info: Vec<Value> = dates
         .iter()
         .enumerate()
-        .map(|(d, date)| {
+        .map(|(day, date)| {
             let day_hours: Vec<Value> = (0..times.len()).filter(|&i| times[i].starts_with(date.as_str())).map(|i| entry(i, format!("{}h", hour_of(i)))).collect();
-            let name = match d {
-                0 => "Hoje".to_string(),
-                1 => "Amanhã".to_string(),
-                _ => WEEKDAYS[weekday(date)].to_string(),
-            };
-            let dm = date.get(8..10).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
-            let month = date.get(5..7).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).clamp(1, 12);
-            let c = daily["weather_code"][d].as_i64().unwrap_or(0);
-            json!({
-                "name": name,
-                "date": format!("{dm} de {}", MONTHS[month - 1]),
-                "icon": weather_icon(c, true),
-                "desc": wmo(c),
-                "max": round(&daily["temperature_2m_max"][d]),
-                "min": round(&daily["temperature_2m_min"][d]),
-                "pop": daily["precipitation_probability_max"][d].as_i64().unwrap_or(0),
-                "rain": daily["precipitation_sum"][d].as_f64().unwrap_or(0.0),
-                "wind": round(&daily["wind_speed_10m_max"][d]),
-                "wind_dir": daily["wind_direction_10m_dominant"][d].as_f64(),
-                "uv": daily["uv_index_max"][d].as_f64().unwrap_or(0.0),
-                "sunrise": daily["sunrise"][d].as_str().unwrap_or(""),
-                "sunset": daily["sunset"][d].as_str().unwrap_or(""),
-                "hours": day_hours,
-            })
+            day_summary(day, date, daily, day_hours)
         })
         .collect();
     let next12 = Value::Array(hours.iter().take(12).cloned().collect());
     let line = sky_line(&next12, windy.then(|| gusts.max(wind).round() as i64));
     let hours = with_sun(hours, times.get(start).map(String::as_str).unwrap_or(""), cur.str_of("time").unwrap_or(""), daily);
-    let now = json!({
-        "time": cur.str_of("time").unwrap_or(""),
-        "temp": round(&cur["temperature_2m"]),
-        "feels": round(&cur["apparent_temperature"]),
-        "humidity": round(&cur["relative_humidity_2m"]),
-        "dew": round(&cur["dew_point_2m"]),
-        "wind": round(&cur["wind_speed_10m"]),
-        "wind_dir": cur.f64_of("wind_direction_10m").unwrap_or(0.0),
-        "uv": cur.f64_of("uv_index").unwrap_or(0.0),
-        "uv_max": daily["uv_index_max"][0].as_f64().unwrap_or(0.0),
-        "pop": hours.iter().take(12).filter_map(|h| h[4].as_i64()).max().unwrap_or(0),
-        "rain_today": daily["precipitation_sum"][0].as_f64().unwrap_or(0.0),
-        "sunrise": daily["sunrise"][0].as_str().unwrap_or(""),
-        "sunset": daily["sunset"][0].as_str().unwrap_or(""),
-        "sunrise_next": daily["sunrise"][1].as_str().unwrap_or(""),
-    });
+    let now = now_details(cur, daily, &hours);
     json!({
         "place": place,
         "temp": round(&cur["temperature_2m"]),
@@ -480,6 +443,84 @@ fn process(data: &Value, place: &str) -> Value {
     })
 }
 
+/// Um dia da previsão, para os detalhes e a lista dos próximos dias: o nome ("Hoje", "Amanhã",
+/// "Sexta"), a data, o céu, a mínima e a máxima, a chuva, o vento, o UV, o sol e as horas.
+fn day_summary(day: usize, date: &str, daily: &Value, day_hours: Vec<Value>) -> Value {
+    let name = match day {
+        0 => "Hoje".to_string(),
+        1 => "Amanhã".to_string(),
+        _ => WEEKDAYS[weekday(date)].to_string(),
+    };
+    let day_of_month = date.get(8..10).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+    let month = date.get(5..7).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).clamp(1, 12);
+    let day_code = daily["weather_code"][day].as_i64().unwrap_or(0);
+    json!({
+        "name": name,
+        "date": format!("{day_of_month} de {}", MONTHS[month - 1]),
+        "icon": weather_icon(day_code, true),
+        "desc": wmo(day_code),
+        "max": round(&daily["temperature_2m_max"][day]),
+        "min": round(&daily["temperature_2m_min"][day]),
+        "pop": daily["precipitation_probability_max"][day].as_i64().unwrap_or(0),
+        "rain": daily["precipitation_sum"][day].as_f64().unwrap_or(0.0),
+        "wind": round(&daily["wind_speed_10m_max"][day]),
+        "wind_dir": daily["wind_direction_10m_dominant"][day].as_f64(),
+        "uv": daily["uv_index_max"][day].as_f64().unwrap_or(0.0),
+        "sunrise": daily["sunrise"][day].as_str().unwrap_or(""),
+        "sunset": daily["sunset"][day].as_str().unwrap_or(""),
+        "hours": day_hours,
+    })
+}
+
+/// Os detalhes de agora (os painéis da tela de detalhes): sensação, umidade, vento, UV, chuva e
+/// o sol de hoje e de amanhã.
+fn now_details(cur: &Value, daily: &Value, hours: &[Value]) -> Value {
+    json!({
+        "time": cur.str_of("time").unwrap_or(""),
+        "temp": round(&cur["temperature_2m"]),
+        "feels": round(&cur["apparent_temperature"]),
+        "humidity": round(&cur["relative_humidity_2m"]),
+        "dew": round(&cur["dew_point_2m"]),
+        "wind": round(&cur["wind_speed_10m"]),
+        "wind_dir": cur.f64_of("wind_direction_10m").unwrap_or(0.0),
+        "uv": cur.f64_of("uv_index").unwrap_or(0.0),
+        "uv_max": daily["uv_index_max"][0].as_f64().unwrap_or(0.0),
+        "pop": hours.iter().take(12).filter_map(|h| h[4].as_i64()).max().unwrap_or(0),
+        "rain_today": daily["precipitation_sum"][0].as_f64().unwrap_or(0.0),
+        "sunrise": daily["sunrise"][0].as_str().unwrap_or(""),
+        "sunset": daily["sunset"][0].as_str().unwrap_or(""),
+        "sunrise_next": daily["sunrise"][1].as_str().unwrap_or(""),
+    })
+}
+
+/// Desacelera no fim (de 0 a 1): a faixa de horas rolando para no lugar.
+/// Onde fica um painel de detalhe: o retângulo, a margem de dentro (`inner_x`, `inner_w`) e se é
+/// o painel alto (do grande) ou o baixo.
+struct TileArea {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    inner_x: f32,
+    inner_w: f32,
+    tall: bool,
+}
+
+impl TileArea {
+    fn new(x: f32, y: f32, w: f32, h: f32) -> TileArea {
+        TileArea { x, y, w, h, inner_x: x + 12.0, inner_w: w - 24.0, tall: h >= 100.0 }
+    }
+}
+
+/// Onde o valor grande do painel ficou: a linha de cima, o tamanho da letra, a largura do número
+/// e o pé do valor.
+struct TileValue {
+    y: f32,
+    size: f32,
+    number_w: f32,
+    bottom: f32,
+}
+
 fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
@@ -497,9 +538,10 @@ impl Scroll {
         Scroll { from: pos, to: pos, since: Instant::now() - Duration::from_secs(1) }
     }
 
+    /// Onde a faixa está agora (andando de `from` para `to`).
     fn shown(&self) -> f32 {
-        let t = ease(self.since.elapsed().as_secs_f32() * 1000.0 / SCROLL_MS);
-        self.from + (self.to - self.from) * t
+        let progress = ease(self.since.elapsed().as_secs_f32() * 1000.0 / SCROLL_MS);
+        self.from + (self.to - self.from) * progress
     }
 
     fn go(&mut self, to: f32) {
@@ -625,7 +667,7 @@ impl Tempo {
         // abre com o último clima guardado, enquanto busca o atual
         let cached = cache.get("weather").filter(|w| place.is_some() && w.str_of("place") == place && w.get("code").is_some()).cloned();
         let updated = if cached.is_some() { cache.f64_of("weather_time") } else { None };
-        let mut t = Tempo {
+        let mut tempo = Tempo {
             weather: cached,
             weather_msg: "Carregando…".into(),
             next_weather: None,
@@ -654,14 +696,14 @@ impl Tempo {
             island_sky: RefCell::new(None),
         };
         if let Some(fetched) = updated {
-            t.refresh_rain(fetched);
+            tempo.refresh_rain(fetched);
         }
-        t
+        tempo
     }
 
     pub fn update_weather(&mut self, ctx: &mut Ctx) {
-        let w = ctx.cfg[ctx.key].clone();
-        let Some(city) = w.str_of("city").filter(|c| !c.is_empty()).map(String::from) else {
+        let settings = ctx.cfg[ctx.key].clone();
+        let Some(city) = settings.str_of("city").filter(|c| !c.is_empty()).map(String::from) else {
             self.weather_msg = "Clique para escolher a cidade".into();
             self.next_weather = None;
             return;
@@ -669,11 +711,11 @@ impl Tempo {
         if self.pending.is_some() {
             return;
         }
-        let (lat, lon, place) = (w.f64_of("lat"), w.f64_of("lon"), w.str_of("place").map(String::from));
+        let (lat, lon, place) = (settings.f64_of("lat"), settings.f64_of("lon"), settings.str_of("place").map(String::from));
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let _ = tx.send(fetch_weather(city, lat, lon, place));
-            crate::events::wake();
+            crate::platform::events::wake();
         });
         self.pending = Some(rx);
         self.poll_at = Instant::now() + Duration::from_millis(200);
@@ -773,59 +815,76 @@ impl Tempo {
     /// Os avisos para a ilha agora, do mais importante ao menos: trovoada (agora ou nas próximas
     /// horas), chuva começando na próxima hora, amanhã bem mais frio ou mais quente.
     fn island_alerts(&self) -> Vec<Alert> {
-        let Some(w) = self.weather.as_ref() else { return Vec::new() };
-        let mut out = Vec::new();
+        let Some(weather) = self.weather.as_ref() else { return Vec::new() };
+        [self.storm_alert(weather), self.rain_soon_alert(weather), self.temperature_alert(weather)].into_iter().flatten().collect()
+    }
+
+    /// " em Campinas" (vazio sem a cidade): para o texto dos avisos.
+    fn in_place(&self) -> String {
         let place = self.place_short();
-        let in_place = if place.is_empty() { String::new() } else { format!(" em {place}") };
-        let now_line = format!("Agora {} · {}", self.temp_text(), w.str_of("desc").unwrap_or(""));
+        if place.is_empty() { String::new() } else { format!(" em {place}") }
+    }
+
+    /// "Agora 24° · Nublado": a linha de baixo dos avisos.
+    fn now_line(&self, weather: &Value) -> String {
+        format!("Agora {} · {}", self.temp_text(), weather.str_of("desc").unwrap_or(""))
+    }
+
+    /// Trovoada agora, ou chegando nas próximas horas (com a hora).
+    fn storm_alert(&self, weather: &Value) -> Option<Alert> {
         let code = self.code();
-        let date = w["now"].str_of("time").and_then(|t| t.get(..10)).unwrap_or("");
-        // trovoada: agora (None) ou a hora em que chega
-        let storm_at = if is_storm(code) {
+        let date = weather["now"].str_of("time").and_then(|t| t.get(..10)).unwrap_or("");
+        // None: agora; Some(hora): a hora em que chega
+        let arrives: Option<Option<String>> = if is_storm(code) {
             Some(None)
         } else {
-            let hours = w["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let hours = weather["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             hours.iter().skip(1).take(STORM_SOON).find(|h| is_storm(h[3].as_i64().unwrap_or(0))).map(|h| Some(h[0].as_str().unwrap_or("").to_string()))
         };
-        if let Some(at) = storm_at {
-            let (value, banner, title, sub) = match at {
-                None => ("agora".to_string(), format!("Trovoada{in_place}"), "Trovoada agora".to_string(), w.str_of("rain_line").map(String::from).unwrap_or_else(|| now_line.clone())),
-                Some(h) => (h.clone(), format!("Trovoada chegando{in_place}"), format!("Trovoada às {h}"), now_line.clone()),
-            };
-            let weather = if is_storm(code) { self.sky_weather() } else { Weather::Storm };
-            out.push(Alert { key: format!("trovoada|{date}"), short: "Trovoada".into(), value, banner, title, sub, weather, icon: "thunder".into(), color: STORM_COLOR });
+        let in_place = self.in_place();
+        let now_line = self.now_line(weather);
+        let (value, banner, title, sub) = match arrives? {
+            None => ("agora".to_string(), format!("Trovoada{in_place}"), "Trovoada agora".to_string(), weather.str_of("rain_line").map(String::from).unwrap_or(now_line)),
+            Some(hour) => (hour.clone(), format!("Trovoada chegando{in_place}"), format!("Trovoada às {hour}"), now_line),
+        };
+        let sky = if is_storm(code) { self.sky_weather() } else { Weather::Storm };
+        Some(Alert { key: format!("trovoada|{date}"), short: "Trovoada".into(), value, banner, title, sub, weather: sky, icon: "thunder".into(), color: STORM_COLOR })
+    }
+
+    /// Chuva começando na próxima hora (até um minuto depois da hora prevista: "agora").
+    fn rain_soon_alert(&self, weather: &Value) -> Option<Alert> {
+        let (key, at) = self.rain_alert.as_ref()?;
+        let minutes_left = (at - win::now()) / 60.0;
+        if minutes_left <= -1.0 || minutes_left > 60.0 || is_rain(self.code()) {
+            return None;
         }
-        // chuva chegando (até um minuto depois da hora prevista: "agora")
-        if let Some((key, at)) = &self.rain_alert {
-            let mins = (at - win::now()) / 60.0;
-            if mins > -1.0 && mins <= 60.0 && !is_rain(code) {
-                let m = mins.max(0.0).round() as i64;
-                let (value, title) = if m < 1 { ("agora".to_string(), "Chuva começando".to_string()) } else { (format!("{m} min"), format!("Chuva em {m} min")) };
-                out.push(Alert { key: key.clone(), short: "Chuva".into(), value, banner: format!("Chuva chegando{in_place}"), title, sub: now_line.clone(), weather: Weather::Rain, icon: "rain".into(), color: RAIN_BLUE });
-            }
+        let minutes = minutes_left.max(0.0).round() as i64;
+        let (value, title) = if minutes < 1 { ("agora".to_string(), "Chuva começando".to_string()) } else { (format!("{minutes} min"), format!("Chuva em {minutes} min")) };
+        let banner = format!("Chuva chegando{}", self.in_place());
+        Some(Alert { key: key.clone(), short: "Chuva".into(), value, banner, title, sub: self.now_line(weather), weather: Weather::Rain, icon: "rain".into(), color: RAIN_BLUE })
+    }
+
+    /// Amanhã bem mais frio ou mais quente que hoje (a máxima muda `TEMP_JUMP` graus ou mais).
+    fn temperature_alert(&self, weather: &Value) -> Option<Alert> {
+        let days = weather["day_info"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let (today, tomorrow) = (days.first()?, days.get(1)?);
+        let (today_max, tomorrow_max) = (today.i64_of("max")?, tomorrow.i64_of("max")?);
+        let change = tomorrow_max - today_max;
+        if change.abs() < TEMP_JUMP {
+            return None;
         }
-        // amanhã bem mais frio ou mais quente que hoje
-        let days = w["day_info"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-        if let (Some(today), Some(tomorrow)) = (days.first(), days.get(1)) {
-            if let (Some(a), Some(b)) = (today.i64_of("max"), tomorrow.i64_of("max")) {
-                let d = b - a;
-                if d.abs() >= TEMP_JUMP {
-                    let verb = if d < 0 { "esfria" } else { "esquenta" };
-                    out.push(Alert {
-                        key: format!("temperatura|{}|{d}", tomorrow.str_of("date").unwrap_or("")),
-                        short: "Amanhã".into(),
-                        value: format!("{}{}°", if d < 0 { "−" } else { "+" }, d.abs()),
-                        banner: format!("Amanhã {verb}: máxima de {b}°"),
-                        title: format!("Amanhã {verb} {}°", d.abs()),
-                        sub: format!("Máxima de {b}° (hoje, {a}°)"),
-                        weather: self.sky_weather(),
-                        icon: tomorrow.str_of("icon").unwrap_or("clouds").to_string(),
-                        color: if d < 0 { COLD } else { WARM },
-                    });
-                }
-            }
-        }
-        out
+        let verb = if change < 0 { "esfria" } else { "esquenta" };
+        Some(Alert {
+            key: format!("temperatura|{}|{change}", tomorrow.str_of("date").unwrap_or("")),
+            short: "Amanhã".into(),
+            value: format!("{}{}°", if change < 0 { "−" } else { "+" }, change.abs()),
+            banner: format!("Amanhã {verb}: máxima de {tomorrow_max}°"),
+            title: format!("Amanhã {verb} {}°", change.abs()),
+            sub: format!("Máxima de {tomorrow_max}° (hoje, {today_max}°)"),
+            weather: self.sky_weather(),
+            icon: tomorrow.str_of("icon").unwrap_or("clouds").to_string(),
+            color: if change < 0 { COLD } else { WARM },
+        })
     }
 
     /// O aviso que a ilha mostra (o mais importante que ninguém dispensou).
@@ -835,7 +894,7 @@ impl Tempo {
 
     /// O céu da ilha aberta no clima `weather`, guardado (refeito quando muda o minuto ou o clima).
     fn island_sky(&self, s: f32, weather: Weather) -> std::cell::Ref<'_, Option<((u32, u32, Weather, i64), Image)>> {
-        let (w, h, r) = iu::size(IslandForm::Large);
+        let iu::FormSize { w, h, radius: r } = iu::size(IslandForm::Large);
         let clock = self.clock();
         let key = ((w * s).round() as u32, (h * s).round() as u32, weather, (clock.now * 60.0) as i64);
         if self.island_sky.borrow().as_ref().is_none_or(|(k, _)| *k != key) {
@@ -849,62 +908,68 @@ impl Tempo {
     /// O aviso na ilha, em cada forma. Aberta: o céu do aviso (com a chuva caindo), o aviso e as
     /// próximas horas.
     fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
-        let Some(a) = self.island_alert() else { return };
+        let Some(alert) = self.island_alert() else { return };
         let (x, y, w, h) = r;
         let cy = y + h / 2.0;
         let art = |c: &mut Canvas, cx: f32, cy: f32, size: f32| {
             let px = (size * c.s).round() as u32;
-            c.image(&weather_art(&a.icon, px), cx - size / 2.0, cy - size / 2.0);
+            c.image(&weather_art(&alert.icon, px), cx - size / 2.0, cy - size / 2.0);
         };
         match form {
             IslandForm::Bubble => art(c, x + w / 2.0, cy, 28.0),
             IslandForm::Compact | IslandForm::Banner => {
                 art(c, x + 26.0, cy, 26.0);
-                let label = if form == IslandForm::Banner { &a.banner } else { &a.short };
-                iu::compact_text(c, x + 46.0, r, label, &a.value, a.color);
+                let label = if form == IslandForm::Banner { &alert.banner } else { &alert.short };
+                iu::compact_text(c, x + 46.0, r, label, &alert.value, alert.color);
             }
             IslandForm::Medium => {
                 art(c, x + 39.0, cy, 46.0);
-                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &a.title, &a.sub, a.color);
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &alert.title, &alert.sub, alert.color);
                 for (act, b) in island_buttons(form, w, h) {
                     iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(act));
                 }
             }
-            IslandForm::Large => {
-                let (lw, lh, lr) = iu::size(IslandForm::Large);
-                {
-                    let sky = self.island_sky(c.s, a.weather);
-                    if let Some((_, img)) = sky.as_ref() {
-                        c.image_px(img, (x * c.s).round(), (y * c.s).round(), img.w as f32, img.h as f32, 1.0);
-                    }
-                }
-                // a chuva, a neve, os raios (calculados pelo tempo: sem estado)
-                let t = self.started.elapsed().as_secs_f32() % 3600.0;
-                sky::draw_front(c, x, y, lw, lh, lr, a.weather, t, &self.island_storm);
-                iu::header(c, r, "TEMPO", WHITE, &self.place_short(), MUTED);
-                c.text(x + 22.0, y + 58.0, &a.title, Face::Semibold, 20.0, FG, Anchor::LM, Some(w - 44.0));
-                c.text(x + 22.0, y + 82.0, &a.sub, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
-                // as próximas horas (sem o nascer e o pôr do sol)
-                let hours: Vec<&Value> = self.weather.as_ref().and_then(|w| w["hours"].as_array()).map(|l| l.iter().filter(|h| h[2].is_i64()).take(6).collect()).unwrap_or_default();
-                let (x0, x1) = (x + 14.0, x + w - 14.0);
-                let col = (x1 - x0) / 6.0;
-                let hy = y + 102.0;
-                for (i, hr) in hours.iter().enumerate() {
-                    let hx = x0 + col * (i as f32 + 0.5);
-                    c.text(hx, hy, hr[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
-                    let px = (22.0 * c.s).round() as u32;
-                    c.image(&weather_art(hr[1].as_str().unwrap_or("clouds"), px), hx - 11.0, hy + 15.0);
-                    let pop = hr[4].as_i64().unwrap_or(0);
-                    if pop >= 20 {
-                        c.text(hx, hy + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
-                    }
-                    c.text(hx, hy + 50.0, &format!("{}°", hr[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
-                }
-                for (act, b) in island_buttons(form, w, h) {
-                    let label = if act == ISLAND_OK { "OK" } else { "Previsão" };
-                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), label, act == ISLAND_OK, hot == Some(act));
-                }
+            IslandForm::Large => self.draw_island_large(c, &alert, r, hot),
+        }
+    }
+
+    /// A ilha aberta com um aviso: o céu dele (com a chuva caindo), o aviso, as próximas horas e
+    /// os botões OK e Previsão.
+    fn draw_island_large(&self, c: &mut Canvas, alert: &Alert, r: Rect4, hot: Option<u32>) {
+        let (x, y, w, h) = r;
+        let iu::FormSize { w: lw, h: lh, radius: lr } = iu::size(IslandForm::Large);
+        {
+            let sky = self.island_sky(c.s, alert.weather);
+            if let Some((_, img)) = sky.as_ref() {
+                c.image_px(img, (x * c.s).round(), (y * c.s).round(), img.w as f32, img.h as f32, 1.0);
             }
+        }
+        // a chuva, a neve, os raios (calculados pelo tempo, sem estado; a volta a cada hora
+        // mantém a precisão)
+        let secs = self.started.elapsed().as_secs_f32() % 3600.0;
+        sky::draw_front(c, x, y, lw, lh, lr, alert.weather, secs, &self.island_storm);
+        iu::header(c, r, "TEMPO", WHITE, &self.place_short(), MUTED);
+        c.text(x + 22.0, y + 58.0, &alert.title, Face::Semibold, 20.0, FG, Anchor::LM, Some(w - 44.0));
+        c.text(x + 22.0, y + 82.0, &alert.sub, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
+        // as próximas horas (sem o nascer e o pôr do sol, que não têm temperatura)
+        let hours: Vec<&Value> = self.weather.as_ref().and_then(|w| w["hours"].as_array()).map(|list| list.iter().filter(|h| h[2].is_i64()).take(6).collect()).unwrap_or_default();
+        let (x0, x1) = (x + 14.0, x + w - 14.0);
+        let col_w = (x1 - x0) / 6.0;
+        let top = y + 102.0;
+        for (i, hour) in hours.iter().enumerate() {
+            let cx = x0 + col_w * (i as f32 + 0.5);
+            c.text(cx, top, hour[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
+            let px = (22.0 * c.s).round() as u32;
+            c.image(&weather_art(hour[1].as_str().unwrap_or("clouds"), px), cx - 11.0, top + 15.0);
+            let pop = hour[4].as_i64().unwrap_or(0);
+            if pop >= 20 {
+                c.text(cx, top + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
+            }
+            c.text(cx, top + 50.0, &format!("{}°", hour[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
+        }
+        for (act, b) in island_buttons(IslandForm::Large, w, h) {
+            let label = if act == ISLAND_OK { "OK" } else { "Previsão" };
+            iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), label, act == ISLAND_OK, hot == Some(act));
         }
     }
 
@@ -924,16 +989,16 @@ impl Tempo {
 
     /// A hora na cidade (pelo fuso dela; sem ele, a do computador) e o nascer e o pôr do sol.
     fn clock(&self) -> sky::Clock {
-        let w = self.weather.as_ref();
-        let now = match (self.fixed_hour, w.and_then(|w| w.f64_of("utc_offset"))) {
-            (Some(h), _) => h,
+        let weather = self.weather.as_ref();
+        let now = match (self.fixed_hour, weather.and_then(|w| w.f64_of("utc_offset"))) {
+            (Some(hour), _) => hour,
             (None, Some(offset)) => ((win::now() + offset) / 3600.0).rem_euclid(24.0) as f32,
             _ => {
-                let t = win::local_time();
-                t.hour as f32 + t.minute as f32 / 60.0
+                let local = win::local_time();
+                local.hour as f32 + local.minute as f32 / 60.0
             }
         };
-        let hour_of = |key: &str| w.and_then(|w| w["now"].str_of(key)).and_then(minute_of_day).map(|m| m as f32 / 60.0);
+        let hour_of = |key: &str| weather.and_then(|w| w["now"].str_of(key)).and_then(minute_of_day).map(|m| m as f32 / 60.0);
         sky::Clock::new(now, hour_of("sunrise").unwrap_or(6.0), hour_of("sunset").unwrap_or(18.0))
     }
 
@@ -1100,16 +1165,17 @@ impl Tempo {
         (PAD + 2.0, W - PAD - 2.0)
     }
 
+    /// As bolinhas das páginas dos detalhes (uma por página, centralizadas), para clicar.
     fn dot_rects(mode: Mode) -> Vec<Rect4> {
-        let n = Self::pages(mode);
-        if n < 2 {
+        let pages = Self::pages(mode);
+        if pages < 2 {
             return Vec::new();
         }
         let w = Self::width(mode);
         let y = dots_y(mode);
         let step = 14.0;
-        let x0 = w / 2.0 - step * (n as f32 - 1.0) / 2.0;
-        (0..n).map(|i| (x0 + step * i as f32 - 7.0, y - 7.0, x0 + step * i as f32 + 7.0, y + 7.0)).collect()
+        let x0 = w / 2.0 - step * (pages as f32 - 1.0) / 2.0;
+        (0..pages).map(|i| (x0 + step * i as f32 - 7.0, y - 7.0, x0 + step * i as f32 + 7.0, y + 7.0)).collect()
     }
 
     /// Onde fica cada painel de detalhe na página (x, y, largura, altura).
@@ -1132,11 +1198,12 @@ impl Tempo {
     fn now_tiles(&self) -> Vec<Tile> {
         let empty = json!({});
         let now = self.weather.as_ref().map(|w| &w["now"]).unwrap_or(&empty);
-        let n = |k: &str| now.i64_of(k);
-        let f = |k: &str| now.f64_of(k).unwrap_or(0.0);
-        let s = |k: &str| now.str_of(k).unwrap_or("").to_string();
+        // leitores do que o Tempo guardou: número inteiro, fracionário e texto
+        let int = |key: &str| now.i64_of(key);
+        let float = |key: &str| now.f64_of(key).unwrap_or(0.0);
+        let text = |key: &str| now.str_of(key).unwrap_or("").to_string();
         let deg = |v: Option<i64>| v.map(|v| format!("{v}°")).unwrap_or_else(|| "--".into());
-        let (temp, feels) = (n("temp").unwrap_or(0), n("feels").unwrap_or(0));
+        let (temp, feels) = (int("temp").unwrap_or(0), int("feels").unwrap_or(0));
         let feels_sub = if feels > temp + 1 {
             format!("Parece mais quente que os {temp}° reais")
         } else if feels < temp - 1 {
@@ -1145,7 +1212,7 @@ impl Tempo {
             "Parecida com a temperatura real".into()
         };
         // sol: o próximo acontecimento (nascer ou pôr) e quanto do dia já passou
-        let (sunrise, sunset, now_min) = (s("sunrise"), s("sunset"), minute_of_day(&s("time")));
+        let (sunrise, sunset, now_min) = (text("sunrise"), text("sunset"), minute_of_day(&text("time")));
         let (rise_m, set_m) = (minute_of_day(&sunrise), minute_of_day(&sunset));
         let frac = |m: Option<i64>| m.map(|m| m as f32 / 1440.0);
         let path = Visual::Sun(frac(rise_m).unwrap_or(0.25), frac(set_m).unwrap_or(0.75), frac(now_min));
@@ -1153,32 +1220,32 @@ impl Tempo {
         let sun = match (now_min, rise_m, set_m) {
             (Some(t), Some(r), Some(_)) if t < r => tile("NASCER DO SOL", hhmm(&sunrise), format!("Pôr do sol: {}", hhmm(&sunset)), path),
             (Some(t), Some(_), Some(st)) if t < st => tile("PÔR DO SOL", hhmm(&sunset), format!("Nascer do sol: {}", hhmm(&sunrise)), path),
-            _ => tile("NASCER DO SOL", hhmm(&s("sunrise_next")), format!("Pôr do sol: {}", hhmm(&sunset)), path),
+            _ => tile("NASCER DO SOL", hhmm(&text("sunrise_next")), format!("Pôr do sol: {}", hhmm(&sunset)), path),
         };
-        let rain_today = f("rain_today");
-        let humidity = n("humidity");
+        let rain_today = float("rain_today");
+        let humidity = int("humidity");
         // as próximas 12 horas da faixa (sem as colunas do nascer e do pôr do sol)
         let pops: Vec<i64> = self.next_hours().iter().filter(|h| h[2].is_i64()).take(12).map(|h| h[4].as_i64().unwrap_or(0)).collect();
         vec![
-            Tile { sub_short: Some(format!("Real: {temp}°")), ..tile("SENSAÇÃO", deg(n("feels")), feels_sub, Visual::Feels(temp, feels)) },
+            Tile { sub_short: Some(format!("Real: {temp}°")), ..tile("SENSAÇÃO", deg(int("feels")), feels_sub, Visual::Feels(temp, feels)) },
             Tile {
-                sub_short: Some(format!("Orvalho: {}", deg(n("dew")))),
+                sub_short: Some(format!("Orvalho: {}", deg(int("dew")))),
                 ..tile(
                     "UMIDADE",
                     humidity.map(|v| format!("{v}%")).unwrap_or_else(|| "--".into()),
-                    format!("O ponto de orvalho está em {} agora.", deg(n("dew"))),
+                    format!("O ponto de orvalho está em {} agora.", deg(int("dew"))),
                     humidity.map_or(Visual::None, Visual::Humidity),
                 )
             },
-            tile("VENTO", format!("{} km/h", n("wind").unwrap_or(0)), format!("Do {}", wind_from(f("wind_dir"))), Visual::Wind(f("wind_dir"), n("wind").unwrap_or(0))),
-            tile("ÍNDICE UV", format!("{}", f("uv").round()), format!("Máximo de {} hoje", f("uv_max").round()), Visual::Uv(f("uv"))),
+            tile("VENTO", format!("{} km/h", int("wind").unwrap_or(0)), format!("Do {}", wind_from(float("wind_dir"))), Visual::Wind(float("wind_dir"), int("wind").unwrap_or(0))),
+            tile("ÍNDICE UV", format!("{}", float("uv").round()), format!("Máximo de {} hoje", float("uv_max").round()), Visual::Uv(float("uv"))),
             sun,
             Tile {
                 // no painel baixo, as barrinhas já mostram as próximas horas
                 sub_short: (rain_today >= 0.1).then(|| format!("{}\u{a0}mm hoje", br1(rain_today))),
                 ..tile(
                     "CHUVA",
-                    format!("{}%", n("pop").unwrap_or(0)),
+                    format!("{}%", int("pop").unwrap_or(0)),
                     if rain_today >= 0.1 { format!("Nas próximas 12\u{a0}h. {}\u{a0}mm hoje.", br1(rain_today)) } else { "Nas próximas 12\u{a0}h.".into() },
                     if pops.is_empty() { Visual::None } else { Visual::Rain(pops) },
                 )
@@ -1187,31 +1254,32 @@ impl Tempo {
     }
 
     fn day_tiles(day: &Value) -> Vec<Tile> {
-        let n = |k: &str| day.i64_of(k).unwrap_or(0);
-        let f = |k: &str| day.f64_of(k).unwrap_or(0.0);
-        let s = |k: &str| day.str_of(k).unwrap_or("").to_string();
+        // leitores do que o Tempo guardou: número inteiro, fracionário e texto
+        let int = |key: &str| day.i64_of(key).unwrap_or(0);
+        let float = |key: &str| day.f64_of(key).unwrap_or(0.0);
+        let text = |key: &str| day.str_of(key).unwrap_or("").to_string();
         let tile = |title: &str, value: String, sub: String, visual: Visual| Tile { title: title.into(), value, sub, sub_short: None, visual };
-        let rain = f("rain");
+        let rain = float("rain");
         let pops: Vec<i64> = day["hours"].as_array().map(|hs| hs.iter().map(|h| h[4].as_i64().unwrap_or(0)).collect()).unwrap_or_default();
         // a direção que mais soprou no dia (o clima guardado por uma versão antiga não tem)
         let wind = match day.f64_of("wind_dir") {
-            Some(dir) => Visual::Wind(dir, n("wind")),
+            Some(dir) => Visual::Wind(dir, int("wind")),
             None => Visual::None,
         };
         vec![
             tile(
                 "CHUVA",
-                format!("{}%", n("pop")),
+                format!("{}%", int("pop")),
                 if rain >= 0.1 { format!("{} mm no dia", br1(rain)) } else { "Sem chuva prevista".into() },
                 if pops.is_empty() { Visual::None } else { Visual::Rain(pops) },
             ),
-            tile("VENTO", format!("{} km/h", n("wind")), "Máximo do dia".into(), wind),
-            tile("ÍNDICE UV", format!("{}", f("uv").round()), "Máximo do dia".into(), Visual::Uv(f("uv"))),
+            tile("VENTO", format!("{} km/h", int("wind")), "Máximo do dia".into(), wind),
+            tile("ÍNDICE UV", format!("{}", float("uv").round()), "Máximo do dia".into(), Visual::Uv(float("uv"))),
             tile(
                 "NASCER DO SOL",
-                hhmm(&s("sunrise")),
-                format!("Pôr do sol: {}", hhmm(&s("sunset"))),
-                Visual::Sun(minute_of_day(&s("sunrise")).unwrap_or(360) as f32 / 1440.0, minute_of_day(&s("sunset")).unwrap_or(1080) as f32 / 1440.0, None),
+                hhmm(&text("sunrise")),
+                format!("Pôr do sol: {}", hhmm(&text("sunset"))),
+                Visual::Sun(minute_of_day(&text("sunrise")).unwrap_or(360) as f32 / 1440.0, minute_of_day(&text("sunset")).unwrap_or(1080) as f32 / 1440.0, None),
             ),
         ]
     }
@@ -1252,21 +1320,21 @@ impl Tempo {
         }
         c.pop_clip();
         let max = Self::max_scroll(list.len());
-        let (l, r) = Self::chevron_rects(y);
+        let (left, right) = Self::chevron_rects(y);
         // nas pontas, uma aba alta e fina com a setinha (rolar as horas): bem diferente dos
         // botões redondos de trocar de dia, no título
         let cy = y + 26.0;
-        let (t0, t1) = (y + 4.0, y + STRIP_H - 10.0);
+        let (tab_top, tab_bottom) = (y + 4.0, y + STRIP_H - 10.0);
         if off > 0.05 {
-            let (a, b) = (l.0 + 4.0, l.2 - 4.0);
-            c.fill_round_rect(a, t0, b, t1, (b - a) / 2.0, WHITE.alpha(0.10));
-            let x = (a + b) / 2.0 + 1.0;
+            let (x0, x1) = (left.0 + 4.0, left.2 - 4.0);
+            c.fill_round_rect(x0, tab_top, x1, tab_bottom, (x1 - x0) / 2.0, WHITE.alpha(0.10));
+            let x = (x0 + x1) / 2.0 + 1.0;
             c.line(&[(x + 1.8, cy - 3.5), (x - 1.8, cy), (x + 1.8, cy + 3.5)], FG.alpha(0.8), 1.4);
         }
         if off < max - 0.05 {
-            let (a, b) = (r.0 + 4.0, r.2 - 4.0);
-            c.fill_round_rect(a, t0, b, t1, (b - a) / 2.0, WHITE.alpha(0.10));
-            let x = (a + b) / 2.0 - 1.0;
+            let (x0, x1) = (right.0 + 4.0, right.2 - 4.0);
+            c.fill_round_rect(x0, tab_top, x1, tab_bottom, (x1 - x0) / 2.0, WHITE.alpha(0.10));
+            let x = (x0 + x1) / 2.0 - 1.0;
             c.line(&[(x - 1.8, cy - 3.5), (x + 1.8, cy), (x - 1.8, cy + 3.5)], FG.alpha(0.8), 1.4);
         }
     }
@@ -1374,11 +1442,13 @@ impl Tempo {
             c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Regular, 13.0, MUTED, Anchor::RM, None);
             c.text(W - pad, cy, &format!("{mx}°"), Face::Semibold, 13.0, FG, Anchor::RM, None);
             c.fill_round_rect(bx0, cy - 2.5, bx1, cy + 2.5, 2.5, Rgba(0, 0, 0, 55));
-            let (a, b) = (bx0 + (bx1 - bx0) * (mn - lo) / span, bx0 + (bx1 - bx0) * (mx - lo) / span);
-            c.gradient_h(a, cy - 2.5, b.max(a + 5.0), cy + 2.5, 2.5, &[(0.0, Rgba::rgb(90, 200, 250)), (0.6, Rgba::rgb(255, 214, 10)), (1.0, Rgba::rgb(255, 159, 10))], bx0, bx1);
+            // a faixa da mínima à máxima do dia, na escala da semana (de `lo` a `lo + span`)
+            let (from_x, to_x) = (bx0 + (bx1 - bx0) * (mn - lo) / span, bx0 + (bx1 - bx0) * (mx - lo) / span);
+            c.gradient_h(from_x, cy - 2.5, to_x.max(from_x + 5.0), cy + 2.5, 2.5, &[(0.0, Rgba::rgb(90, 200, 250)), (0.6, Rgba::rgb(255, 214, 10)), (1.0, Rgba::rgb(255, 159, 10))], bx0, bx1);
             if i == 0 {
-                if let Some(t) = self.weather.as_ref().and_then(|w| w.i64_of("temp")) {
-                    let x = bx0 + (bx1 - bx0) * ((t as f32 - lo) / span).clamp(0.0, 1.0);
+                // hoje: o ponto na temperatura de agora
+                if let Some(temp) = self.weather.as_ref().and_then(|w| w.i64_of("temp")) {
+                    let x = bx0 + (bx1 - bx0) * ((temp as f32 - lo) / span).clamp(0.0, 1.0);
                     c.fill_circle(x, cy, 5.0, Rgba(0, 0, 0, 90));
                     c.fill_circle(x, cy, 3.4, WHITE);
                 }
@@ -1496,17 +1566,19 @@ impl Tempo {
     fn draw_close(c: &mut Canvas, r: Rect4) {
         let (cx, cy) = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
         c.fill_circle(cx, cy, 12.0, WHITE.alpha(0.16));
-        let d = 3.8;
-        c.line(&[(cx - d, cy - d), (cx + d, cy + d)], FG, 1.6);
-        c.line(&[(cx + d, cy - d), (cx - d, cy + d)], FG, 1.6);
+        let arm = 3.8;
+        c.line(&[(cx - arm, cy - arm), (cx + arm, cy + arm)], FG, 1.6);
+        c.line(&[(cx + arm, cy - arm), (cx - arm, cy + arm)], FG, 1.6);
     }
 
+    /// O botão redondo de trocar de dia, com a setinha para a esquerda ou a direita (apagado
+    /// quando não há dia antes ou depois).
     fn draw_button(c: &mut Canvas, r: Rect4, left: bool, enabled: bool) {
         let (cx, cy) = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
         c.fill_circle(cx, cy, 12.0, WHITE.alpha(if enabled { 0.16 } else { 0.06 }));
         let col = FG.alpha(if enabled { 1.0 } else { 0.35 });
-        let d = if left { 1.0 } else { -1.0 };
-        c.line(&[(cx + 2.5 * d, cy - 5.0), (cx - 2.5 * d, cy), (cx + 2.5 * d, cy + 5.0)], col, 1.8);
+        let point = if left { 1.0 } else { -1.0 };
+        c.line(&[(cx + 2.5 * point, cy - 5.0), (cx - 2.5 * point, cy), (cx + 2.5 * point, cy + 5.0)], col, 1.8);
     }
 
     /// Ícone pequeno de linha antes do título do painel (desenhado, sem depender de fonte).
@@ -1528,9 +1600,10 @@ impl Tempo {
             }
             "ÍNDICE UV" => {
                 c.fill_circle(cx, cy, 2.3, col);
-                for k in 0..8 {
-                    let a = (k as f32 * 45.0).to_radians();
-                    c.line(&[(cx + a.cos() * 3.6, cy + a.sin() * 3.6), (cx + a.cos() * 5.0, cy + a.sin() * 5.0)], col, 1.1);
+                // oito raios em volta
+                for ray in 0..8 {
+                    let angle = (ray as f32 * 45.0).to_radians();
+                    c.line(&[(cx + angle.cos() * 3.6, cy + angle.sin() * 3.6), (cx + angle.cos() * 5.0, cy + angle.sin() * 5.0)], col, 1.1);
                 }
             }
             _ => {
@@ -1538,8 +1611,8 @@ impl Tempo {
                 c.arc(cx, cy + 3.0, 3.2, 180.0, 360.0, col, 1.4);
                 c.line(&[(cx - 5.0, cy + 3.5), (cx + 5.0, cy + 3.5)], col, 1.4);
                 for deg in [-150.0f32, -90.0, -30.0] {
-                    let a = deg.to_radians();
-                    c.line(&[(cx + a.cos() * 4.8, cy + 3.0 + a.sin() * 4.8), (cx + a.cos() * 6.4, cy + 3.0 + a.sin() * 6.4)], col, 1.2);
+                    let angle = deg.to_radians();
+                    c.line(&[(cx + angle.cos() * 4.8, cy + 3.0 + angle.sin() * 4.8), (cx + angle.cos() * 6.4, cy + 3.0 + angle.sin() * 6.4)], col, 1.2);
                 }
             }
         }
@@ -1547,93 +1620,115 @@ impl Tempo {
 
     /// Um painel de detalhe, no estilo dos módulos do Tempo da Apple: o título pequeno com o ícone,
     /// o valor grande, um desenho próprio (bússola, caminho do sol, faixa do UV ou da sensação) e
-    /// uma frase curta no pé. `a`: opacidade da entrada (0 a 1), que também o traz um pouco de baixo.
-    fn draw_tile(c: &mut Canvas, t: &Tile, (x, y, w, h): Rect4, a: f32) {
-        if a <= 0.01 {
+    /// uma frase curta no pé. `alpha`: opacidade da entrada (0 a 1), que também o traz um pouco
+    /// de baixo.
+    fn draw_tile(c: &mut Canvas, tile: &Tile, (x, y, w, h): Rect4, alpha: f32) {
+        if alpha <= 0.01 {
             return;
         }
-        let fa = |col: Rgba| Rgba(col.0, col.1, col.2, (col.3 as f32 * a) as u8);
-        let y = y + (1.0 - a) * 6.0;
-        // alto (grande) ou baixo (pequeno e médio)
-        let tall = h >= 100.0;
-        let r = if tall { 16.0 } else { 14.0 };
-        c.fill_round_rect(x, y, x + w, y + h, r, fa(Rgba(0, 0, 0, 46)));
-        c.stroke_round_rect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, r, fa(WHITE.alpha(0.07)), 1.0 / c.s);
-        let ix = x + 12.0;
-        let iw = w - 24.0;
-        let head = fa(FG.alpha(0.62));
-        Self::draw_tile_icon(c, &t.title, ix - 1.0, y + 10.5, head);
-        c.text(ix + 13.0, y + 11.0, &t.title, Face::Semibold, 9.5, head, Anchor::LA, Some(iw - 13.0));
-
+        let fade = |col: Rgba| Rgba(col.0, col.1, col.2, (col.3 as f32 * alpha) as u8);
+        let area = TileArea::new(x, y + (1.0 - alpha) * 6.0, w, h);
+        Self::draw_tile_frame(c, tile, &area, &fade);
         // a bússola do vento ocupa o painel alto, com a velocidade no meio e a frase no pé
-        if let (Visual::Wind(deg, speed), true) = (&t.visual, tall) {
-            // (do pé do título até um pouco acima da frase; no alto o círculo é estreito e passa
-            // ao lado do título)
-            let rad = ((h - 46.0) / 2.0).min(w / 2.0 - 14.0);
-            let (cx, cy) = (x + w / 2.0, y + 24.0 + rad);
-            Self::draw_compass(c, cx, cy, rad, *deg, true, &fa);
-            c.text(cx, cy - 4.0, &speed.to_string(), Face::Semibold, 16.0, fa(FG), Anchor::MM, None);
-            c.text(cx, cy + 9.0, "km/h", Face::Regular, 9.0, fa(FG.alpha(0.7)), Anchor::MM, None);
-            c.text(ix, y + h - 10.0, &t.sub, Face::Regular, 10.5, fa(FG.alpha(0.8)), Anchor::LS, Some(iw));
+        if let (Visual::Wind(deg, speed), true) = (&tile.visual, area.tall) {
+            Self::draw_tile_wind_tall(c, tile, &area, *deg, *speed, &fade);
             return;
         }
+        let value = Self::draw_tile_value(c, tile, &area, &fade);
+        let text_top = Self::draw_tile_footer(c, tile, &area, &fade);
+        Self::draw_tile_visual(c, tile, &area, &value, text_top, &fade);
+    }
 
-        // o valor (a unidade, "km/h", vai menor ao lado do número)
-        let (vsize, vy) = if tall { (30.0, y + 24.0) } else { (21.0, y + 23.0) };
-        let (number, unit) = match t.value.split_once(' ') {
-            Some((n, u)) => (n, Some(u)),
-            None => (t.value.as_str(), None),
+    /// O fundo do painel e o título com o ícone.
+    fn draw_tile_frame(c: &mut Canvas, tile: &Tile, area: &TileArea, fade: &dyn Fn(Rgba) -> Rgba) {
+        let (x, y, w, h) = (area.x, area.y, area.w, area.h);
+        let radius = if area.tall { 16.0 } else { 14.0 };
+        c.fill_round_rect(x, y, x + w, y + h, radius, fade(Rgba(0, 0, 0, 46)));
+        c.stroke_round_rect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, radius, fade(WHITE.alpha(0.07)), 1.0 / c.s);
+        let head = fade(FG.alpha(0.62));
+        Self::draw_tile_icon(c, &tile.title, area.inner_x - 1.0, y + 10.5, head);
+        c.text(area.inner_x + 13.0, y + 11.0, &tile.title, Face::Semibold, 9.5, head, Anchor::LA, Some(area.inner_w - 13.0));
+    }
+
+    /// O vento no painel alto: a bússola grande, com a velocidade no meio e a frase no pé.
+    fn draw_tile_wind_tall(c: &mut Canvas, tile: &Tile, area: &TileArea, deg: f64, speed: i64, fade: &dyn Fn(Rgba) -> Rgba) {
+        // (do pé do título até um pouco acima da frase; no alto o círculo é estreito e passa
+        // ao lado do título)
+        let radius = ((area.h - 46.0) / 2.0).min(area.w / 2.0 - 14.0);
+        let (cx, cy) = (area.x + area.w / 2.0, area.y + 24.0 + radius);
+        Self::draw_compass(c, cx, cy, radius, deg, true, fade);
+        c.text(cx, cy - 4.0, &speed.to_string(), Face::Semibold, 16.0, fade(FG), Anchor::MM, None);
+        c.text(cx, cy + 9.0, "km/h", Face::Regular, 9.0, fade(FG.alpha(0.7)), Anchor::MM, None);
+        c.text(area.inner_x, area.y + area.h - 10.0, &tile.sub, Face::Regular, 10.5, fade(FG.alpha(0.8)), Anchor::LS, Some(area.inner_w));
+    }
+
+    /// O valor grande (a unidade, "km/h", vai menor ao lado do número) e, no UV, o nível
+    /// ("Alto") logo abaixo ou ao lado. Devolve onde ele ficou, para os desenhos se encaixarem.
+    fn draw_tile_value(c: &mut Canvas, tile: &Tile, area: &TileArea, fade: &dyn Fn(Rgba) -> Rgba) -> TileValue {
+        let (ix, iw) = (area.inner_x, area.inner_w);
+        let (size, y) = if area.tall { (30.0, area.y + 24.0) } else { (21.0, area.y + 23.0) };
+        let (number, unit) = match tile.value.split_once(' ') {
+            Some((number, unit)) => (number, Some(unit)),
+            None => (tile.value.as_str(), None),
         };
-        let room = if matches!(t.visual, Visual::Wind(..)) { 56.0 } else { 0.0 };
-        let nw = c.text(ix - 1.0, vy, number, Face::Regular, vsize, fa(FG), Anchor::LA, Some(iw - room));
-        if let Some(u) = unit {
-            let base = vy + vsize * 0.98;
-            c.text(ix - 1.0 + nw + 4.0, base, u, Face::Regular, if tall { 15.0 } else { 12.0 }, fa(FG.alpha(0.85)), Anchor::LS, Some((iw - room - nw - 4.0).max(10.0)));
+        // no painel baixo do vento, a bússola pequena fica à direita do valor
+        let room = if matches!(tile.visual, Visual::Wind(..)) { 56.0 } else { 0.0 };
+        let number_w = c.text(ix - 1.0, y, number, Face::Regular, size, fade(FG), Anchor::LA, Some(iw - room));
+        if let Some(unit) = unit {
+            let baseline = y + size * 0.98;
+            let unit_size = if area.tall { 15.0 } else { 12.0 };
+            c.text(ix - 1.0 + number_w + 4.0, baseline, unit, Face::Regular, unit_size, fade(FG.alpha(0.85)), Anchor::LS, Some((iw - room - number_w - 4.0).max(10.0)));
         }
+        let bottom = y + size * 1.18;
         // uma palavra logo abaixo do número (o nível do UV), como no Tempo da Apple
-        let value_bottom = vy + vsize * 1.18;
-        if let Visual::Uv(uv) = t.visual {
-            if tall {
-                c.text(ix, value_bottom + 1.0, uv_level(uv), Face::Semibold, 14.0, fa(FG), Anchor::LA, None);
+        if let Visual::Uv(uv) = tile.visual {
+            if area.tall {
+                c.text(ix, bottom + 1.0, uv_level(uv), Face::Semibold, 14.0, fade(FG), Anchor::LA, None);
             } else {
-                c.text(ix - 1.0 + nw + 7.0, vy + vsize * 0.98, uv_level(uv), Face::Semibold, 12.0, fa(FG), Anchor::LS, None);
+                c.text(ix - 1.0 + number_w + 7.0, y + size * 0.98, uv_level(uv), Face::Semibold, 12.0, fade(FG), Anchor::LS, None);
             }
         }
+        TileValue { y, size, number_w, bottom }
+    }
 
-        // a frase no pé (até 2 linhas no alto; 1 no baixo quando há desenho)
-        let has_art = !matches!(t.visual, Visual::None | Visual::Wind(..));
-        let max_lines = if tall { 2 } else if has_art { 1 } else { 2 };
+    /// A frase no pé (até 2 linhas no alto; 1 no baixo quando há desenho, com a frase curta).
+    /// Devolve onde o texto começa (o desenho fica acima dele).
+    fn draw_tile_footer(c: &mut Canvas, tile: &Tile, area: &TileArea, fade: &dyn Fn(Rgba) -> Rgba) -> f32 {
+        let has_art = !matches!(tile.visual, Visual::None | Visual::Wind(..));
+        let max_lines = if area.tall || !has_art { 2 } else { 1 };
         // no painel baixo, a frase curta (a inteira não cabe ao lado do desenho)
-        let sub = match &t.sub_short {
-            Some(short) if !tall => short.clone(),
-            _ => t.sub.clone(),
+        let sub = match &tile.sub_short {
+            Some(short) if !area.tall => short.clone(),
+            _ => tile.sub.clone(),
         };
-        let lines = c.wrap(&sub, Face::Regular, 10.5, iw, max_lines);
-        let n = lines.len() as f32;
-        for (k, line) in lines.iter().enumerate() {
-            let ly = y + h - 10.0 - 13.0 * (n - 1.0 - k as f32);
-            c.text(ix, ly, line, Face::Regular, 10.5, fa(FG.alpha(0.8)), Anchor::LS, Some(iw));
+        let lines = c.wrap(&sub, Face::Regular, 10.5, area.inner_w, max_lines);
+        let line_count = lines.len() as f32;
+        let last_baseline = area.y + area.h - 10.0;
+        for (index, line) in lines.iter().enumerate() {
+            let line_y = last_baseline - 13.0 * (line_count - 1.0 - index as f32);
+            c.text(area.inner_x, line_y, line, Face::Regular, 10.5, fade(FG.alpha(0.8)), Anchor::LS, Some(area.inner_w));
         }
-        let text_top = y + h - 10.0 - 13.0 * n - 4.0;
+        last_baseline - 13.0 * line_count - 4.0
+    }
 
-        match &t.visual {
-            &Visual::Uv(uv) => {
-                let by = text_top - 8.0;
-                Self::draw_scale(c, ix, by, iw, (uv as f32 / 11.0).clamp(0.0, 1.0), None, &UV_STOPS, &fa);
-            }
-            &Visual::Humidity(pct) => {
-                let by = text_top - 8.0;
-                Self::draw_scale(c, ix, by, iw, (pct as f32 / 100.0).clamp(0.0, 1.0), None, &HUMID_STOPS, &fa);
-            }
+    /// O desenho do painel: a faixa do UV, da umidade ou da sensação; as barrinhas da chuva; o
+    /// caminho do sol; a bússola pequena do vento.
+    fn draw_tile_visual(c: &mut Canvas, tile: &Tile, area: &TileArea, value: &TileValue, text_top: f32, fade: &dyn Fn(Rgba) -> Rgba) {
+        let (ix, iw) = (area.inner_x, area.inner_w);
+        // no painel baixo, os desenhos de lado ficam à direita do valor
+        let beside_x = ix + value.number_w + 14.0;
+        let beside_w = (ix + iw - beside_x).max(30.0);
+        let scale_y = text_top - 8.0;
+        match &tile.visual {
+            &Visual::Uv(uv) => Self::draw_scale(c, ix, scale_y, iw, (uv as f32 / 11.0).clamp(0.0, 1.0), None, &UV_STOPS, fade),
+            &Visual::Humidity(pct) => Self::draw_scale(c, ix, scale_y, iw, (pct as f32 / 100.0).clamp(0.0, 1.0), None, &HUMID_STOPS, fade),
             Visual::Rain(pops) => {
-                if tall {
+                if area.tall {
                     // entre o valor e a frase, na largura do painel
-                    let (top, bottom) = (value_bottom + 4.0, text_top - 6.0);
-                    Self::draw_rain_bars(c, ix, top, iw, (bottom - top).max(10.0), pops, &fa);
+                    let (top, bottom) = (value.bottom + 4.0, text_top - 6.0);
+                    Self::draw_rain_bars(c, ix, top, iw, (bottom - top).max(10.0), pops, fade);
                 } else {
-                    // baixo: ao lado do valor, como o caminho do sol
-                    let x0 = ix + nw + 14.0;
-                    Self::draw_rain_bars(c, x0, vy + 4.0, (ix + iw - x0).max(30.0), vsize - 2.0, pops, &fa);
+                    Self::draw_rain_bars(c, beside_x, value.y + 4.0, beside_w, value.size - 2.0, pops, fade);
                 }
             }
             &Visual::Feels(real, feels) => {
@@ -1641,22 +1736,21 @@ impl Tempo {
                 let lo = real.min(feels) as f32 - 8.0;
                 let hi = real.max(feels) as f32 + 8.0;
                 let pos = |v: i64| ((v as f32 - lo) / (hi - lo)).clamp(0.0, 1.0);
-                let by = text_top - 8.0;
-                Self::draw_scale(c, ix, by, iw, pos(feels), Some(pos(real)), &TEMP_STOPS, &fa);
+                Self::draw_scale(c, ix, scale_y, iw, pos(feels), Some(pos(real)), &TEMP_STOPS, fade);
             }
             &Visual::Sun(rise, set, now) => {
-                if tall {
-                    Self::draw_sun_path(c, ix, value_bottom + 6.0, iw, (text_top - 4.0 - value_bottom - 6.0).max(12.0), rise, set, now, &fa);
+                if area.tall {
+                    let top = value.bottom + 6.0;
+                    Self::draw_sun_path(c, ix, top, iw, (text_top - 4.0 - top).max(12.0), rise, set, now, fade);
                 } else {
-                    // baixo: a curva ao lado do horário
-                    let x0 = ix + nw + 14.0;
-                    Self::draw_sun_path(c, x0, vy + 3.0, (ix + iw - x0).max(30.0), vsize - 2.0, rise, set, now, &fa);
+                    Self::draw_sun_path(c, beside_x, value.y + 3.0, beside_w, value.size - 2.0, rise, set, now, fade);
                 }
             }
             &Visual::Wind(deg, _) => {
                 // baixo: a bússola pequena à direita do valor
-                let rad = (h - 30.0).min(52.0) / 2.0;
-                Self::draw_compass(c, x + w - 12.0 - rad, y + 18.0 + (h - 18.0) / 2.0 - 4.0, rad, deg, false, &fa);
+                let radius = (area.h - 30.0).min(52.0) / 2.0;
+                let (cx, cy) = (area.x + area.w - 12.0 - radius, area.y + 18.0 + (area.h - 18.0) / 2.0 - 4.0);
+                Self::draw_compass(c, cx, cy, radius, deg, false, fade);
             }
             Visual::None => {}
         }
@@ -1825,8 +1919,8 @@ impl Tempo {
     }
 
     fn forecast_url(env: &Env) -> String {
-        let w = env.wcfg();
-        let place = w.str_of("place").or(w.str_of("city")).unwrap_or("");
+        let settings = env.wcfg();
+        let place = settings.str_of("place").or(settings.str_of("city")).unwrap_or("");
         format!("https://www.google.com/search?q={}", util::urlencode(&format!("previsão do tempo {place}")))
     }
 
@@ -1835,24 +1929,79 @@ impl Tempo {
         if self.weather.is_some() && self.sky_weather().moves() { RAIN_FPS } else { 0 }
     }
 
+    /// Clique na tela principal: o tempo de agora (abre os detalhes), uma hora da faixa (abre o
+    /// dia dela), o aviso de chuva ou um dos próximos dias (no grande).
+    fn hit_main(&self, x: f32, y: f32, mode: Mode) -> Option<u32> {
+        if mode == Mode::P {
+            return Some(DETAILS);
+        }
+        let hours_y = main_hours_y(mode);
+        if y < hours_y - 4.0 {
+            return Some(DETAILS);
+        }
+        if y < hours_y + main_strip_h(mode) {
+            let (x0, x1) = main_strip_bounds(mode);
+            let column = ((x - x0) / ((x1 - x0) / HOURS as f32) + self.main_scroll.shown()).floor();
+            let len = self.next_hours().len();
+            return (x >= x0 && x <= x1 && column >= 0.0 && (column as usize) < len).then_some(HOUR + column as u32);
+        }
+        if mode == Mode::G {
+            if self.rain_line().is_some() && (G_RAIN.0..G_RAIN.1).contains(&y) {
+                return Some(DETAILS);
+            }
+            let (top, row) = self.days_geom();
+            if y >= top {
+                let day = ((y - top) / row) as usize;
+                return (day < G_DAYS.min(self.day_count())).then_some(DAY + day as u32);
+            }
+        }
+        None
+    }
+
+    /// Clique nos detalhes: voltar, uma bolinha (aquela página) ou o resto (a próxima página).
+    fn hit_details(x: f32, y: f32, mode: Mode) -> Option<u32> {
+        if inside(Self::back_rect(), x, y) {
+            return Some(BACK);
+        }
+        if let Some(page) = Self::dot_rects(mode).into_iter().position(|r| inside(r, x, y)) {
+            return Some(PAGE + page as u32);
+        }
+        (Self::pages(mode) > 1).then_some(NEXT_PAGE)
+    }
+
+    /// Clique num dia: voltar, o dia anterior ou o próximo, ou as setinhas da faixa de horas.
+    fn hit_day(&self, x: f32, y: f32, mode: Mode, day: usize) -> Option<u32> {
+        if inside(Self::back_rect(), x, y) {
+            return Some(BACK);
+        }
+        if inside(Self::prev_rect(), x, y) {
+            return (day > 0).then_some(DAY_PREV);
+        }
+        if inside(Self::next_rect(), x, y) {
+            return (day + 1 < self.day_count()).then_some(DAY_NEXT);
+        }
+        let strip_y = if mode == Mode::G { DAY_STRIP_G } else { DAY_STRIP_M };
+        self.strip_hit(x, y, strip_y, self.day_hours(day).len(), self.day_scroll.shown(), false)
+    }
+
     /// Clique na faixa de horas em `y`: setinhas (rolar) ou uma hora (`hours`: abre o dia dela).
     fn strip_hit(&self, x: f32, y: f32, strip_y: f32, len: usize, off: f32, hours: bool) -> Option<u32> {
         if !(strip_y - 4.0..strip_y + STRIP_H).contains(&y) {
             return None;
         }
-        let (l, r) = Self::chevron_rects(strip_y);
-        if x <= l.2 {
+        let (left, right) = Self::chevron_rects(strip_y);
+        if x <= left.2 {
             return (off > 0.05).then_some(SCROLL_BACK);
         }
-        if x >= r.0 {
+        if x >= right.0 {
             return (off < Self::max_scroll(len) - 0.05).then_some(SCROLL_FWD);
         }
         if !hours {
             return None;
         }
         let (x0, x1) = Self::strip_bounds();
-        let i = ((x - x0) / ((x1 - x0) / HOURS as f32) + off).floor() as usize;
-        (i < len).then_some(HOUR + i as u32)
+        let column = ((x - x0) / ((x1 - x0) / HOURS as f32) + off).floor() as usize;
+        (column < len).then_some(HOUR + column as u32)
     }
 }
 
@@ -1909,8 +2058,8 @@ fn island_buttons(form: IslandForm, w: f32, h: f32) -> Vec<(u32, Rect4)> {
 impl Kind for Tempo {
     /// Na ilha com trovoada, chuva chegando ou amanhã bem mais frio ou mais quente (um aviso).
     fn island_item(&self, _env: &Env) -> Option<IslandItem> {
-        let a = self.island_alert()?;
-        Some(IslandItem::alert(a.color, alert_hash(&a.key)))
+        let alert = self.island_alert()?;
+        Some(IslandItem::alert(alert.color, alert_hash(&alert.key)))
     }
 
     fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
@@ -1959,8 +2108,8 @@ impl Kind for Tempo {
             return;
         }
         // as gotas são calculadas pelo tempo (sem estado); a volta a cada hora mantém a precisão
-        let t = self.started.elapsed().as_secs_f32() % 3600.0;
-        sky::draw_front(c, ox, oy, Self::width(mode), self.height(mode), Self::radius(mode), self.sky_weather(), t, &self.storm);
+        let secs = self.started.elapsed().as_secs_f32() % 3600.0;
+        sky::draw_front(c, ox, oy, Self::width(mode), self.height(mode), Self::radius(mode), self.sky_weather(), secs, &self.storm);
     }
 
     fn overlay_fps(&self) -> u32 {
@@ -1986,54 +2135,9 @@ impl Kind for Tempo {
             return env.shortcuts().then_some(OPEN_FORECAST);
         }
         match self.view_for(mode) {
-            View::Main => {
-                if mode == Mode::P {
-                    return Some(DETAILS);
-                }
-                let hy = main_hours_y(mode);
-                if y < hy - 4.0 {
-                    return Some(DETAILS);
-                }
-                if y < hy + main_strip_h(mode) {
-                    let (x0, x1) = main_strip_bounds(mode);
-                    let i = ((x - x0) / ((x1 - x0) / HOURS as f32) + self.main_scroll.shown()).floor();
-                    let len = self.next_hours().len();
-                    return (x >= x0 && x <= x1 && i >= 0.0 && (i as usize) < len).then_some(HOUR + i as u32);
-                }
-                if mode == Mode::G {
-                    if self.rain_line().is_some() && (G_RAIN.0..G_RAIN.1).contains(&y) {
-                        return Some(DETAILS);
-                    }
-                    let (top, row) = self.days_geom();
-                    if y >= top {
-                        let i = ((y - top) / row) as usize;
-                        return (i < G_DAYS.min(self.day_count())).then_some(DAY + i as u32);
-                    }
-                }
-                None
-            }
-            View::Details => {
-                if inside(Self::back_rect(), x, y) {
-                    return Some(BACK);
-                }
-                if let Some(n) = Self::dot_rects(mode).into_iter().position(|r| inside(r, x, y)) {
-                    return Some(PAGE + n as u32);
-                }
-                (Self::pages(mode) > 1).then_some(NEXT_PAGE)
-            }
-            View::Day(d) => {
-                if inside(Self::back_rect(), x, y) {
-                    return Some(BACK);
-                }
-                if inside(Self::prev_rect(), x, y) {
-                    return (d > 0).then_some(DAY_PREV);
-                }
-                if inside(Self::next_rect(), x, y) {
-                    return (d + 1 < self.day_count()).then_some(DAY_NEXT);
-                }
-                let strip_y = if mode == Mode::G { DAY_STRIP_G } else { DAY_STRIP_M };
-                self.strip_hit(x, y, strip_y, self.day_hours(d).len(), self.day_scroll.shown(), false)
-            }
+            View::Main => self.hit_main(x, y, mode),
+            View::Details => Self::hit_details(x, y, mode),
+            View::Day(day) => self.hit_day(x, y, mode, day),
         }
     }
 

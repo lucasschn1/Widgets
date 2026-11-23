@@ -5,9 +5,9 @@
 use serde_json::Value;
 
 use super::{draw_buttons, hit, Clock, OK};
-use crate::config::Get;
+use crate::data::config::Get;
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{icon, Rgba, FG, MUTED};
+use crate::ui::theme::{icon, Rgba, FG, MUTED};
 use crate::widgets::island_ui as iu;
 use crate::widgets::{alert_hash, Ctx, Env, IslandForm, IslandItem, Kind, Mode, Rect4};
 
@@ -35,12 +35,19 @@ enum Phase {
     Done,
 }
 
+/// Onde o expediente está agora: a fase, o horário do fim e a chave do OK (uma por dia).
+struct Moment {
+    phase: Phase,
+    end: f64,
+    key: String,
+}
+
 /// O horário do fim (segundos desde a meia-noite) gravado nas opções.
 pub fn end_of(cfg: &Value) -> f64 {
     let text = cfg["expediente"].str_of("fim").unwrap_or(DEFAULT_END);
-    let (h, m) = text.split_once(':').unwrap_or(("17", "00"));
-    let (h, m) = (h.trim().parse::<f64>().unwrap_or(17.0), m.trim().parse::<f64>().unwrap_or(0.0));
-    (h.clamp(0.0, 23.0) * 60.0 + m.clamp(0.0, 59.0)) * 60.0
+    let (hours, minutes) = text.split_once(':').unwrap_or(("17", "00"));
+    let (hours, minutes) = (hours.trim().parse::<f64>().unwrap_or(17.0), minutes.trim().parse::<f64>().unwrap_or(0.0));
+    (hours.clamp(0.0, 23.0) * 60.0 + minutes.clamp(0.0, 59.0)) * 60.0
 }
 
 impl Workday {
@@ -51,12 +58,12 @@ impl Workday {
     /// Uma segunda-feira, `from_end` segundos do fim do expediente (negativo: antes).
     #[cfg(test)]
     pub fn sample(from_end: f64) -> Workday {
-        let monday = crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0;
+        let monday = crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0;
         Workday { clock: Clock::at(monday + 17.0 * 3600.0 + 3.0 * 3600.0 + from_end, -3.0 * 3600.0), ..Workday::new() }
     }
 
-    /// Onde estamos agora (None: fora da última hora, ou fim de semana) e o horário do fim.
-    fn phase(&self, cfg: &Value) -> Option<(Phase, f64, String)> {
+    /// Onde estamos agora (None: fora da última hora, ou fim de semana).
+    fn phase(&self, cfg: &Value) -> Option<Moment> {
         let now = self.clock.now();
         if self.clock.weekday(now) >= 5 {
             return None;
@@ -74,14 +81,14 @@ impl Workday {
         } else {
             return None;
         };
-        Some((phase, end, key))
+        Some(Moment { phase, end, key })
     }
 }
 
 /// "47 min", "1 h"
 fn left_text(secs: f64) -> String {
-    let m = (secs / 60.0).ceil() as i64;
-    if m >= 60 { "1 h".into() } else { format!("{m} min") }
+    let minutes = (secs / 60.0).ceil() as i64;
+    if minutes >= 60 { "1 h".into() } else { format!("{minutes} min") }
 }
 
 /// O dourado vai chegando com o fim (0 = uma hora antes, 1 = no fim).
@@ -99,32 +106,33 @@ impl Kind for Workday {
     fn draw(&self, _c: &mut Canvas, _mode: Mode, _env: &Env) {}
 
     fn island_item(&self, env: &Env) -> Option<IslandItem> {
-        let (phase, _, key) = self.phase(env.cfg)?;
+        let Moment { phase, key, .. } = self.phase(env.cfg)?;
         Some(match phase {
             // a contagem fica atrás da música e do Pomodoro, menos nos últimos minutos
-            Phase::Left(s) => IslandItem { idle: s > LAST, ..IslandItem::live(MUTED.mix(GOLD, warmth(s))) },
+            Phase::Left(secs) => IslandItem { idle: secs > LAST, ..IslandItem::live(MUTED.mix(GOLD, warmth(secs))) },
             Phase::Done => IslandItem::alert(GOLD, alert_hash(&key)),
         })
     }
 
     fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, env: &Env) {
-        let Some((phase, end, _)) = self.phase(env.cfg) else { return };
+        let Some(Moment { phase, end, .. }) = self.phase(env.cfg) else { return };
         let (x, y, w, h) = r;
         let cy = y + h / 2.0;
         let end_text = self.clock.hhmm(end);
         let (color, frac) = match phase {
-            Phase::Left(s) => (MUTED.mix(GOLD, warmth(s)), warmth(s)),
+            Phase::Left(secs) => (MUTED.mix(GOLD, warmth(secs)), warmth(secs)),
             Phase::Done => (GOLD, 1.0),
         };
-        let ring = |c: &mut Canvas, cx: f32, cy: f32, rr: f32, width: f32| {
-            c.arc(cx, cy, rr, 0.0, 359.9, Rgba(255, 255, 255, 30), width);
+        // o anel do quanto da última hora já passou
+        let ring = |c: &mut Canvas, cx: f32, cy: f32, radius: f32, width: f32| {
+            c.arc(cx, cy, radius, 0.0, 359.9, Rgba(255, 255, 255, 30), width);
             if frac > 0.002 {
-                c.arc(cx, cy, rr, -90.0, -90.0 + 360.0 * frac, color, width);
+                c.arc(cx, cy, radius, -90.0, -90.0 + 360.0 * frac, color, width);
             }
         };
         let glyph = |c: &mut Canvas, cx: f32, cy: f32, size: f32| {
-            let g = if phase == Phase::Done { icon("check") } else { icon("pomodoro") };
-            c.text(cx, cy, g, Face::Icons, size, color, Anchor::MM, None);
+            let symbol = if phase == Phase::Done { icon("check") } else { icon("pomodoro") };
+            c.text(cx, cy, symbol, Face::Icons, size, color, Anchor::MM, None);
         };
         match form {
             IslandForm::Bubble => {
@@ -135,7 +143,7 @@ impl Kind for Workday {
                 ring(c, x + 26.0, cy, 11.0, 2.6);
                 glyph(c, x + 26.0, cy, 9.5);
                 match phase {
-                    Phase::Left(s) => iu::compact_text(c, x + 46.0, r, if form == IslandForm::Banner { "Fim do expediente em" } else { "Expediente" }, &left_text(s), color),
+                    Phase::Left(secs) => iu::compact_text(c, x + 46.0, r, if form == IslandForm::Banner { "Fim do expediente em" } else { "Expediente" }, &left_text(secs), color),
                     Phase::Done if form == IslandForm::Banner => iu::compact_text(c, x + 46.0, r, "Bom descanso! O expediente acabou", "", GOLD),
                     Phase::Done => iu::compact_text(c, x + 46.0, r, "Bom descanso!", &end_text, GOLD),
                 }
@@ -144,7 +152,7 @@ impl Kind for Workday {
                 ring(c, x + 39.0, cy, 19.0, 4.0);
                 glyph(c, x + 39.0, cy, 15.0);
                 let (title, sub) = match phase {
-                    Phase::Left(s) => (format!("Fim do expediente às {end_text}"), format!("Faltam {}", left_text(s))),
+                    Phase::Left(secs) => (format!("Fim do expediente às {end_text}"), format!("Faltam {}", left_text(secs))),
                     Phase::Done => ("Bom descanso!".to_string(), format!("O expediente acabou às {end_text}")),
                 };
                 iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &title, &sub, color);
@@ -154,10 +162,10 @@ impl Kind for Workday {
                 let verb = if phase == Phase::Done { "terminou" } else { "termina" };
                 iu::header(c, r, "EXPEDIENTE", color, &format!("{verb} às {end_text}"), MUTED);
                 match phase {
-                    Phase::Left(s) => {
-                        let secs = s.ceil() as i64;
+                    Phase::Left(left) => {
+                        let secs = left.ceil() as i64;
                         c.text(x + 22.0, y + 78.0, &format!("{}:{:02}", secs / 60, secs % 60), Face::Semibold, 44.0, FG, Anchor::LM, None);
-                        c.text(x + 22.0, y + 112.0, if s <= LAST { "Reta final. Hora de fechar as abas." } else { "Falta pouco para o fim do dia." }, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
+                        c.text(x + 22.0, y + 112.0, if left <= LAST { "Reta final. Hora de fechar as abas." } else { "Falta pouco para o fim do dia." }, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
                     }
                     Phase::Done => {
                         c.text(x + 22.0, y + 78.0, "Bom descanso!", Face::Semibold, 30.0, GOLD, Anchor::LM, Some(w - 44.0));
@@ -182,8 +190,8 @@ impl Kind for Workday {
     /// OK: some até amanhã.
     fn act(&mut self, action: u32, ctx: &mut Ctx) {
         if action == OK {
-            if let Some((_, _, key)) = self.phase(ctx.cfg) {
-                self.ok.push(key);
+            if let Some(moment) = self.phase(ctx.cfg) {
+                self.ok.push(moment.key);
             }
         }
     }

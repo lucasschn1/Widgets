@@ -7,6 +7,7 @@
 
 mod greeting;
 mod quote;
+pub mod rest;
 mod skywatch;
 mod workday;
 
@@ -14,14 +15,15 @@ use serde_json::Value;
 
 use super::island_ui as iu;
 use super::{IslandForm, Kind, Rect4};
-use crate::config::Get;
+use crate::data::config::Get;
 use crate::gfx::Canvas;
-use crate::win;
+use crate::platform::win;
 
 pub use greeting::Greeting;
 #[cfg(test)]
 pub use greeting::Period;
 pub use quote::Quote;
+pub use rest::{Rest, KEY as REST};
 pub use skywatch::{Moon, Station, Sunset};
 pub use workday::{Workday, DEFAULT_END};
 
@@ -59,9 +61,17 @@ pub fn description(key: &str) -> &'static str {
     }
 }
 
-/// Cria as fontes.
+/// Cria as fontes (e a ilha em repouso, que só entra quando nenhuma outra tem o que mostrar).
 pub fn create_all(cache: &Value) -> Vec<Box<dyn Kind>> {
-    vec![Box::new(Greeting::new(cache)), Box::new(Sunset::new()), Box::new(Moon::new()), Box::new(Station::new(cache)), Box::new(Quote::new(cache)), Box::new(Workday::new())]
+    vec![
+        Box::new(Greeting::new(cache)),
+        Box::new(Sunset::new()),
+        Box::new(Moon::new()),
+        Box::new(Station::new(cache)),
+        Box::new(Quote::new(cache)),
+        Box::new(Workday::new()),
+        Box::new(Rest::new()),
+    ]
 }
 
 /// Ações dos botões na ilha.
@@ -80,16 +90,18 @@ impl Clock {
     pub fn at(unix: f64, offset: f64) -> Clock {
         Clock { fixed: Some((unix, offset)) }
     }
+    /// Agora, em segundos desde 1970.
     pub fn now(&self) -> f64 {
-        self.fixed.map_or_else(win::now, |f| f.0)
+        self.fixed.map_or_else(win::now, |(unix, _)| unix)
     }
+    /// O fuso, em segundos a somar ao horário UTC.
     pub fn offset(&self) -> f64 {
-        self.fixed.map_or_else(win::utc_offset_now, |f| f.1)
+        self.fixed.map_or_else(win::utc_offset_now, |(_, offset)| offset)
     }
     /// "18:47"
     pub fn hhmm(&self, t: f64) -> String {
-        let s = ((t + self.offset()).floor() as i64).rem_euclid(86400);
-        format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+        let secs = ((t + self.offset()).floor() as i64).rem_euclid(86400);
+        format!("{:02}:{:02}", secs / 3600, secs / 60 % 60)
     }
     /// O dia (local) de `t`, em dias desde 1970.
     pub fn day(&self, t: f64) -> i64 {
@@ -106,29 +118,52 @@ impl Clock {
     /// "24 de dezembro"
     pub fn date_text(&self, t: f64) -> String {
         const MONTHS: [&str; 12] = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
-        let (_, m, d) = crate::util::civil_from_days(self.day(t));
-        format!("{d} de {}", MONTHS[(m as usize).clamp(1, 12) - 1])
+        let date = crate::data::util::civil_from_days(self.day(t));
+        format!("{} de {}", date.day, MONTHS[(date.month as usize).clamp(1, 12) - 1])
     }
 }
 
-/// A cidade do widget Tempo: (latitude, longitude, nome curto).
-pub fn location(cfg: &Value) -> Option<(f64, f64, String)> {
-    let t = &cfg["tempo"];
-    let (lat, lon) = (t.f64_of("lat")?, t.f64_of("lon")?);
-    let place = t.str_of("place").or(t.str_of("city")).unwrap_or("").split(',').next().unwrap_or("").trim().to_string();
-    Some((lat, lon, place))
+/// A cidade do widget Tempo.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub lat: f64,
+    pub lon: f64,
+    /// o nome curto ("São Paulo", sem o país)
+    pub name: String,
+}
+
+/// A cidade do widget Tempo (None se ele ainda não tem uma).
+pub fn location(cfg: &Value) -> Option<Place> {
+    let tempo = &cfg["tempo"];
+    let (lat, lon) = (tempo.f64_of("lat")?, tempo.f64_of("lon")?);
+    let name = tempo.str_of("place").or(tempo.str_of("city")).unwrap_or("").split(',').next().unwrap_or("").trim().to_string();
+    Some(Place { lat, lon, name })
 }
 
 /// O clima de agora guardado pelo Tempo: (código da Open-Meteo, ventania).
 pub fn cached_weather(cache: &Value) -> Option<(i64, bool)> {
-    let w = &cache["weather"];
-    Some((w.i64_of("code")?, w.bool_of("windy").unwrap_or(false)))
+    let weather = &cache["weather"];
+    Some((weather.i64_of("code")?, weather.bool_of("windy").unwrap_or(false)))
 }
 
-/// A previsão hora a hora guardada pelo Tempo: (dia a partir de hoje, hora, código do tempo).
-pub fn cached_hours(cache: &Value) -> Vec<(i64, i64, i64)> {
+/// Uma hora da previsão guardada pelo Tempo.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HourCode {
+    /// o dia, a partir de hoje (0 = hoje)
+    pub day: i64,
+    pub hour: i64,
+    /// o código do tempo da Open-Meteo
+    pub code: i64,
+}
+
+/// A previsão hora a hora guardada pelo Tempo (cada hora guardada é [rótulo, ícone,
+/// temperatura, código, chance, dia, hora]).
+pub fn cached_hours(cache: &Value) -> Vec<HourCode> {
     let list = cache["weather"]["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    list.iter().filter(|h| h[2].is_i64()).filter_map(|h| Some((h[5].as_i64()?, h[6].as_i64()?, h[3].as_i64()?))).collect()
+    list.iter()
+        .filter(|hour| hour[2].is_i64())
+        .filter_map(|hour| Some(HourCode { day: hour[5].as_i64()?, hour: hour[6].as_i64()?, code: hour[3].as_i64()? }))
+        .collect()
 }
 
 /// Os botões da ilha: OK na média (à direita) e na aberta (embaixo, à direita), com um segundo
@@ -137,25 +172,27 @@ pub fn buttons(form: IslandForm, w: f32, h: f32, second: bool) -> Vec<(u32, Rect
     match form {
         IslandForm::Medium => vec![(OK, (w - 74.0, h / 2.0 - 16.0, w - 18.0, h / 2.0 + 16.0))],
         IslandForm::Large => {
-            let mut v = vec![(OK, (w - 82.0, h - 46.0, w - 22.0, h - 14.0))];
+            let mut list = vec![(OK, (w - 82.0, h - 46.0, w - 22.0, h - 14.0))];
             if second {
-                v.push((OPEN, (w - 186.0, h - 46.0, w - 92.0, h - 14.0)));
+                list.push((OPEN, (w - 186.0, h - 46.0, w - 92.0, h - 14.0)));
             }
-            v
+            list
         }
         _ => Vec::new(),
     }
 }
 
+/// O botão (de `buttons`) embaixo do ponto (x, y).
 pub fn hit(form: IslandForm, x: f32, y: f32, w: f32, h: f32, second: bool) -> Option<u32> {
-    buttons(form, w, h, second).into_iter().find(|(_, b)| iu::inside(*b, x, y)).map(|(a, _)| a)
+    buttons(form, w, h, second).into_iter().find(|(_, rect)| iu::inside(*rect, x, y)).map(|(action, _)| action)
 }
 
+/// Desenha os botões de `buttons` (o OK claro na ilha aberta; `second` é o texto do outro).
 pub fn draw_buttons(c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, second: Option<&str>) {
     let (x, y, w, h) = r;
-    for (act, b) in buttons(form, w, h, second.is_some()) {
-        let label = if act == OK { "OK" } else { second.unwrap_or("") };
-        iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), label, act == OK && form == IslandForm::Large, hot == Some(act));
+    for (action, rect) in buttons(form, w, h, second.is_some()) {
+        let label = if action == OK { "OK" } else { second.unwrap_or("") };
+        iu::pill_button(c, (x + rect.0, y + rect.1, x + rect.2, y + rect.3), label, action == OK && form == IslandForm::Large, hot == Some(action));
     }
 }
 
@@ -178,7 +215,13 @@ pub fn samples() -> Vec<(String, Box<dyn Kind>, Value)> {
         ("bitcoin caiu".into(), Box::new(Quote::sample(0.3, -6.4)), cfg.clone()),
         ("expediente acabando".into(), Box::new(Workday::sample(-25.0 * 60.0)), cfg.clone()),
         ("expediente no fim".into(), Box::new(Workday::sample(4.0)), cfg.clone()),
+        ("repouso gota".into(), Box::new(Rest::sample(None, false)), cfg.clone()),
+        ("repouso parado".into(), Box::new(Rest::sample(Some(rest::Look::Clock), true)), cfg.clone()),
+        ("modo foco".into(), Box::new(Rest::sample_focus()), cfg.clone()),
     ]
+    .into_iter()
+    .chain(rest::Look::ALL.into_iter().map(|look| (format!("repouso {}", look.code()), Box::new(Rest::sample(Some(look), false)) as Box<dyn Kind>, cfg.clone())))
+    .collect()
 }
 
 #[cfg(test)]
@@ -198,13 +241,13 @@ mod tests {
         let forms = [IslandForm::Bubble, IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
         for (name, kind, cfg) in samples() {
             let env = Env { cfg: &cfg, key: kind.key() };
-            let total_h: f32 = forms.iter().map(|f| iu::size(*f).1 + 14.0).sum::<f32>() + 14.0;
+            let total_h: f32 = forms.iter().map(|f| iu::size(*f).h + 14.0).sum::<f32>() + 14.0;
             let mut c = Canvas::new((400.0 * s) as u32, (total_h * s) as u32, s);
-            c.fill_round_rect(0.0, 0.0, 400.0, total_h, 0.0, crate::theme::Rgba::rgb(70, 80, 100));
+            c.fill_round_rect(0.0, 0.0, 400.0, total_h, 0.0, crate::ui::theme::Rgba::rgb(70, 80, 100));
             let mut y = 14.0;
             for form in forms {
-                let (w, h, r) = iu::size(form);
-                c.fill_round_rect(14.0, y, 14.0 + w, y + h, r, crate::theme::Rgba::rgb(0, 0, 0));
+                let iu::FormSize { w, h, radius: r } = iu::size(form);
+                c.fill_round_rect(14.0, y, 14.0 + w, y + h, r, crate::ui::theme::Rgba::rgb(0, 0, 0));
                 c.push_round_clip(14.0, y, 14.0 + w, y + h, r);
                 kind.island_draw(&mut c, form, (14.0, y, w, h), None, &env);
                 c.pop_clip();

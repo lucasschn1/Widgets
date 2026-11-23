@@ -22,7 +22,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::config::{self, Get};
+use crate::data::config::{self, Get};
 use crate::gfx::Canvas;
 
 // ---------- medidas dos três tamanhos (as mesmas em todos os widgets) ----------
@@ -36,7 +36,7 @@ use crate::gfx::Canvas;
 /// Lado do tamanho pequeno (um quadrado).
 pub const SMALL: f32 = 154.0;
 /// Largura do médio e do grande: dois pequenos e o espaço do encaixe.
-pub const WIDE: f32 = 2.0 * SMALL + crate::theme::WIDGET_GAP;
+pub const WIDE: f32 = 2.0 * SMALL + crate::ui::theme::WIDGET_GAP;
 pub const MEDIUM_H: f32 = SMALL;
 pub const LARGE_H: f32 = 448.0;
 /// A margem de dentro do cartão, a mesma em todos os widgets e tamanhos (como os 16 pt dos
@@ -46,7 +46,8 @@ pub const CARD_PAD: f32 = 16.0;
 /// mesma altura em todos (lado a lado, ficam alinhados), cada um na cor de destaque dele.
 pub const LABEL_Y: f32 = 13.0;
 pub const LABEL_SIZE: f32 = 10.0;
-pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::theme::Rgba) {
+/// Escreve o rótulo do widget (o "GITHUB", o "SISTEMA") em (x, y), na cor dele.
+pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::ui::theme::Rgba) {
     c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, color, crate::gfx::Anchor::LA, None);
 }
 
@@ -85,8 +86,9 @@ pub fn title(key: &str) -> &'static str {
         "pomodoro" => "Pomodoro",
         "claude" => "Uso do Claude",
         "bateria" => "Bateria",
-        // as fontes da ilha que não são widgets (o mundo lá fora)
-        k if outside::KEYS.contains(&k) => outside::title(k),
+        // as fontes da ilha que não são widgets (o mundo lá fora e a ilha em repouso)
+        source if outside::KEYS.contains(&source) => outside::title(source),
+        outside::REST => "Ilha em repouso",
         _ => "Widget",
     }
 }
@@ -145,6 +147,7 @@ pub fn create(key: &str, cfg: &Value, cache: &Value) -> Option<Box<dyn Kind>> {
     }
 }
 
+/// O tamanho do cartão: pequeno, médio ou grande.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Mode {
     P,
@@ -155,6 +158,7 @@ pub enum Mode {
 impl Mode {
     pub const ALL: [Mode; 3] = [Mode::P, Mode::M, Mode::G];
 
+    /// Como o tamanho fica guardado nas opções ("p", "m", "g").
     pub fn code(self) -> &'static str {
         match self {
             Mode::P => "p",
@@ -163,8 +167,8 @@ impl Mode {
         }
     }
 
-    pub fn from_code(s: &str) -> Option<Mode> {
-        match s {
+    pub fn from_code(code: &str) -> Option<Mode> {
+        match code {
             "p" => Some(Mode::P),
             "m" => Some(Mode::M),
             "g" => Some(Mode::G),
@@ -172,6 +176,7 @@ impl Mode {
         }
     }
 
+    /// O nome do tamanho nos menus.
     pub fn name(self) -> &'static str {
         match self {
             Mode::P => "Pequeno",
@@ -181,6 +186,7 @@ impl Mode {
     }
 }
 
+/// As medidas do cartão num tamanho.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub w: f32,
@@ -227,9 +233,6 @@ impl Env<'_> {
     pub fn shortcuts(&self) -> bool {
         config::setting_bool(self.cfg, "atalhos_clique")
     }
-    pub fn tips(&self) -> bool {
-        config::setting_bool(self.cfg, "dicas")
-    }
 }
 
 /// Pedidos de um widget para o app (gravar, avisar, abrir algo...).
@@ -239,13 +242,16 @@ pub enum Request {
     /// notificação do Windows: (tipo, título, texto, ação ao clicar)
     Notify(&'static str, String, String, Option<NotifyAction>),
     Open(String),
-    Redraw,
     /// abrir a pergunta de vidro junto do widget: "city" ou "user"
     Ask(&'static str),
     /// o Tocando agora vira a ilha flutuante
     Island,
     /// o bichinho do widget vai para a barra de tarefas (true) ou volta de lá (false)
     Perch(bool),
+    /// a ação `n` de outro widget (a ilha em repouso começando um foco no Pomodoro)
+    Act(&'static str, u32),
+    /// liga (até desligar) ou desliga o modo foco do app
+    Focus(bool),
 }
 
 /// O que a ilha flutuante mostra (vem do Tocando agora).
@@ -257,7 +263,7 @@ pub struct IslandInfo {
     pub app: String,
     pub art: Option<std::sync::Arc<crate::gfx::Image>>,
     /// duas cores fortes da capa (as ondas e o fundo da transformação)
-    pub colors: [crate::theme::Rgba; 2],
+    pub colors: [crate::ui::theme::Rgba; 2],
     pub playing: bool,
     pub position: f64,
     pub duration: f64,
@@ -281,6 +287,7 @@ pub mod island_act {
     pub const SEEK: u32 = 1000;
 }
 
+/// O que acontece ao clicar numa notificação.
 #[derive(Clone, Debug)]
 pub enum NotifyAction {
     Open(String),
@@ -297,18 +304,23 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// A seção do widget no config.json, para mudar.
     pub fn wcfg(&mut self) -> &mut serde_json::Map<String, Value> {
         self.cfg.obj_mut(self.key)
     }
+    /// Pede para gravar as opções.
     pub fn save(&mut self) {
         self.out.push(Request::SaveConfig);
     }
+    /// Pede uma notificação do Windows (`kind` diz qual interruptor das Configurações vale).
     pub fn notify(&mut self, kind: &'static str, title: impl Into<String>, text: impl Into<String>, action: Option<NotifyAction>) {
         self.out.push(Request::Notify(kind, title.into(), text.into(), action));
     }
+    /// Pede para abrir um site ou um programa.
     pub fn open(&mut self, target: impl Into<String>) {
         self.out.push(Request::Open(target.into()));
     }
+    /// O mesmo, só para ler.
     pub fn env(&self) -> Env<'_> {
         Env { cfg: self.cfg, key: self.key }
     }
@@ -327,7 +339,9 @@ pub struct Status {
 #[derive(Clone)]
 pub enum MenuItem {
     Cmd(String, u32),
-    /// comando com o atalho de teclado escrito à direita
+    /// comando com o atalho de teclado escrito à direita (o menu sabe desenhar; nenhum menu
+    /// usa ainda, só os testes)
+    #[cfg_attr(not(test), allow(dead_code))]
     Hint(String, u32, String),
     Check(String, bool, u32),
     Radio(String, bool, u32),
@@ -348,12 +362,19 @@ impl MenuItem {
     }
 }
 
+/// Um widget: o que ele desenha, como responde ao mouse e como se atualiza. Quase tudo tem um
+/// jeito padrão (não faz nada); cada widget escreve só o que usa.
 pub trait Kind {
+    /// O nome interno (a seção no config.json: "tempo", "sistema"...).
     fn key(&self) -> &'static str;
+    /// O nome na tela (os testes conferem que é o mesmo do registro, `widgets::title`).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn title(&self) -> &'static str;
+    /// Os tamanhos que o widget tem.
     fn sizes(&self) -> &'static [Mode] {
         &Mode::ALL
     }
+    /// O tamanho com que ele aparece pela primeira vez.
     fn default_mode(&self) -> Mode {
         DEFAULT_MODE
     }
@@ -409,27 +430,33 @@ pub trait Kind {
     fn hit(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<u32> {
         None
     }
+    /// Faz a ação `action` (de `hit`, do menu, da ilha ou de uma notificação).
     fn act(&mut self, _action: u32, _ctx: &mut Ctx) {}
     /// O botão do mouse desceu na área da ação `action` (o `act` vem só ao soltar). Para reagir
     /// já ao apertar, sem esperar o clique terminar; devolve true se precisa redesenhar.
     fn pressed(&mut self, _action: u32) -> bool {
         false
     }
+    /// A área clicável em (x, y), para destacar com o mouse em cima.
     fn hot_rect(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<Hot> {
         None
     }
+    /// A legenda com o mouse parado em (x, y) (só o que não está escrito no cartão).
     fn tooltip(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> Option<String> {
         None
     }
+    /// Como destacar a área clicável em (x, y).
     fn hover_style(&self, _x: f32, _y: f32, _mode: Mode, _env: &Env) -> HoverStyle {
         HoverStyle::Surface
     }
+    /// A roda do mouse em (x, y): `steps` passos (positivo: para cima).
     fn wheel(&mut self, _x: f32, _y: f32, _steps: f32, _mode: Mode, _ctx: &mut Ctx) {}
     /// A roda do mouse em (x, y) faz algo neste widget (rolar as horas, mudar o volume)? Numa
     /// pilha, a roda troca de widget, menos onde ele mesmo a usa.
     fn uses_wheel(&self, _x: f32, _y: f32, _mode: Mode) -> bool {
         false
     }
+    /// Os itens do widget no clique direito.
     fn menu(&self, _env: &Env) -> Vec<MenuItem> {
         Vec::new()
     }
@@ -441,6 +468,7 @@ pub trait Kind {
     fn tick(&mut self, _ctx: &mut Ctx) -> bool {
         false
     }
+    /// Buscando, com erro, atualizado quando (o que a base do cartão mostra).
     fn status(&self) -> Status {
         Status::default()
     }
@@ -482,6 +510,11 @@ pub trait Kind {
     fn island_fps(&self, _form: IslandForm) -> u32 {
         0
     }
+    /// Muda quando o desenho na ilha muda; parada (sem animação nem mouse), a ilha só redesenha
+    /// então. None: redesenha sempre.
+    fn island_stamp(&self, _env: &Env) -> Option<u64> {
+        None
+    }
 }
 
 /// Retângulo (x, y, largura, altura).
@@ -512,23 +545,28 @@ pub struct IslandItem {
     /// muda quando o aviso é outro (a ilha estica de novo)
     pub alert_id: u64,
     /// a cor do widget (o contorno do aviso, o pontinho na bolha)
-    pub accent: crate::theme::Rgba,
+    pub accent: crate::ui::theme::Rgba,
+    /// fechada, a pílula vira uma gota (a ilha em repouso)
+    pub dot: bool,
+    /// a ilha fica mais apagada (o PC parado)
+    pub dim: bool,
 }
 
 impl IslandItem {
     /// Algo andando (o Pomodoro correndo, a música tocando).
-    pub fn live(accent: crate::theme::Rgba) -> IslandItem {
-        IslandItem { alert: false, urgent: false, hurry: false, idle: false, alert_id: 0, accent }
+    pub fn live(accent: crate::ui::theme::Rgba) -> IslandItem {
+        IslandItem { alert: false, urgent: false, hurry: false, idle: false, alert_id: 0, accent, dot: false, dim: false }
     }
     /// Um aviso, com o número que o identifica.
-    pub fn alert(accent: crate::theme::Rgba, alert_id: u64) -> IslandItem {
+    pub fn alert(accent: crate::ui::theme::Rgba, alert_id: u64) -> IslandItem {
         IslandItem { alert: true, alert_id, ..IslandItem::live(accent) }
     }
 }
 
 /// Um número estável para um texto (o `alert_id` de um aviso).
 pub fn alert_hash(text: &str) -> u64 {
-    text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    // FNV-1a de 64 bits
+    text.bytes().fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x100000001b3))
 }
 
 /// Se o widget `key` pode aparecer na ilha (Configurações → o widget → "Mostrar na ilha").
@@ -539,21 +577,16 @@ pub fn on_island(cfg: &Value, key: &str) -> bool {
 /// Grava o tamanho do widget na seção dele do config.json, junto com a altura que ele tem nesse
 /// tamanho: numa versão nova, se a altura mudar, o App nota e abre espaço embaixo (ver
 /// `App::fit_new_heights`).
-pub fn store_size(w: &mut serde_json::Map<String, Value>, mode: Mode) {
-    w.insert("tamanho".into(), serde_json::json!(mode.code()));
-    w.insert("altura".into(), serde_json::json!(Layout::of(mode).h));
-    w.insert("altura_tamanho".into(), serde_json::json!(mode.code()));
-}
-
-/// Número no config: aceita inteiro ou fracionário.
-pub fn num(v: &Value, key: &str) -> Option<f64> {
-    v.f64_of(key)
+pub fn store_size(section: &mut serde_json::Map<String, Value>, mode: Mode) {
+    section.insert("tamanho".into(), serde_json::json!(mode.code()));
+    section.insert("altura".into(), serde_json::json!(Layout::of(mode).h));
+    section.insert("altura_tamanho".into(), serde_json::json!(mode.code()));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::WIDGET_GAP;
+    use crate::ui::theme::WIDGET_GAP;
 
     #[test]
     fn sizes_are_shared() {

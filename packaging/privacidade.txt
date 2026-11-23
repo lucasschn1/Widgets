@@ -5,8 +5,10 @@ Os Widgets não têm conta, telemetria nem anúncios. O app só acessa a interne
 - Tempo: envia à Open-Meteo (open-meteo.com) o nome da cidade que você escolher, para achá-la, e as coordenadas dela, para a previsão.
 - GitHub: envia ao api.github.com o usuário do GitHub que você informar.
 - Tocando agora: quando um vídeo do YouTube toca no navegador, envia ao youtube.com o título e o canal do vídeo, só para buscar a capa em alta resolução. Dá para desligar em Configurações > Tocando agora > Capa em alta do YouTube.
+- Cotação (o aviso, as saudações e a ilha em repouso): pergunta à AwesomeAPI (economia.awesomeapi.com.br) o preço do dólar e do bitcoin, sem enviar nada sobre você. Dá para desligar em Configurações > Geral.
+- Estação Espacial: baixa da CelesTrak (celestrak.org) a órbita da ISS, a cada 12 horas, sem enviar nada sobre você; as passagens são calculadas no seu computador. Dá para desligar em Configurações > Geral.
 - Atualizações: a cada 6 horas, pergunta ao GitHub qual é a versão mais recente, sem enviar nada sobre você. Dá para desligar em Configurações > Sobre > Procurar atualizações sozinho.
-- Uso do Claude, Sistema, Pomodoro e Bateria: não conversam com ninguém.
+- Uso do Claude, Sistema, Pomodoro, Bateria, o pôr do sol, a lua e o modo foco: não conversam com ninguém.
 
 As configurações ficam no seu computador, em %APPDATA%\Widgets.
 

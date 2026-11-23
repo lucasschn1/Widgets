@@ -26,7 +26,7 @@
 use std::time::{Duration, Instant};
 
 use crate::gfx::Canvas;
-use crate::theme::*;
+use crate::ui::theme::*;
 
 /// A grade do desenho, em quadradinhos.
 pub const COLS: f32 = 27.0;
@@ -735,14 +735,14 @@ fn stand() -> Pose {
 
 /// Dormindo, sentado: as garras caídas, de gorro; `ms` faz a respiração e os "z".
 fn asleep(ms: Option<f32>) -> Pose {
-    let mut p = Pose { dy: 2, legs: Legs::Sit, eyes: Eyes::Sleep, claws: [Claw::Limp; 2], cap: Some((0, 1.0)), ..stand() };
+    let mut pose = Pose { dy: 2, legs: Legs::Sit, eyes: Eyes::Sleep, claws: [Claw::Limp; 2], cap: Some((0, 1.0)), ..stand() };
     if let Some(ms) = ms {
         let inhale = (ms / 1400.0) as i32 % 2 == 0;
-        p.breath = inhale;
-        p.mouth = (!inhale).then_some(Mouth::Tiny);
-        p.zzz = Some((ms / 3600.0).fract());
+        pose.breath = inhale;
+        pose.mouth = (!inhale).then_some(Mouth::Tiny);
+        pose.zzz = Some((ms / 3600.0).fract());
     }
-    p
+    pose
 }
 
 /// No notebook de frente: olhando a tela, a luz no rosto, as garras no teclado.
@@ -769,19 +769,19 @@ fn typing(view: View, u: f32, n: i32, a: i32, b: i32) -> Pose {
     match view {
         View::Front => {
             let left = k % 2 == 0;
-            let mut p = front_base();
+            let mut pose = front_base();
             let keys = if left { KEYS_LEFT } else { KEYS_RIGHT };
-            p.front = Some(Front { open: true, key: down.then_some(keys[((k >> 1) % 6) as usize]) });
-            p.claws = [if left && down { Claw::KeyDown } else { Claw::Key }, if !left && down { Claw::KeyDown } else { Claw::Key }];
-            p
+            pose.front = Some(Front { open: true, key: down.then_some(keys[((k >> 1) % 6) as usize]) });
+            pose.claws = [if left && down { Claw::KeyDown } else { Claw::Key }, if !left && down { Claw::KeyDown } else { Claw::Key }];
+            pose
         }
         View::Side => {
-            let mut p = side_base(a + ((b - a) as f32 * u).round() as i32);
-            if let Some(s) = &mut p.side {
+            let mut pose = side_base(a + ((b - a) as f32 * u).round() as i32);
+            if let Some(s) = &mut pose.side {
                 s.key = down.then_some(25 + (k * 5) % 11);
             }
-            p.claws[1] = if down { Claw::SideKeyDown } else { Claw::SideKey };
-            p
+            pose.claws[1] = if down { Claw::SideKeyDown } else { Claw::SideKey };
+            pose
         }
     }
 }
@@ -795,43 +795,43 @@ fn idea(base: Pose, u: f32) -> Pose {
         u if (0.42..0.8).contains(&u) => Some(Claw::Up),
         _ => None,
     };
-    let mut p = base;
-    p.eyes = if claw == Some(Claw::Up) { Eyes::Happy } else if lit { Eyes::Open(0, 0) } else { Eyes::Open(1, -1) };
+    let mut pose = base;
+    pose.eyes = if claw == Some(Claw::Up) { Eyes::Happy } else if lit { Eyes::Open(0, 0) } else { Eyes::Open(1, -1) };
     if u > 0.08 {
-        p.bulb = Some((lit, lit && (u * 10.0) as i32 % 2 == 0));
+        pose.bulb = Some((lit, lit && (u * 10.0) as i32 % 2 == 0));
     }
     if let Some(c) = claw {
-        p.claws[0] = c;
-        if p.mag.is_none() {
-            p.claws[1] = c;
+        pose.claws[0] = c;
+        if pose.mag.is_none() {
+            pose.claws[1] = c;
         }
     }
-    p
+    pose
 }
 
 /// O café: pega a caneca e a segura do lado (olhos ^ ^), leva à boca (passando pelo meio do
 /// caminho), dá um gole e solta o "ahh".
 fn coffee(view: View, code: i32, u: f32, ms: f32) -> Pose {
-    let mut p = work_base(view, code);
+    let mut pose = work_base(view, code);
     let steam = Some((ms / 1500.0).fract());
     let (eyes, cup, claw) = match u {
         u if u < 0.12 => (Eyes::Open(-1, 0), (Cup::Side, None), Claw::CupSide),
         u if u < 0.4 => (Eyes::Happy, (Cup::Side, steam), Claw::CupSide),
         u if u < 0.44 => (Eyes::Open(-1, 0), (Cup::Mid, steam), Claw::CupMid),
         u if u < 0.7 => {
-            p.blush = Some(false);
+            pose.blush = Some(false);
             (Eyes::Happy, (Cup::Sip, steam), Claw::CupFront)
         }
         u if u < 0.74 => (Eyes::Happy, (Cup::Mid, steam), Claw::CupMid),
         _ => {
-            p.mouth = Some(Mouth::Smile);
+            pose.mouth = Some(Mouth::Smile);
             (Eyes::Happy, (Cup::Side, steam), Claw::CupSide)
         }
     };
-    p.eyes = eyes;
-    p.cup = Some(cup);
-    p.claws[0] = claw;
-    p
+    pose.eyes = eyes;
+    pose.cup = Some(cup);
+    pose.claws[0] = claw;
+    pose
 }
 
 /// O ponto de `path` a `u` (0 a 1) do caminho.
@@ -848,7 +848,7 @@ fn sleuth_base() -> Pose {
 /// Examinando com a lupa: ela sobe até o olho direito (que aparece aumentado nela, olhando para
 /// os lados), desce até o chão (uma pegada na lente) e volta; no fim, uns pontinhos ("hmm...").
 fn investigate(u: f32) -> Pose {
-    let mut p = sleuth_base();
+    let mut pose = sleuth_base();
     let (x, y, lens, eyes) = match u {
         u if u < 0.18 => {
             let (x, y) = along(&MAG_UP, u / 0.18);
@@ -871,167 +871,167 @@ fn investigate(u: f32) -> Pose {
         }
         _ => (MAG_REST.0, MAG_REST.1, Lens::Glass, Eyes::Open(0, -1)),
     };
-    p.mag = Some((x, y, lens));
-    p.eyes = eyes;
+    pose.mag = Some((x, y, lens));
+    pose.eyes = eyes;
     if u > 0.88 {
-        p.dots = (((u - 0.88) * 30.0) as u8).min(3);
+        pose.dots = (((u - 0.88) * 30.0) as u8).min(3);
     }
-    p
+    pose
 }
 
 /// Seguindo as pegadas: abaixa a lupa, anda de lado até elas olhando o chão, para em cima da
 /// última examinando e volta.
 fn trail(view: View, u: f32) -> Pose {
     let far = if view == View::Side { 6 } else { 3 };
-    let mut p = sleuth_base();
-    p.prints = Some(if view == View::Side { &PRINTS_SIDE } else { &PRINTS_FRONT });
-    let walk = |p: &mut Pose, dx: i32, st: i32| {
-        p.dx = dx;
-        p.legs = if st % 2 == 1 { Legs::StepA } else { Legs::StepB };
+    let mut pose = sleuth_base();
+    pose.prints = Some(if view == View::Side { &PRINTS_SIDE } else { &PRINTS_FRONT });
+    let walk = |pose: &mut Pose, dx: i32, st: i32| {
+        pose.dx = dx;
+        pose.legs = if st % 2 == 1 { Legs::StepA } else { Legs::StepB };
     };
     match u {
         u if u < 0.1 => {
             let (x, y) = along(&[(21, 0), (21, 1), (20, 2), (20, 3), (19, 4)], u / 0.1);
-            p.mag = Some((x, y, Lens::Glass));
-            p.eyes = Eyes::Open(1, 1);
+            pose.mag = Some((x, y, Lens::Glass));
+            pose.eyes = Eyes::Open(1, 1);
         }
         // anda até as pegadas, um passo por quadro
         u if u < 0.45 => {
             let st = ((u - 0.1) / 0.35 * (far * 2) as f32) as i32;
-            walk(&mut p, (st + 1) / 2, st);
-            p.mag = Some((MAG_LOW.0, MAG_LOW.1, Lens::Print));
-            p.eyes = Eyes::Sherlock(1, 1);
+            walk(&mut pose, (st + 1) / 2, st);
+            pose.mag = Some((MAG_LOW.0, MAG_LOW.1, Lens::Print));
+            pose.eyes = Eyes::Sherlock(1, 1);
         }
         // examina a última
         u if u < 0.65 => {
-            p.dx = far;
+            pose.dx = far;
             let bob = ((u - 0.45) / 0.2 * 4.0) as i32 % 2;
-            p.mag = Some((MAG_LOW.0 + bob, MAG_LOW.1, Lens::Print));
-            p.eyes = Eyes::Sherlock(1, 1);
+            pose.mag = Some((MAG_LOW.0 + bob, MAG_LOW.1, Lens::Print));
+            pose.eyes = Eyes::Sherlock(1, 1);
             if u > 0.57 {
-                p.dots = (((u - 0.57) * 40.0) as u8).min(3);
+                pose.dots = (((u - 0.57) * 40.0) as u8).min(3);
             }
         }
         // volta, de lupa um pouco mais alta
         u if u < 0.92 => {
             let st = ((u - 0.65) / 0.27 * (far * 2) as f32) as i32;
-            walk(&mut p, far - (st + 1) / 2, st);
-            p.mag = Some((MAG_LOW.0, MAG_LOW.1 - 2, Lens::Glass));
-            p.eyes = Eyes::Open(-1, 0);
+            walk(&mut pose, far - (st + 1) / 2, st);
+            pose.mag = Some((MAG_LOW.0, MAG_LOW.1 - 2, Lens::Glass));
+            pose.eyes = Eyes::Open(-1, 0);
         }
         _ => {
             let (x, y) = along(&[(20, 1), (21, 0)], (u - 0.92) / 0.04);
-            p.mag = Some((x, y, Lens::Glass));
-            p.eyes = Eyes::Open(0, 0);
+            pose.mag = Some((x, y, Lens::Glass));
+            pose.eyes = Eyes::Open(0, 0);
         }
     }
-    p
+    pose
 }
 
 /// Pensando fumando o cachimbo: olha para cima, puxa a fumaça (os olhos meio fechados), a garra
 /// livre no queixo, e solta em baforadas; no fim, uns pontinhos.
 fn puff(u: f32, ms: f32) -> Pose {
-    let mut p = sleuth_base();
-    p.pipe = Some(Some((ms / 1100.0).fract()));
-    p.eyes = match u {
+    let mut pose = sleuth_base();
+    pose.pipe = Some(Some((ms / 1100.0).fract()));
+    pose.eyes = match u {
         u if u < 0.15 => Eyes::Open(-1, -1),
         u if u < 0.45 => Eyes::Half,
         u if u < 0.5 => Eyes::Blink,
         _ => Eyes::Open(-1, -1),
     };
     if (0.1..0.85).contains(&u) {
-        p.claws[0] = if u < 0.14 || u > 0.81 { Claw::Mid } else { Claw::Up };
+        pose.claws[0] = if u < 0.14 || u > 0.81 { Claw::Mid } else { Claw::Up };
     }
     if u > 0.7 {
-        p.dots = (((u - 0.7) * 20.0) as u8).min(3);
+        pose.dots = (((u - 0.7) * 20.0) as u8).min(3);
     }
-    p
+    pose
 }
 
 /// Chamando você: um "!" em cima e a garra da esquerda balançando depressa, de olhos arregalados
 /// (sem largar o notebook nem a lupa).
 fn call(base: Pose, ms: f32) -> Pose {
-    let mut p = base;
+    let mut pose = base;
     let beat = (ms / 120.0) as i32 % 2 == 0;
-    p.claws[0] = if beat { Claw::Up } else { Claw::Out };
-    p.bang = (ms / 400.0) as i32 % 4 != 3;
-    if matches!(p.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
-        p.eyes = if (ms / 400.0) as i32 % 2 == 0 { Eyes::Wide } else { Eyes::Open(0, 0) };
+    pose.claws[0] = if beat { Claw::Up } else { Claw::Out };
+    pose.bang = (ms / 400.0) as i32 % 4 != 3;
+    if matches!(pose.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
+        pose.eyes = if (ms / 400.0) as i32 % 2 == 0 { Eyes::Wide } else { Eyes::Open(0, 0) };
     }
-    p.glow = false;
-    p
+    pose.glow = false;
+    pose
 }
 
 /// Um comando falhou: leva a garra à testa (apertando os olhos), com um ✗ em cima, e fica
 /// suando, de boca torta.
 fn oops(base: Pose, u: f32) -> Pose {
-    let mut p = base;
-    p.cross = u < 0.85;
-    p.claws[0] = match u {
+    let mut pose = base;
+    pose.cross = u < 0.85;
+    pose.claws[0] = match u {
         u if u < 0.08 || (0.6..0.68).contains(&u) => Claw::Mid,
         u if u < 0.6 => Claw::Palm,
-        _ => p.claws[0],
+        _ => pose.claws[0],
     };
-    p.eyes = if u < 0.6 { Eyes::Squeeze } else { Eyes::Open(0, 1) };
-    p.mouth = Some(Mouth::Wavy);
-    p.sweat = Some(u);
-    p
+    pose.eyes = if u < 0.6 { Eyes::Squeeze } else { Eyes::Open(0, 1) };
+    pose.mouth = Some(Mouth::Wavy);
+    pose.sweat = Some(u);
+    pose
 }
 
 /// O comando passou depois de falhar: levanta as garras (as livres), dá dois pulinhos e sorri.
 fn cheer(base: Pose, u: f32, ms: f32) -> Pose {
-    let mut p = base;
+    let mut pose = base;
     let wave = if (ms / 140.0) as i32 % 2 == 0 { Claw::Up } else { Claw::Out };
     let claw = if u < 0.08 || u > 0.92 { Claw::Mid } else { wave };
-    p.claws[0] = claw;
-    if p.mag.is_none() {
-        p.claws[1] = claw;
+    pose.claws[0] = claw;
+    if pose.mag.is_none() {
+        pose.claws[1] = claw;
     }
-    p.dy = if (0.15..0.3).contains(&u) || (0.45..0.6).contains(&u) { -1 } else { 0 };
-    p.eyes = Eyes::Happy;
-    p.mouth = Some(Mouth::Grin);
-    p.check = (0.1..0.9).contains(&u);
-    p
+    pose.dy = if (0.15..0.3).contains(&u) || (0.45..0.6).contains(&u) { -1 } else { 0 };
+    pose.eyes = Eyes::Happy;
+    pose.mouth = Some(Mouth::Grin);
+    pose.check = (0.1..0.9).contains(&u);
+    pose
 }
 
 /// Esperando um comando demorado: segura a ampulheta do lado, olhando a areia cair, batendo o pé.
 fn wait(base: Pose, u: f32, ms: f32) -> Pose {
-    let mut p = base;
-    p.claws[0] = if u < 0.06 || u > 0.94 { Claw::Mid } else { Claw::Up };
+    let mut pose = base;
+    pose.claws[0] = if u < 0.06 || u > 0.94 { Claw::Mid } else { Claw::Up };
     if u >= 0.06 && u <= 0.94 {
-        p.hourglass = Some(((u - 0.06) / 0.88).clamp(0.0, 1.0));
+        pose.hourglass = Some(((u - 0.06) / 0.88).clamp(0.0, 1.0));
     }
-    p.eyes = if (0.45..0.5).contains(&u) { Eyes::Blink } else { Eyes::Open(-1, 0) };
-    p.legs = if (ms / 300.0) as i32 % 2 == 0 { Legs::Tap } else { Legs::Stand };
-    p.glow = false;
-    p
+    pose.eyes = if (0.45..0.5).contains(&u) { Eyes::Blink } else { Eyes::Open(-1, 0) };
+    pose.legs = if (ms / 300.0) as i32 % 2 == 0 { Legs::Tap } else { Legs::Stand };
+    pose.glow = false;
+    pose
 }
 
 /// Pesquisando na web: guarda a lupa e olha longe com o binóculo, para um lado e para o outro;
 /// no fim, uns pontinhos.
 fn scout(u: f32) -> Pose {
-    let mut p = sleuth_base();
-    p.mag = None;
+    let mut pose = sleuth_base();
+    pose.mag = None;
     let pan = match u {
         u if u < 0.1 || u > 0.92 => None,
         u => Some([0, -1, -1, 0, 1, 1, 0][(((u - 0.1) / 0.82) * 7.0) as usize % 7]),
     };
-    p.binoculars = pan;
-    p.claws = if pan.is_some() { [Claw::Up; 2] } else { [Claw::Mid; 2] };
+    pose.binoculars = pan;
+    pose.claws = if pan.is_some() { [Claw::Up; 2] } else { [Claw::Mid; 2] };
     if u > 0.84 {
-        p.dots = (((u - 0.84) * 30.0) as u8).min(3);
+        pose.dots = (((u - 0.84) * 30.0) as u8).min(3);
     }
-    p
+    pose
 }
 
 /// Planejando: guarda a lupa e escreve numa prancheta, olhando para ela; no fim, confere.
 fn plan(u: f32) -> Pose {
-    let mut p = sleuth_base();
-    p.mag = None;
-    p.claws = [Claw::Book, Claw::Hidden];
-    p.clipboard = Some(((u / 0.85).min(1.0) * 15.0) as i32);
-    p.eyes = if u < 0.85 { Eyes::Open(-1, 1) } else { Eyes::Open(0, 0) };
-    p
+    let mut pose = sleuth_base();
+    pose.mag = None;
+    pose.claws = [Claw::Book, Claw::Hidden];
+    pose.clipboard = Some(((u / 0.85).min(1.0) * 15.0) as i32);
+    pose.eyes = if u < 0.85 { Eyes::Open(-1, 1) } else { Eyes::Open(0, 0) };
+    pose
 }
 
 /// Arrumando a pilha de papéis (a conversa foi compactada): as folhas saem uma a uma, com as
@@ -1039,17 +1039,17 @@ fn plan(u: f32) -> Pose {
 fn tidy(pile: u8, u: f32) -> Pose {
     let start = pile.max(2) as f32;
     let left = (start * (1.0 - u / 0.8)).ceil().max(0.0) as u8;
-    let mut p = stand();
-    p.pile = left;
+    let mut pose = stand();
+    pose.pile = left;
     if u < 0.8 {
         let k = (u * 12.0) as usize % 2;
-        p.claws[k] = Claw::Down;
-        p.eyes = Eyes::Open(-1, 1);
+        pose.claws[k] = Claw::Down;
+        pose.eyes = Eyes::Open(-1, 1);
     } else {
-        p.eyes = Eyes::Happy;
-        p.mouth = Some(Mouth::Smile);
+        pose.eyes = Eyes::Happy;
+        pose.mouth = Some(Mouth::Smile);
     }
-    p
+    pose
 }
 
 /// Indo investigar: fecha o notebook, guarda (as garras sobem para o chapéu), o chapéu desce até
@@ -1058,13 +1058,13 @@ fn hat_on(view: View, code: i32, ms: f32) -> Pose {
     let (i, u) = seg(ms, &HAT_ON);
     match i {
         0 => {
-            let mut p = work_base(view, code);
-            p.front = p.front.map(|f| Front { open: false, ..f });
-            p.side = p.side.map(|s| Side { open: false, key: None, ..s });
-            p.eyes = Eyes::Open(1, 1);
-            p.glow = false;
-            p.claws = [Claw::Rest; 2];
-            p
+            let mut pose = work_base(view, code);
+            pose.front = pose.front.map(|f| Front { open: false, ..f });
+            pose.side = pose.side.map(|s| Side { open: false, key: None, ..s });
+            pose.eyes = Eyes::Open(1, 1);
+            pose.glow = false;
+            pose.claws = [Claw::Rest; 2];
+            pose
         }
         1 => Pose { eyes: Eyes::Open(0, -1), claws: [if u < 0.5 { Claw::Mid } else { Claw::Up }; 2], ..stand() },
         2 => {
@@ -1096,17 +1096,17 @@ fn hat_off(view: View, code: i32, ms: f32) -> Pose {
             Pose { eyes: Eyes::Open(0, -1), claws, hat: (u < 0.7).then_some(-((u / 0.35) as i32).min(1)), ..stand() }
         }
         2 => {
-            let mut p = work_base(view, code);
-            p.front = p.front.map(|f| Front { open: false, ..f });
-            p.side = p.side.map(|s| Side { open: false, key: None, ..s });
-            p.glow = false;
-            p.claws = [Claw::Rest; 2];
-            p
+            let mut pose = work_base(view, code);
+            pose.front = pose.front.map(|f| Front { open: false, ..f });
+            pose.side = pose.side.map(|s| Side { open: false, key: None, ..s });
+            pose.glow = false;
+            pose.claws = [Claw::Rest; 2];
+            pose
         }
         _ => {
-            let mut p = work_base(view, code);
-            p.eyes = Eyes::Open(0, 0);
-            p
+            let mut pose = work_base(view, code);
+            pose.eyes = Eyes::Open(0, 0);
+            pose
         }
     }
 }
@@ -1162,14 +1162,14 @@ fn limit_shift(view: View) -> i32 {
 
 /// O quadro `p` do limite: no lugar dele (`shift`: deslocado) e com a placa de altura `h`
 /// do lado (0: sem placa).
-fn at_limit(mut p: Pose, view: View, h: i32, shift: bool) -> Pose {
+fn at_limit(mut pose: Pose, view: View, h: i32, shift: bool) -> Pose {
     if shift {
-        p.dx += limit_shift(view);
+        pose.dx += limit_shift(view);
     }
     if h > 0 {
-        p.sign = Some(Sign { h, x: if view == View::Front { 15 } else { 17 } });
+        pose.sign = Some(Sign { h, x: if view == View::Front { 15 } else { 17 } });
     }
-    p
+    pose
 }
 
 /// Lendo: o livro aberto seguro com as duas garras, os olhos espiando por cima.
@@ -1242,7 +1242,7 @@ pub struct Play {
 /// mouse está por perto, olhando para ele (`gaze`).
 pub fn pose(mood: Mood, play: Option<Play>, scene: &Scene, gaze: Option<(i32, i32)>) -> Pose {
     let base = still(mood, scene);
-    let mut p = match play {
+    let mut drawn = match play {
         None => base,
         Some(Play { anim, t, secs }) => {
             let t = t.clamp(0.0, 1.0);
@@ -1252,205 +1252,68 @@ pub fn pose(mood: Mood, play: Option<Play>, scene: &Scene, gaze: Option<(i32, i3
     // a fantasia de Sherlock, investigando: o chapéu e o cachimbo (menos bocejando ou falando)
     // (pulando, acordando ou levando um susto, sem a fantasia; pondo ou tirando, ela vem no
     // desenho da animação)
-    let dressed = match play.map(|p| p.anim) {
+    let dressed = match play.map(|playing| playing.anim) {
         None => mood == Mood::Busy,
         Some(Anim::Done) => true,
         Some(Anim::HatOn | Anim::HatOff | Anim::Hop | Anim::Love | Anim::Wake | Anim::Startle) => false,
         Some(_) => mood == Mood::Busy,
     };
     if scene.sleuth && dressed {
-        if p.hat.is_none() {
-            p.hat = Some(0);
+        if drawn.hat.is_none() {
+            drawn.hat = Some(0);
         }
-        if p.mouth.is_none() && p.pipe.is_none() {
-            let ms = play.map(|p| p.t * p.secs * 1000.0);
-            p.pipe = Some(ms.map(|ms| (ms / 2200.0).fract()));
+        if drawn.mouth.is_none() && drawn.pipe.is_none() {
+            let ms = play.map(|playing| playing.t * playing.secs * 1000.0);
+            drawn.pipe = Some(ms.map(|ms| (ms / 2200.0).fract()));
         }
     }
     // em volta: os ajudantes trabalhando junto (em cima do notebook de lado, ou no chão), a pilha
     // de papéis da conversa e o Natal
-    p.xmas = scene.xmas;
+    drawn.xmas = scene.xmas;
     let around = mood == Mood::Busy;
     if around && scene.helpers > 0 {
-        let spots: &'static [(i32, i32)] = if p.side.is_some_and(|s| s.open) { &HELPERS_LAPTOP } else { &HELPERS_GROUND };
-        p.helpers = Some((scene.helpers.min(HELPERS_SHOWN), spots));
+        let spots: &'static [(i32, i32)] = if drawn.side.is_some_and(|s| s.open) { &HELPERS_LAPTOP } else { &HELPERS_GROUND };
+        drawn.helpers = Some((scene.helpers.min(HELPERS_SHOWN), spots));
     }
-    if around && play.map(|p| p.anim) != Some(Anim::Tidy) {
-        p.pile = scene.pile.min(PILE_MAX);
+    if around && play.map(|playing| playing.anim) != Some(Anim::Tidy) {
+        drawn.pile = scene.pile.min(PILE_MAX);
     }
     // (o tempo só entra no quadro quando algo depende dele: os ajudantes)
-    if p.helpers.is_some() {
-        p.ms = play.map(|p| p.t.clamp(0.0, 1.0) * p.secs * 1000.0);
+    if drawn.helpers.is_some() {
+        drawn.ms = play.map(|playing| playing.t.clamp(0.0, 1.0) * playing.secs * 1000.0);
     }
     // os olhos no mouse, se estão abertos
     if let Some((gx, gy)) = gaze {
-        p.eyes = match p.eyes {
+        drawn.eyes = match drawn.eyes {
             Eyes::Open(..) => Eyes::Open(gx, gy),
             Eyes::Sherlock(..) => Eyes::Sherlock(gx, gy),
             e => e,
         };
     }
-    p
+    drawn
 }
 
 /// O quadro de `anim` a `t` (0 a 1) dos `secs` que ela dura, partindo de `base` (o quadro
-/// parado).
+/// parado). Cada animação tem a sua função; aqui só se escolhe qual.
 fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
     let view = scene.view;
     let ms = t * secs * 1000.0;
-    let open_eyes = |p: &mut Pose, e: Eyes| {
-        if matches!(p.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
-            p.eyes = e;
-        }
-    };
     match anim {
-        Anim::Blink => {
-            // fecha e abre passando pela metade
-            let mut p = base;
-            open_eyes(&mut p, if (0.3..0.7).contains(&t) { Eyes::Blink } else { Eyes::Half });
-            p
-        }
-        Anim::Look => {
-            let mut p = base;
-            let x = match t {
-                t if t < 0.4 => -1,
-                t if t < 0.5 => 0,
-                t if t < 0.9 => 1,
-                _ => 0,
-            };
-            let y = if let Eyes::Open(_, y) = p.eyes { y } else { 0 };
-            open_eyes(&mut p, Eyes::Open(x, y));
-            p
-        }
-        Anim::Scuttle => {
-            const PATH: [i32; 15] = [0, 1, 2, 3, 4, 4, 3, 2, 1, 0, -1, -2, -2, -1, 0];
-            let st = ((t * 15.0) as usize).min(14);
-            Pose { dx: PATH[st], legs: if st % 2 == 1 { Legs::StepA } else { Legs::StepB }, ..stand() }
-        }
-        Anim::Hop => {
-            if t < CROUCH {
-                // agacha antes de pular: já o primeiro quadro é outro (reage ao clique na hora)
-                Pose { dy: 1, legs: Legs::Tuck, claws: [Claw::Mid; 2], ..stand() }
-            } else {
-                // dois pulos, cada um subindo e descendo um quadradinho por quadro e amortecendo
-                // no chão
-                let h = ((t - CROUCH) / (1.0 - CROUCH) * 2.0).fract();
-                if h > 0.86 {
-                    return Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, claws: [Claw::Mid; 2], ..stand() };
-                }
-                let dy = -((h / 0.86 * std::f32::consts::PI).sin() * 4.0).round() as i32;
-                let claws = match dy {
-                    d if d <= -3 => Claw::Up,
-                    d if d < 0 => Claw::Mid,
-                    _ => Claw::Rest,
-                };
-                Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, claws: [claws; 2], ..stand() }
-            }
-        }
-        Anim::Wave => {
-            // levanta a garra da esquerda, balança de um lado para o outro e abaixa, sorrindo
-            // (trabalhando, sem largar o notebook nem a lupa)
-            let mut p = base;
-            p.claws[0] = match t {
-                t if t < 0.08 || (0.86..0.94).contains(&t) => Claw::Mid,
-                t if t < 0.86 => {
-                    if ((t - 0.08) * secs * 1000.0 / 140.0) as i32 % 2 == 0 {
-                        Claw::Up
-                    } else {
-                        Claw::Out
-                    }
-                }
-                _ => p.claws[0],
-            };
-            open_eyes(&mut p, Eyes::Happy);
-            // (de Sherlock, sorri com o cachimbo na boca)
-            if p.mouth.is_none() && !scene.sleuth {
-                p.mouth = Some(Mouth::Smile);
-            }
-            p
-        }
-        Anim::Love => Pose {
-            eyes: if t < 0.75 { Eyes::Happy } else { Eyes::Open(0, 0) },
-            blush: Some(false),
-            mouth: Some(Mouth::Smile),
-            heart: Some(t),
-            claws: [match t {
-                t if t < 0.06 || (0.45..0.53).contains(&t) => Claw::Mid,
-                t if t < 0.45 => Claw::Up,
-                _ => Claw::Rest,
-            }; 2],
-            ..stand()
-        },
-        Anim::Music => {
-            let (i, u) = seg(ms, &MUSIC);
-            let notes = Some((ms / 2600.0).fract());
-            let b = beat(ms);
-            match i {
-                0 => Pose { eyes: Eyes::Open(0, -1), claws: [if u < 0.4 { Claw::Mid } else { Claw::Up }; 2], phones: Some(-3), ..stand() },
-                // o fone desce até a cabeça
-                1 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-2 + (u * 3.0).min(2.0) as i32), ..stand() },
-                2 | 4 => Pose { eyes: Eyes::Chill, phones: Some(0), notes, dx: b as i32, legs: if b { Legs::Tap } else { Legs::Stand }, ..stand() },
-                3 => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), phones: Some(0), notes, dx: b as i32, claws: if b { [Claw::Up, Claw::Rest] } else { [Claw::Rest, Claw::Up] }, ..stand() },
-                5 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-1 - (u * 3.0).min(2.0) as i32), ..stand() },
-                _ => Pose { claws: [if u < 0.2 { Claw::Mid } else { Claw::Rest }; 2], ..stand() },
-            }
-        }
-        Anim::Party => {
-            let h = ((t / 0.6) * 2.0).fract();
-            let dy = if t < 0.6 { -((h * std::f32::consts::PI).sin() * 4.0).round() as i32 } else { 0 };
-            Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, eyes: Eyes::Happy, mouth: Some(Mouth::Grin), claws: [Claw::Up; 2], confetti: Some(t), ..stand() }
-        }
+        Anim::Blink => blink(base, t),
+        Anim::Look => look(base, t),
+        Anim::Scuttle => scuttle(t),
+        Anim::Hop => hop(t),
+        Anim::Wave => wave(base, t, secs, scene),
+        Anim::Love => love(t),
+        Anim::Music => music(ms),
+        Anim::Party => party(t),
         Anim::Snooze => asleep(Some(ms)),
-        Anim::Wake => {
-            let (i, u) = seg(ms, &WAKE);
-            let sitting = |eyes| Pose { eyes, ..asleep(None) };
-            match i {
-                0 => sitting(Eyes::Peek),
-                1 | 3 => sitting(Eyes::Half),
-                2 => sitting(Eyes::Sleep),
-                4 => Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::Up; 2], cap: Some((0, 1.0)), ..stand() },
-                5 => Pose { dy: -1, legs: Legs::Stretch, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::High; 2], cap: Some((-(u.round() as i32), 1.0 - u * 0.6)), ..stand() },
-                6 => Pose { cap: Some((-1, 0.4 - u * 0.4)), ..stand() },
-                7 | 9 => Pose { eyes: Eyes::Blink, ..stand() },
-                10 => Pose { eyes: Eyes::Open(-1, 0), ..stand() },
-                11 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
-                12 => Pose { mouth: Some(Mouth::Smile), ..stand() },
-                _ => stand(),
-            }
-        }
-        Anim::Startle => {
-            let (i, u) = seg(ms, &STARTLE);
-            match i {
-                0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, cap: Some((-1, 1.0)), zzz: None, ..asleep(None) },
-                1 => {
-                    let dy = -((u * std::f32::consts::PI).sin() * 3.0).round() as i32;
-                    let cap = (u < 0.25).then_some((-1, 0.5 - u * 2.0));
-                    Pose { dy, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), claws: [Claw::Up; 2], bang: true, cap, ..stand() }
-                }
-                2 => Pose { dy: 2, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
-                3 => Pose { eyes: Eyes::Wide, bang: true, ..stand() },
-                4 => Pose { eyes: Eyes::Blink, ..stand() },
-                5 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
-                _ => Pose { eyes: Eyes::Open(1, 1), ..stand() },
-            }
-        }
+        Anim::Wake => wake(ms),
+        Anim::Startle => startle(ms),
         Anim::Sweat => Pose { sweat: Some(t), ..still(Mood::Worried, scene) },
-        Anim::Shake => {
-            let dx = if (t * 16.0) as i32 % 2 == 0 { 1 } else { -1 };
-            Pose { dx, eyes: Eyes::Squeeze, sweat: Some(t), ..still(Mood::Worried, scene) }
-        }
-        Anim::Type => {
-            let n = (secs * KEYS_PER_SEC).round().max(4.0) as i32;
-            let chars = (n as f32 * 1.25) as i32;
-            let a = scene.code;
-            typing(view, t, n, a, (a + chars).min(CODE_TOTAL))
-        }
-        Anim::Think => {
-            let mut p = work_base(view, scene.code);
-            p.eyes = Eyes::Open(1, -1);
-            p.dots = ((t * 4.0) as u8).min(3);
-            p
-        }
+        Anim::Shake => shake(t, scene),
+        Anim::Type => type_code(view, t, secs, scene),
+        Anim::Think => think(view, t, scene),
         Anim::Idea => idea(base, t),
         Anim::Coffee => coffee(view, scene.code, t, ms),
         Anim::HatOn => hat_on(view, scene.code, ms),
@@ -1466,53 +1329,247 @@ fn frame(anim: Anim, t: f32, secs: f32, base: Pose, scene: &Scene) -> Pose {
         Anim::Scout => scout(t),
         Anim::Plan => plan(t),
         Anim::Tidy => tidy(scene.pile, t),
-        Anim::SignUp => {
-            let (i, u) = seg(ms, &SIGN_UP);
-            match i {
-                0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
-                1 => side_step(view, u, false),
-                2..=4 => {
-                    let h = [3, 6, 9][i - 2];
-                    let claws = if i < 4 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
-                    at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, h, true)
-                }
-                5 => at_limit(Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() }, view, 11, true),
-                _ => at_limit(Pose { eyes: Eyes::Open(0, 0), book: Some((-2, 0)), claws: [Claw::Up; 2], ..stand() }, view, 11, true),
-            }
-        }
-        Anim::SignDown => {
-            let (i, u) = seg(ms, &SIGN_DOWN);
-            match i {
-                0 => at_limit(Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), ..stand() }, view, 11, true),
-                1..=3 => {
-                    let h = [9, 6, 3][i - 1];
-                    let claws = if i < 3 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
-                    at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, h, true)
-                }
-                4 => side_step(view, u, true),
-                _ => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() },
-            }
-        }
-        Anim::Read => {
-            let blink = (0.3..0.33).contains(&t);
-            let p = Pose { eyes: if blink { Eyes::Blink } else { Eyes::Open(0, 1) }, book: Some((0, page_flip(t, 0.62))), ..reading() };
-            at_limit(p, view, 11, true)
-        }
-        Anim::Laugh => {
-            let dy = if (ms / 170.0) as i32 % 2 == 1 { -1 } else { 0 };
-            at_limit(Pose { eyes: Eyes::Happy, blush: Some(false), dy, ..reading() }, view, 11, true)
-        }
-        Anim::Nod => {
-            let (i, u) = seg(ms, &NOD);
-            let p = match i {
-                0 => Pose { eyes: Eyes::Half, ..reading() },
-                // um cochilo curto: só o começo do ciclo dos "z" (o grande nem chega a subir)
-                1 => Pose { dy: 1, eyes: Eyes::Sleep, zzz: Some(0.1 + 0.5 * u), ..reading() },
-                _ => Pose { eyes: Eyes::Wide, ..reading() },
-            };
-            at_limit(p, view, 11, true)
-        }
+        Anim::SignUp => sign_up(view, ms),
+        Anim::SignDown => sign_down(view, ms),
+        Anim::Read => read(view, t),
+        Anim::Laugh => laugh(view, ms),
+        Anim::Nod => nod(view, ms),
     }
+}
+
+/// Troca os olhos, se eles estão abertos (dormindo ou de olhos apertados, ficam como estão).
+fn open_eyes(pose: &mut Pose, eyes: Eyes) {
+    if matches!(pose.eyes, Eyes::Open(..) | Eyes::Sherlock(..)) {
+        pose.eyes = eyes;
+    }
+}
+
+/// Pisca: fecha e abre passando pela metade.
+fn blink(base: Pose, t: f32) -> Pose {
+    let mut pose = base;
+    open_eyes(&mut pose, if (0.3..0.7).contains(&t) { Eyes::Blink } else { Eyes::Half });
+    pose
+}
+
+/// Olha para a esquerda, para a frente, para a direita e de volta.
+fn look(base: Pose, t: f32) -> Pose {
+    let mut pose = base;
+    let x = match t {
+        t if t < 0.4 => -1,
+        t if t < 0.5 => 0,
+        t if t < 0.9 => 1,
+        _ => 0,
+    };
+    let y = if let Eyes::Open(_, y) = pose.eyes { y } else { 0 };
+    open_eyes(&mut pose, Eyes::Open(x, y));
+    pose
+}
+
+/// Anda de lado, como caranguejo: para a direita, volta e passa um pouco para a esquerda.
+fn scuttle(t: f32) -> Pose {
+    const PATH: [i32; 15] = [0, 1, 2, 3, 4, 4, 3, 2, 1, 0, -1, -2, -2, -1, 0];
+    let step = ((t * 15.0) as usize).min(14);
+    Pose { dx: PATH[step], legs: if step % 2 == 1 { Legs::StepA } else { Legs::StepB }, ..stand() }
+}
+
+/// Dois pulos: agacha (já no primeiro quadro, para reagir ao clique na hora), sobe e desce um
+/// quadradinho por quadro e amortece no chão.
+fn hop(t: f32) -> Pose {
+    if t < CROUCH {
+        return Pose { dy: 1, legs: Legs::Tuck, claws: [Claw::Mid; 2], ..stand() };
+    }
+    // em que ponto do pulo (cada um é metade do tempo depois de agachar)
+    let jump = ((t - CROUCH) / (1.0 - CROUCH) * 2.0).fract();
+    if jump > 0.86 {
+        return Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, claws: [Claw::Mid; 2], ..stand() };
+    }
+    let dy = -((jump / 0.86 * std::f32::consts::PI).sin() * 4.0).round() as i32;
+    let claws = match dy {
+        d if d <= -3 => Claw::Up,
+        d if d < 0 => Claw::Mid,
+        _ => Claw::Rest,
+    };
+    Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, claws: [claws; 2], ..stand() }
+}
+
+/// Acena: levanta a garra da esquerda, balança de um lado para o outro e abaixa, sorrindo
+/// (trabalhando, sem largar o notebook nem a lupa).
+fn wave(base: Pose, t: f32, secs: f32, scene: &Scene) -> Pose {
+    let mut pose = base;
+    pose.claws[0] = match t {
+        t if t < 0.08 || (0.86..0.94).contains(&t) => Claw::Mid,
+        t if t < 0.86 => {
+            // troca de lado a cada 140 ms
+            if ((t - 0.08) * secs * 1000.0 / 140.0) as i32 % 2 == 0 {
+                Claw::Up
+            } else {
+                Claw::Out
+            }
+        }
+        _ => pose.claws[0],
+    };
+    open_eyes(&mut pose, Eyes::Happy);
+    // (de Sherlock, sorri com o cachimbo na boca)
+    if pose.mouth.is_none() && !scene.sleuth {
+        pose.mouth = Some(Mouth::Smile);
+    }
+    pose
+}
+
+/// Fecha os olhos sorrindo, fica corado e sobe um coração.
+fn love(t: f32) -> Pose {
+    Pose {
+        eyes: if t < 0.75 { Eyes::Happy } else { Eyes::Open(0, 0) },
+        blush: Some(false),
+        mouth: Some(Mouth::Smile),
+        heart: Some(t),
+        claws: [match t {
+            t if t < 0.06 || (0.45..0.53).contains(&t) => Claw::Mid,
+            t if t < 0.45 => Claw::Up,
+            _ => Claw::Rest,
+        }; 2],
+        ..stand()
+    }
+}
+
+/// Põe o fone, curte a música no ritmo (com as notas saindo) e tira o fone.
+fn music(ms: f32) -> Pose {
+    let (step, into) = seg(ms, &MUSIC);
+    let notes = Some((ms / 2600.0).fract());
+    let on_beat = beat(ms);
+    match step {
+        0 => Pose { eyes: Eyes::Open(0, -1), claws: [if into < 0.4 { Claw::Mid } else { Claw::Up }; 2], phones: Some(-3), ..stand() },
+        // o fone desce até a cabeça
+        1 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-2 + (into * 3.0).min(2.0) as i32), ..stand() },
+        2 | 4 => Pose { eyes: Eyes::Chill, phones: Some(0), notes, dx: on_beat as i32, legs: if on_beat { Legs::Tap } else { Legs::Stand }, ..stand() },
+        3 => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), phones: Some(0), notes, dx: on_beat as i32, claws: if on_beat { [Claw::Up, Claw::Rest] } else { [Claw::Rest, Claw::Up] }, ..stand() },
+        5 => Pose { eyes: Eyes::Happy, claws: [Claw::Up; 2], phones: Some(-1 - (into * 3.0).min(2.0) as i32), ..stand() },
+        _ => Pose { claws: [if into < 0.2 { Claw::Mid } else { Claw::Rest }; 2], ..stand() },
+    }
+}
+
+/// Comemora: dois pulos de garras para cima, com confete caindo.
+fn party(t: f32) -> Pose {
+    let jump = ((t / 0.6) * 2.0).fract();
+    let dy = if t < 0.6 { -((jump * std::f32::consts::PI).sin() * 4.0).round() as i32 } else { 0 };
+    Pose { dy, legs: if dy < 0 { Legs::Tuck } else { Legs::Stand }, eyes: Eyes::Happy, mouth: Some(Mouth::Grin), claws: [Claw::Up; 2], confetti: Some(t), ..stand() }
+}
+
+/// Acorda: espia, pisca, quase dorme de novo, boceja se espreguiçando (o gorro sai), olha em
+/// volta e sorri.
+fn wake(ms: f32) -> Pose {
+    let (step, into) = seg(ms, &WAKE);
+    let sitting = |eyes| Pose { eyes, ..asleep(None) };
+    match step {
+        0 => sitting(Eyes::Peek),
+        1 | 3 => sitting(Eyes::Half),
+        2 => sitting(Eyes::Sleep),
+        4 => Pose { dy: 1, legs: Legs::Half, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::Up; 2], cap: Some((0, 1.0)), ..stand() },
+        5 => Pose { dy: -1, legs: Legs::Stretch, eyes: Eyes::Squeeze, mouth: Some(Mouth::Yawn), claws: [Claw::High; 2], cap: Some((-(into.round() as i32), 1.0 - into * 0.6)), ..stand() },
+        6 => Pose { cap: Some((-1, 0.4 - into * 0.4)), ..stand() },
+        7 | 9 => Pose { eyes: Eyes::Blink, ..stand() },
+        10 => Pose { eyes: Eyes::Open(-1, 0), ..stand() },
+        11 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
+        12 => Pose { mouth: Some(Mouth::Smile), ..stand() },
+        _ => stand(),
+    }
+}
+
+/// Acorda num susto (o Claude Code precisa de você): olhos arregalados, "!", um pulo e olha.
+fn startle(ms: f32) -> Pose {
+    let (step, into) = seg(ms, &STARTLE);
+    match step {
+        0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, cap: Some((-1, 1.0)), zzz: None, ..asleep(None) },
+        1 => {
+            let dy = -((into * std::f32::consts::PI).sin() * 3.0).round() as i32;
+            let cap = (into < 0.25).then_some((-1, 0.5 - into * 2.0));
+            Pose { dy, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), claws: [Claw::Up; 2], bang: true, cap, ..stand() }
+        }
+        2 => Pose { dy: 2, legs: Legs::Tuck, eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
+        3 => Pose { eyes: Eyes::Wide, bang: true, ..stand() },
+        4 => Pose { eyes: Eyes::Blink, ..stand() },
+        5 => Pose { eyes: Eyes::Open(1, 0), ..stand() },
+        _ => Pose { eyes: Eyes::Open(1, 1), ..stand() },
+    }
+}
+
+/// Treme de nervoso (perto do limite), suando.
+fn shake(t: f32, scene: &Scene) -> Pose {
+    let dx = if (t * 16.0) as i32 % 2 == 0 { 1 } else { -1 };
+    Pose { dx, eyes: Eyes::Squeeze, sweat: Some(t), ..still(Mood::Worried, scene) }
+}
+
+/// Digita: as teclas acendem e o código aparece na tela (um quarto a mais de letras que teclas).
+fn type_code(view: View, t: f32, secs: f32, scene: &Scene) -> Pose {
+    let keys = (secs * KEYS_PER_SEC).round().max(4.0) as i32;
+    let chars = (keys as f32 * 1.25) as i32;
+    let from = scene.code;
+    typing(view, t, keys, from, (from + chars).min(CODE_TOTAL))
+}
+
+/// Pensa: olha para cima, com os pontinhos aparecendo um a um.
+fn think(view: View, t: f32, scene: &Scene) -> Pose {
+    let mut pose = work_base(view, scene.code);
+    pose.eyes = Eyes::Open(1, -1);
+    pose.dots = ((t * 4.0) as u8).min(3);
+    pose
+}
+
+/// No limite: o susto, sai de lado e a plaquinha "VOLTO LOGO" sobe do chão; ele sorri e pega o
+/// livro.
+fn sign_up(view: View, ms: f32) -> Pose {
+    let (step, into) = seg(ms, &SIGN_UP);
+    match step {
+        0 => Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), bang: true, ..stand() },
+        1 => side_step(view, into, false),
+        2..=4 => {
+            let height = [3, 6, 9][step - 2];
+            let claws = if step < 4 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
+            at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, height, true)
+        }
+        5 => at_limit(Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() }, view, 11, true),
+        _ => at_limit(Pose { eyes: Eyes::Open(0, 0), book: Some((-2, 0)), claws: [Claw::Up; 2], ..stand() }, view, 11, true),
+    }
+}
+
+/// O limite reiniciou: a plaquinha desce e ele volta para o lugar, sorrindo.
+fn sign_down(view: View, ms: f32) -> Pose {
+    let (step, into) = seg(ms, &SIGN_DOWN);
+    match step {
+        0 => at_limit(Pose { eyes: Eyes::Wide, mouth: Some(Mouth::O), ..stand() }, view, 11, true),
+        1..=3 => {
+            let height = [9, 6, 3][step - 1];
+            let claws = if step < 3 { [Claw::Rest, Claw::Down] } else { [Claw::Rest; 2] };
+            at_limit(Pose { eyes: Eyes::Open(1, 1), claws, ..stand() }, view, height, true)
+        }
+        4 => side_step(view, into, true),
+        _ => Pose { eyes: Eyes::Happy, mouth: Some(Mouth::Smile), ..stand() },
+    }
+}
+
+/// Lendo ao lado da plaquinha, virando a página de vez em quando.
+fn read(view: View, t: f32) -> Pose {
+    let blinking = (0.3..0.33).contains(&t);
+    let pose = Pose { eyes: if blinking { Eyes::Blink } else { Eyes::Open(0, 1) }, book: Some((0, page_flip(t, 0.62))), ..reading() };
+    at_limit(pose, view, 11, true)
+}
+
+/// Ri do livro, sacudindo.
+fn laugh(view: View, ms: f32) -> Pose {
+    let dy = if (ms / 170.0) as i32 % 2 == 1 { -1 } else { 0 };
+    at_limit(Pose { eyes: Eyes::Happy, blush: Some(false), dy, ..reading() }, view, 11, true)
+}
+
+/// Cochila lendo e acorda num pulo.
+fn nod(view: View, ms: f32) -> Pose {
+    let (step, into) = seg(ms, &NOD);
+    let pose = match step {
+        0 => Pose { eyes: Eyes::Half, ..reading() },
+        // um cochilo curto: só o começo do ciclo dos "z" (o grande nem chega a subir)
+        1 => Pose { dy: 1, eyes: Eyes::Sleep, zzz: Some(0.1 + 0.5 * into), ..reading() },
+        _ => Pose { eyes: Eyes::Wide, ..reading() },
+    };
+    at_limit(pose, view, 11, true)
 }
 
 // ---------- o desenho ----------
@@ -1572,8 +1629,8 @@ pub fn flakes(secs: f32) -> impl Iterator<Item = (f32, f32, f32, f32)> {
 
 /// Os flocos que aparecem com ele em `p`: os que passam por trás dele (e do que ele segura) ficam
 /// escondidos, como se a neve caísse atrás.
-pub fn visible_flakes(p: &Pose, secs: f32) -> Vec<(f32, f32, f32, f32)> {
-    let body = cells(p);
+pub fn visible_flakes(pose: &Pose, secs: f32) -> Vec<(f32, f32, f32, f32)> {
+    let body = cells(pose);
     flakes(secs)
         .filter(|&(x, y, size, a)| {
             let (mx, my) = (x + size / 2.0, y + size / 2.0);
@@ -1584,23 +1641,61 @@ pub fn visible_flakes(p: &Pose, secs: f32) -> Vec<(f32, f32, f32, f32)> {
 
 /// A neve caindo em volta dele (centro da grade em (cx, cy), lugar de `unit` pontos), na camada
 /// animada do cartão: redesenhada a cada quadro, sem redesenhar o cartão.
-pub fn draw_snow(c: &mut Canvas, cx: f32, cy: f32, unit: f32, p: &Pose, secs: f32) {
+pub fn draw_snow(c: &mut Canvas, cx: f32, cy: f32, unit: f32, pose: &Pose, secs: f32) {
     let (x0, y0, u) = origin(c.s, cx, cy, unit);
-    for (x, y, size, a) in visible_flakes(p, secs) {
+    for (x, y, size, a) in visible_flakes(pose, secs) {
         let (ax, ay) = (x0 + x * u, y0 + y * u);
         c.fill_round_rect(ax, ay, ax + size * u, ay + size * u, size * u * 0.25, SNOW.alpha(a));
     }
 }
 
 /// Os retângulos do quadro, em quadradinhos (os adereços podem sair da grade: acima, em linhas
-/// negativas; à direita, o notebook de lado e a placa).
-pub fn cells(p: &Pose) -> Vec<Cell> {
-    let mut out: Vec<Cell> = Vec::new();
-    let (dx, dy) = (p.dx, p.dy);
-    let mut put = |x: i32, y: i32, w: i32, h: i32, c: Rgba, att: bool| {
-        let (x, y) = if att { (x + dx, y + dy) } else { (x, y) };
-        // emenda com o último retângulo, se continua a mesma linha na mesma cor
-        if let Some(last) = out.last_mut() {
+/// negativas; à direita, o notebook de lado e a placa). Cada parte desenha por cima das de antes,
+/// então a ordem importa (as garras por cima da caneca, os adereços por cima de tudo).
+pub fn cells(pose: &Pose) -> Vec<Cell> {
+    let mut grid = Grid { out: Vec::new(), dx: pose.dx, dy: pose.dy };
+    // ele sobe um quadradinho ao respirar (o alto do corpo e o que fica na cabeça)
+    let top = -(pose.breath as i32);
+    draw_floor(&mut grid, pose);
+    draw_body(&mut grid, pose, top);
+    draw_eyes(&mut grid, pose);
+    draw_mouth(&mut grid, pose);
+    draw_legs(&mut grid, pose);
+    draw_laptop_front(&mut grid, pose);
+    draw_laptop_side(&mut grid, pose);
+    draw_sign(&mut grid, pose);
+    draw_book(&mut grid, pose);
+    draw_pipe(&mut grid, pose);
+    draw_cup(&mut grid, pose);
+    draw_claws(&mut grid, pose);
+    draw_hat(&mut grid, pose, top);
+    draw_magnifier(&mut grid, pose);
+    draw_headphones(&mut grid, pose, top);
+    draw_notes(&mut grid, pose);
+    draw_caps(&mut grid, pose, top);
+    draw_zzz(&mut grid, pose);
+    draw_reactions(&mut grid, pose);
+    draw_hourglass(&mut grid, pose);
+    draw_binoculars(&mut grid, pose);
+    draw_clipboard(&mut grid, pose);
+    draw_helpers(&mut grid, pose);
+    grid.out
+}
+
+/// O quadro sendo montado: os retângulos e o deslocamento do corpo (dx, dy: o que é "preso ao
+/// corpo" anda junto quando ele pula ou se mexe).
+struct Grid {
+    out: Vec<Cell>,
+    dx: i32,
+    dy: i32,
+}
+
+impl Grid {
+    /// Um retângulo de w×h quadradinhos na cor `c`; `att`: preso ao corpo (anda com ele). Na
+    /// mesma linha e na mesma cor do último, emenda com ele (menos retângulos para desenhar).
+    fn put(&mut self, x: i32, y: i32, w: i32, h: i32, c: Rgba, att: bool) {
+        let (x, y) = if att { (x + self.dx, y + self.dy) } else { (x, y) };
+        if let Some(last) = self.out.last_mut() {
             if h == 1 && last.3 == 1 && last.1 == y && last.4 == c {
                 if last.0 + last.2 == x {
                     last.2 += w;
@@ -1613,164 +1708,198 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
                 }
             }
         }
-        out.push((x, y, w, h, c));
-    };
-    let top = -(p.breath as i32);
+        self.out.push((x, y, w, h, c));
+    }
 
+    /// Um desenho em texto com o canto de cima em (x, y) (ver `art`).
+    fn art(&mut self, rows: &[&str], x: i32, y: i32, color: impl Fn(u8) -> Option<Rgba>, mirror: bool, att: bool) {
+        art(&mut |x, y, w, h, c, att| self.put(x, y, w, h, c, att), rows, x, y, color, mirror, att);
+    }
+}
 
+/// A cor das garras no desenho em texto: luz, corpo e sombra.
+fn claw_color(ch: u8) -> Option<Rgba> {
+    match ch {
+        b'L' => Some(LIGHT),
+        b'B' => Some(BODY),
+        _ => Some(SHADE),
+    }
+}
+
+/// O chão: a pilha de papéis (a conversa enchendo) e as pegadas (por baixo dele).
+fn draw_floor(grid: &mut Grid, pose: &Pose) {
     // a pilha de papéis no chão à esquerda: uma folha (com a beirada) por vez, meio torta
-    for k in 0..p.pile.min(PILE_MAX) as i32 {
+    for k in 0..pose.pile.min(PILE_MAX) as i32 {
         let (x, y) = (-3 + (k % 2), 13 - 2 * k);
-        put(x, y, 4, 1, PAGE, false);
-        put(x, y + 1, 4, 1, PAGE_EDGE, false);
+        grid.put(x, y, 4, 1, PAGE, false);
+        grid.put(x, y + 1, 4, 1, PAGE_EDGE, false);
     }
 
     // as pegadas no chão (por baixo dele, que passa por cima), sem andar junto com ele
-    if let Some(prints) = p.prints {
+    if let Some(prints) = pose.prints {
         for &(x, y) in prints {
-            art(&mut put, &PRINT_ART, x, y - 1, one(PRINT), false, false);
+            grid.art(&PRINT_ART, x, y - 1, one(PRINT), false, false);
         }
     }
+}
 
+/// O corpo: luz em cima e à esquerda, sombra embaixo e à direita, o brilho e as bochechas.
+fn draw_body(grid: &mut Grid, pose: &Pose, top: i32) {
     // o corpo: luz em cima e à esquerda, sombra embaixo e à direita, cantos arredondados
-    put(5, top, 17, 1, LIGHT, true);
-    put(4, top + 1, 19, 10 - top, BODY, true);
-    put(22, top + 1, 1, 10 - top, SHADE, true);
-    put(5, 11, 17, 1, SHADE, true);
-    put(5, top + 1, 2, 1, LIGHT, true);
-    if p.glow {
-        put(5, 5, 17, 1, glow(), true);
+    grid.put(5, top, 17, 1, LIGHT, true);
+    grid.put(4, top + 1, 19, 10 - top, BODY, true);
+    grid.put(22, top + 1, 1, 10 - top, SHADE, true);
+    grid.put(5, 11, 17, 1, SHADE, true);
+    grid.put(5, top + 1, 2, 1, LIGHT, true);
+    if pose.glow {
+        grid.put(5, 5, 17, 1, glow(), true);
     }
-    if let Some(hot) = p.blush {
-        put(5, 6, 2, 1, blush(hot), true);
-        put(20, 6, 2, 1, blush(hot), true);
+    if let Some(hot) = pose.blush {
+        grid.put(5, 6, 2, 1, blush(hot), true);
+        grid.put(20, 6, 2, 1, blush(hot), true);
     }
+}
 
+/// Os olhos, em cada expressão (abertos olhando para um lado, piscando, dormindo, felizes...).
+fn draw_eyes(grid: &mut Grid, pose: &Pose) {
     // os olhos (o esquerdo nas colunas 7 e 8, o direito em 18 e 19)
     const EX: [i32; 2] = [7, 18];
-    match p.eyes {
+    match pose.eyes {
         Eyes::Open(lx, ly) => {
             let (lx, ly) = (lx.clamp(-1, 1), ly.clamp(-1, 1));
             for ex in EX {
-                put(ex + lx, 3 + ly, 2, 3, EYE, true);
-                put(ex + 1 + lx, 3 + ly, 1, 1, SHINE, true);
+                grid.put(ex + lx, 3 + ly, 2, 3, EYE, true);
+                grid.put(ex + 1 + lx, 3 + ly, 1, 1, SHINE, true);
             }
         }
         Eyes::Blink => {
             for ex in EX {
-                put(ex, 4, 2, 1, EYE, true);
+                grid.put(ex, 4, 2, 1, EYE, true);
             }
         }
         Eyes::Sleep => {
             for ex in EX {
-                put(ex - 1, 4, 1, 1, EYE, true);
-                put(ex + 2, 4, 1, 1, EYE, true);
-                put(ex, 5, 2, 1, EYE, true);
+                grid.put(ex - 1, 4, 1, 1, EYE, true);
+                grid.put(ex + 2, 4, 1, 1, EYE, true);
+                grid.put(ex, 5, 2, 1, EYE, true);
             }
         }
         Eyes::Happy => {
             for ex in EX {
-                put(ex - 1, 4, 1, 1, EYE, true);
-                put(ex + 2, 4, 1, 1, EYE, true);
-                put(ex, 3, 2, 1, EYE, true);
+                grid.put(ex - 1, 4, 1, 1, EYE, true);
+                grid.put(ex + 2, 4, 1, 1, EYE, true);
+                grid.put(ex, 3, 2, 1, EYE, true);
             }
         }
         Eyes::Half => {
             for ex in EX {
-                put(ex, 4, 2, 2, EYE, true);
-                put(ex - 1, 3, 4, 1, SHADE, true);
+                grid.put(ex, 4, 2, 2, EYE, true);
+                grid.put(ex - 1, 3, 4, 1, SHADE, true);
             }
         }
         Eyes::Peek => {
-            put(7, 4, 2, 2, EYE, true);
-            put(6, 3, 4, 1, SHADE, true);
-            put(17, 4, 1, 1, EYE, true);
-            put(20, 4, 1, 1, EYE, true);
-            put(18, 5, 2, 1, EYE, true);
+            grid.put(7, 4, 2, 2, EYE, true);
+            grid.put(6, 3, 4, 1, SHADE, true);
+            grid.put(17, 4, 1, 1, EYE, true);
+            grid.put(20, 4, 1, 1, EYE, true);
+            grid.put(18, 5, 2, 1, EYE, true);
         }
         Eyes::Squeeze => {
             for (x, y) in [(6, 2), (7, 3), (8, 4), (7, 5), (6, 6), (20, 2), (19, 3), (18, 4), (19, 5), (20, 6)] {
-                put(x, y, 1, 1, EYE, true);
+                grid.put(x, y, 1, 1, EYE, true);
             }
         }
         Eyes::Wide => {
             for ex in EX {
-                put(ex, 2, 2, 4, EYE, true);
-                put(ex + 1, 2, 1, 1, SHINE, true);
+                grid.put(ex, 2, 2, 4, EYE, true);
+                grid.put(ex + 1, 2, 1, 1, SHINE, true);
             }
         }
         Eyes::Sherlock(lx, ly) => {
             let (lx, ly) = (lx.clamp(-1, 1), ly.clamp(-1, 1));
-            put(7 + lx, 3 + ly, 2, 3, EYE, true);
-            put(8 + lx, 3 + ly, 1, 1, SHINE, true);
-            put(17 + lx, 4 + ly, 3, 1, EYE, true);
+            grid.put(7 + lx, 3 + ly, 2, 3, EYE, true);
+            grid.put(8 + lx, 3 + ly, 1, 1, SHINE, true);
+            grid.put(17 + lx, 4 + ly, 3, 1, EYE, true);
         }
         Eyes::Chill => {
-            put(6, 4, 3, 1, EYE, true);
-            put(18, 4, 3, 1, EYE, true);
+            grid.put(6, 4, 3, 1, EYE, true);
+            grid.put(18, 4, 3, 1, EYE, true);
             let cheek = Rgba::rgb(255, 128, 138).alpha(0.45);
-            put(7, 5, 2, 1, cheek, true);
-            put(18, 5, 2, 1, cheek, true);
+            grid.put(7, 5, 2, 1, cheek, true);
+            grid.put(18, 5, 2, 1, cheek, true);
         }
     }
+}
 
+/// A boca (só em algumas expressões: parado, ele é como o logo, sem boca).
+fn draw_mouth(grid: &mut Grid, pose: &Pose) {
     // a boca (só em algumas expressões: parado, ele é como o logo, sem boca)
-    match p.mouth {
+    match pose.mouth {
         Some(Mouth::Yawn) => {
-            put(12, 7, 3, 1, MOUTH, true);
-            put(11, 8, 5, 2, MOUTH, true);
-            put(12, 9, 3, 2, TONGUE, true);
+            grid.put(12, 7, 3, 1, MOUTH, true);
+            grid.put(11, 8, 5, 2, MOUTH, true);
+            grid.put(12, 9, 3, 2, TONGUE, true);
         }
-        Some(Mouth::O) => put(12, 8, 3, 2, MOUTH, true),
-        Some(Mouth::Tiny) => put(13, 8, 1, 1, MOUTH, true),
+        Some(Mouth::O) => grid.put(12, 8, 3, 2, MOUTH, true),
+        Some(Mouth::Tiny) => grid.put(13, 8, 1, 1, MOUTH, true),
         Some(Mouth::Smile) => {
-            put(11, 7, 1, 1, EYE, true);
-            put(15, 7, 1, 1, EYE, true);
-            put(12, 8, 3, 1, EYE, true);
+            grid.put(11, 7, 1, 1, EYE, true);
+            grid.put(15, 7, 1, 1, EYE, true);
+            grid.put(12, 8, 3, 1, EYE, true);
         }
         Some(Mouth::Grin) => {
-            put(11, 7, 5, 1, MOUTH, true);
-            put(12, 8, 3, 1, TONGUE, true);
+            grid.put(11, 7, 5, 1, MOUTH, true);
+            grid.put(12, 8, 3, 1, TONGUE, true);
         }
         Some(Mouth::Wavy) => {
             for (x, y) in [(10, 8), (11, 7), (12, 8), (13, 7), (14, 8), (15, 7), (16, 8)] {
-                put(x, y, 1, 1, EYE, true);
+                grid.put(x, y, 1, 1, EYE, true);
             }
         }
         None => {}
     }
+}
 
+/// As quatro patas (cada uma na altura do passo de agora).
+fn draw_legs(grid: &mut Grid, pose: &Pose) {
     // as patas: duas colunas cada, a da direita na sombra
     for (i, x) in [6, 9, 16, 19].into_iter().enumerate() {
-        let h = p.legs.heights()[i];
-        put(x, 12, 1, h, BODY, true);
-        put(x + 1, 12, 1, h, SHADE, true);
+        let h = pose.legs.heights()[i];
+        grid.put(x, 12, 1, h, BODY, true);
+        grid.put(x + 1, 12, 1, h, SHADE, true);
     }
+}
 
+/// O notebook de frente, no colo (no pequeno).
+fn draw_laptop_front(grid: &mut Grid, pose: &Pose) {
     // o notebook de frente, no colo: a tampa por trás (com o símbolo), o teclado e a base
-    if let Some(Front { open, key }) = p.front {
+    if let Some(Front { open, key }) = pose.front {
         if open {
-            put(6, 6, 15, 7, ALU, true);
-            put(6, 6, 15, 1, ALU_LIGHT, true);
-            put(20, 7, 1, 6, ALU_DARK, true);
-            art(&mut put, &LOGO_MARK, 11, 7, one(LOGO), false, true);
-            put(4, 13, 19, 1, KEYS, true);
+            grid.put(6, 6, 15, 7, ALU, true);
+            grid.put(6, 6, 15, 1, ALU_LIGHT, true);
+            grid.put(20, 7, 1, 6, ALU_DARK, true);
+            grid.art(&LOGO_MARK, 11, 7, one(LOGO), false, true);
+            grid.put(4, 13, 19, 1, KEYS, true);
             if let Some(k) = key {
-                put(k, 13, 1, 1, KEY_LIT, true);
+                grid.put(k, 13, 1, 1, KEY_LIT, true);
             }
         } else {
-            put(4, 13, 19, 1, ALU, true);
+            grid.put(4, 13, 19, 1, ALU, true);
         }
-        put(4, 14, 19, 1, ALU_DARK, true);
+        grid.put(4, 14, 19, 1, ALU_DARK, true);
     }
+}
+
+/// O notebook de lado, no chão à direita, com o código aparecendo na tela (no médio e no grande).
+fn draw_laptop_side(grid: &mut Grid, pose: &Pose) {
     // o notebook de lado, no chão à direita (não anda com ele): a moldura, a tela com o código
     // (ou o ✓), o teclado e a base
-    if let Some(s) = p.side {
+    if let Some(s) = pose.side {
         if s.open {
-            put(27, 2, 10, 11, BEZEL, false);
-            put(28, 3, 8, 9, SCREEN, false);
+            grid.put(27, 2, 10, 11, BEZEL, false);
+            grid.put(28, 3, 8, 9, SCREEN, false);
             if s.done {
-                art(&mut put, &CHECK_MARK, 28, 4, one(CHECK), false, false);
+                grid.art(&CHECK_MARK, 28, 4, one(CHECK), false, false);
             } else {
                 let mut shown = Vec::new();
                 let mut left = s.code;
@@ -1783,41 +1912,48 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
                 }
                 let view = &shown[shown.len().saturating_sub(4)..];
                 for (i, &(ind, n, col)) in view.iter().enumerate() {
-                    put(29 + ind, 4 + 2 * i as i32, n, 1, col, false);
+                    grid.put(29 + ind, 4 + 2 * i as i32, n, 1, col, false);
                 }
                 let cur = view.last().map_or((29, 4), |&(ind, n, _)| (29 + ind + n, 4 + 2 * (view.len() as i32 - 1)));
-                put(cur.0.min(35), cur.1, 1, 1, FG.alpha(0.9), false);
+                grid.put(cur.0.min(35), cur.1, 1, 1, FG.alpha(0.9), false);
             }
-            put(24, 13, 13, 1, KEYS, false);
+            grid.put(24, 13, 13, 1, KEYS, false);
             if let Some(k) = s.key {
-                put(k, 13, 1, 1, KEY_LIT, false);
+                grid.put(k, 13, 1, 1, KEY_LIT, false);
             }
         } else {
-            put(24, 13, 13, 1, ALU, false);
+            grid.put(24, 13, 13, 1, ALU, false);
         }
-        put(24, 14, 13, 1, ALU_DARK, false);
+        grid.put(24, 14, 13, 1, ALU_DARK, false);
     }
+}
 
+/// A plaquinha "VOLTO LOGO" (no limite do uso).
+fn draw_sign(grid: &mut Grid, pose: &Pose) {
     // a plaquinha "VOLTO LOGO" do lado dele (não anda com ele): subindo do chão, só a madeira
-    if let Some(Sign { h, x }) = p.sign {
+    if let Some(Sign { h, x }) = pose.sign {
         let y0 = 17 - h;
-        put(x, y0, 21, h, WOOD, false);
-        put(x, y0, 21, 1, WOOD_DARK, false);
-        put(x, 16, 21, 1, WOOD_DARK, false);
-        put(x, y0, 1, h, WOOD_DARK, false);
-        put(x + 20, y0, 1, h, WOOD_DARK, false);
+        grid.put(x, y0, 21, h, WOOD, false);
+        grid.put(x, y0, 21, 1, WOOD_DARK, false);
+        grid.put(x, 16, 21, 1, WOOD_DARK, false);
+        grid.put(x, y0, 1, h, WOOD_DARK, false);
+        grid.put(x + 20, y0, 1, h, WOOD_DARK, false);
         if h >= 11 {
             for (word, wx, wy) in [("VOLTO", x + 1, y0 + 1), ("LOGO", x + 3, y0 + 6)] {
                 for (i, ch) in word.chars().enumerate() {
-                    art(&mut put, &sign_letter(ch), wx + 4 * i as i32, wy, one(SIGN_TEXT), false, false);
+                    grid.art(&sign_letter(ch), wx + 4 * i as i32, wy, one(SIGN_TEXT), false, false);
                 }
             }
-            put(x + 3, 17, 2, 1, WOOD_DARK, false);
-            put(x + 16, 17, 2, 1, WOOD_DARK, false);
+            grid.put(x + 3, 17, 2, 1, WOOD_DARK, false);
+            grid.put(x + 16, 17, 2, 1, WOOD_DARK, false);
         }
     }
+}
+
+/// O livro aberto (lendo, esperando o limite reiniciar).
+fn draw_book(grid: &mut Grid, pose: &Pose) {
     // o livro aberto, seguro na frente; a página virando passa por cima
-    if let Some((bdy, flip)) = p.book {
+    if let Some((bdy, flip)) = pose.book {
         let by = 5 + bdy;
         let color = |ch: u8| match ch {
             b'P' => Some(PAGE),
@@ -1825,36 +1961,44 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             b'g' => Some(GOLD),
             _ => Some(COVER_DARK),
         };
-        art(&mut put, &READ_ART, 8, by, color, false, true);
+        grid.art(&READ_ART, 8, by, color, false, true);
         match flip {
-            1 => put(14, by - 1, 3, 1, PAGE, true),
-            2 => put(13, by - 3, 1, 3, PAGE, true),
-            3 => put(10, by - 1, 3, 1, PAGE, true),
+            1 => grid.put(14, by - 1, 3, 1, PAGE, true),
+            2 => grid.put(13, by - 3, 1, 3, PAGE, true),
+            3 => grid.put(10, by - 1, 3, 1, PAGE, true),
             _ => {}
         }
     }
+}
+
+/// O cachimbo do Sherlock e a fumacinha.
+fn draw_pipe(grid: &mut Grid, pose: &Pose) {
     // o cachimbo e a fumacinha subindo para a esquerda
-    if let Some(smoke) = p.pipe {
+    if let Some(smoke) = pose.pipe {
         let color = |ch: u8| match ch {
             b'o' => Some(PIPE_RIM),
             b'E' => Some(EMBER),
             b'P' => Some(PIPE_WOOD),
             _ => Some(PIPE_STEM),
         };
-        art(&mut put, &PIPE_ART, 7, 7, color, false, true);
+        grid.art(&PIPE_ART, 7, 7, color, false, true);
         if let Some(s) = smoke {
             for k in 0..3 {
                 let a = (s + k as f32 / 3.0).fract();
                 let al = steps((a / 0.2).min((1.0 - a) / 0.4)) * 0.8;
                 if al > 0.0 {
                     let sz = if a > 0.5 { 2 } else { 1 };
-                    put(7 - (5.0 * a).round() as i32, 5 - (6.0 * a).round() as i32, sz, sz, SMOKE.alpha(al), true);
+                    grid.put(7 - (5.0 * a).round() as i32, 5 - (6.0 * a).round() as i32, sz, sz, SMOKE.alpha(al), true);
                 }
             }
         }
     }
+}
+
+/// A caneca de café e o vapor (antes das garras: a garra fica por cima da asa).
+fn draw_cup(grid: &mut Grid, pose: &Pose) {
     // a caneca (antes das garras: a garra fica por cima da asa, segurando) e o vapor
-    if let Some((at, steam)) = p.cup {
+    if let Some((at, steam)) = pose.cup {
         let sip = at == Cup::Sip;
         let (cx, cy) = match at {
             Cup::Side => (-2, 4),
@@ -1868,33 +2012,33 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             b'S' => Some(CUP_SHADE),
             _ => Some(CUP_HANDLE),
         };
-        art(&mut put, if sip { &CUP_SIP } else { &CUP_ART }, cx, cy, color, false, true);
+        grid.art(if sip { &CUP_SIP } else { &CUP_ART }, cx, cy, color, false, true);
         if let Some(s) = steam {
             let mid = cx + if sip { 4 } else { 2 };
             for k in 0..3 {
                 let a = (s + k as f32 / 3.0).fract();
                 let al = steps((a / 0.2).min((1.0 - a) / 0.4)) * 0.9;
                 if al > 0.0 {
-                    put(mid + (a * 6.0 + k as f32 * 2.0).sin().round() as i32, cy - 1 - (4.0 * a).round() as i32, 1, 1, STEAM.alpha(al), true);
+                    grid.put(mid + (a * 6.0 + k as f32 * 2.0).sin().round() as i32, cy - 1 - (4.0 * a).round() as i32, 1, 1, STEAM.alpha(al), true);
                 }
             }
         }
     }
+}
 
+/// As duas garras, em cada posição.
+fn draw_claws(grid: &mut Grid, pose: &Pose) {
     // as garras
-    let claw_color = |ch: u8| match ch {
-        b'L' => Some(LIGHT),
-        b'B' => Some(BODY),
-        _ => Some(SHADE),
-    };
-    for (side, claw) in p.claws.iter().enumerate() {
+    for (side, claw) in pose.claws.iter().enumerate() {
         if let Some((rows, x, y)) = claw.art() {
-            art(&mut put, rows, x, y, claw_color, side == 1, true);
+            grid.art(rows, x, y, claw_color, side == 1, true);
         }
     }
+}
 
-    // ---- adereços ----
-    if let Some(hdy) = p.hat {
+/// O chapéu de detetive.
+fn draw_hat(grid: &mut Grid, pose: &Pose, top: i32) {
+    if let Some(hdy) = pose.hat {
         let color = |ch: u8| match ch {
             b'o' => Some(HAT_LINE),
             b'h' => Some(HAT),
@@ -1905,9 +2049,13 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             b'F' => Some(HAT_FLAP),
             _ => Some(HAT_PEAK),
         };
-        art(&mut put, &HAT_ART, 2, -6 + top + hdy, color, false, true);
+        grid.art(&HAT_ART, 2, -6 + top + hdy, color, false, true);
     }
-    if let Some((mx, my, lens)) = p.mag {
+}
+
+/// A lupa do Sherlock, com o olho ou a pegada aumentados dentro.
+fn draw_magnifier(grid: &mut Grid, pose: &Pose) {
+    if let Some((mx, my, lens)) = pose.mag {
         // a lupa, segura pela garra direita na ponta do cabo; dentro dela, o olho ou a pegada
         // aumentados (o brilho do vidro fica por cima)
         let color = |ch: u8| match ch {
@@ -1916,32 +2064,40 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             b'W' => Some(GLINT),
             _ => Some(HANDLE),
         };
-        art(&mut put, &MAG_ART, mx, my, color, false, true);
+        grid.art(&MAG_ART, mx, my, color, false, true);
         match lens {
             Lens::Glass => {}
             Lens::Eye(look) => {
                 // o olho direito por trás da lente: o dobro de alto, com o brilho
                 let ex = mx + 4 + look.clamp(-1, 1);
-                put(ex, my + 1, 2, 5, EYE, true);
-                put(ex + 1, my + 1, 1, 2, SHINE, true);
+                grid.put(ex, my + 1, 2, 5, EYE, true);
+                grid.put(ex + 1, my + 1, 1, 2, SHINE, true);
             }
             Lens::Print => {
-                art(&mut put, &[".##.", "#..#", "#.##", ".#.."], mx + 3, my + 1, one(PRINT), false, true);
+                grid.art(&[".##.", "#..#", "#.##", ".#.."], mx + 3, my + 1, one(PRINT), false, true);
             }
         }
-        art(&mut put, &["W", ".W"], mx + 6, my + 1, one(GLINT.alpha(0.9)), false, true);
-        art(&mut put, &["LBB", "BBK"], mx, my + 9, claw_color, false, true);
+        grid.art(&["W", ".W"], mx + 6, my + 1, one(GLINT.alpha(0.9)), false, true);
+        grid.art(&["LBB", "BBK"], mx, my + 9, claw_color, false, true);
     }
-    if let Some(pdy) = p.phones {
+}
+
+/// O fone de ouvido (ouvindo música).
+fn draw_headphones(grid: &mut Grid, pose: &Pose, top: i32) {
+    if let Some(pdy) = pose.phones {
         let color = |ch: u8| match ch {
             b'n' => Some(PHONE_LINE),
             b'b' => Some(PHONE),
             b'B' => Some(PHONE_LIGHT),
             _ => Some(PHONE_PAD),
         };
-        art(&mut put, &PHONES_ART, 1, -3 + top + pdy, color, false, true);
+        grid.art(&PHONES_ART, 1, -3 + top + pdy, color, false, true);
     }
-    if let Some(n) = p.notes {
+}
+
+/// As notas musicais saindo do fone.
+fn draw_notes(grid: &mut Grid, pose: &Pose) {
+    if let Some(n) = pose.notes {
         // notas saindo do fone da direita, subindo em zigue-zague e sumindo
         for k in 0..3 {
             let a = (n + k as f32 / 3.0).fract();
@@ -1952,9 +2108,13 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             }
             let x = 24 + (2.0 * a).round() as i32 + ((a * 6.0) as i32 % 2);
             let yb = 2 - (5.0 * a).round() as i32;
-            art(&mut put, glyph, x, yb - glyph.len() as i32 + 1, one(NOTE.alpha(al)), false, true);
+            grid.art(glyph, x, yb - glyph.len() as i32 + 1, one(NOTE.alpha(al)), false, true);
         }
     }
+}
+
+/// O gorro de Papai Noel (no Natal) e o de dormir.
+fn draw_caps(grid: &mut Grid, pose: &Pose, top: i32) {
     // o gorro de Papai Noel (no Natal, quando não há outro chapéu; dormindo, é ele o gorro de
     // dormir, e sai do mesmo jeito ao acordar)
     let santa = |a: f32| {
@@ -1966,30 +2126,39 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             _ => Some(FUR.alpha(a)),
         }
     };
-    if p.xmas && p.hat.is_none() && p.cap.is_none() && p.phones.is_none() {
-        art(&mut put, &SANTA_ART, 3, -3 + top, santa(1.0), false, true);
+    if pose.xmas && pose.hat.is_none() && pose.cap.is_none() && pose.phones.is_none() {
+        grid.art(&SANTA_ART, 3, -3 + top, santa(1.0), false, true);
     }
-    if let Some((cdy, a)) = p.cap {
-        if a > 0.0 && p.xmas {
-            art(&mut put, &SANTA_ART, 3, -3 + top + cdy, santa(a), false, true);
+    if let Some((cdy, a)) = pose.cap {
+        if a > 0.0 && pose.xmas {
+            grid.art(&SANTA_ART, 3, -3 + top + cdy, santa(a), false, true);
         } else if a > 0.0 {
             let color = move |ch: u8| match ch {
                 b'b' => Some(CAP.alpha(a)),
                 b'l' => Some(CAP_LIGHT.alpha(a)),
                 _ => Some(CAP_WHITE.alpha(a)),
             };
-            art(&mut put, &CAP_ART, 5, -4 + top + cdy, color, true, true);
+            grid.art(&CAP_ART, 5, -4 + top + cdy, color, true, true);
         }
     }
-    if let Some(z) = p.zzz {
+}
+
+/// Os "z" subindo, dormindo.
+fn draw_zzz(grid: &mut Grid, pose: &Pose) {
+    if let Some(z) = pose.zzz {
         for (glyph, x, y, born, dies) in zs_at(z) {
-            art(&mut put, glyph, x + p.zzz_x, y, one(FG.alpha(steps_alpha(z, born, dies))), false, true);
+            grid.art(glyph, x + pose.zzz_x, y, one(FG.alpha(steps_alpha(z, born, dies))), false, true);
         }
     }
-    if p.bang {
-        art(&mut put, &BANG_MARK, 24, -5, one(BANG), false, false);
+}
+
+/// As reações em volta dele: o "!" (precisa de você), o suor, o coração, o confete, o ✓, a
+/// lâmpada da ideia, os pontinhos pensando e o ✗ do comando que falhou.
+fn draw_reactions(grid: &mut Grid, pose: &Pose) {
+    if pose.bang {
+        grid.art(&BANG_MARK, 24, -5, one(BANG), false, false);
     }
-    if let Some(s) = p.sweat {
+    if let Some(s) = pose.sweat {
         // duas gotas escorrendo, uma de cada lado
         for (ph, mirror) in [(0.0, false), (0.5, true)] {
             let t = (s + ph).fract();
@@ -1999,18 +2168,18 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
                 continue;
             }
             let color = move |ch: u8| if ch == b'w' { Some(SHINE.alpha(a)) } else { Some(SWEAT.alpha(a)) };
-            art(&mut put, &[".s", "ss", "sw"], 23, y, color, mirror, true);
+            grid.art(&[".s", "ss", "sw"], 23, y, color, mirror, true);
         }
     }
-    if let Some(u) = p.heart {
+    if let Some(u) = pose.heart {
         let glyph: &[&str] = if u < 0.25 { &HEART_S } else { &HEART_L };
         let yb = -1 - (2.0 * u).round() as i32;
         let a = steps((1.0 - u) / 0.3);
         if a > 0.0 {
-            art(&mut put, glyph, 22, yb - glyph.len() as i32 + 1, one(HEART.alpha(a)), false, true);
+            grid.art(glyph, 22, yb - glyph.len() as i32 + 1, one(HEART.alpha(a)), false, true);
         }
     }
-    if let Some(u) = p.confetti {
+    if let Some(u) = pose.confetti {
         for i in 0..16 {
             let x0 = (i * 11 + 3) % 26;
             let y0 = -6 + (i * 7) % 4;
@@ -2021,71 +2190,83 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             }
             let x = x0 + ((u * 7.0 + i as f32).sin() * 1.2).round() as i32;
             let tall = ((u * 10.0) as i32 + i) % 2 == 0;
-            put(x, y, 1, if tall { 2 } else { 1 }, CODE[i as usize % 5], false);
+            grid.put(x, y, 1, if tall { 2 } else { 1 }, CODE[i as usize % 5], false);
         }
     }
-    if p.check {
-        art(&mut put, &CHECK_MARK, if p.hat.is_some() { 24 } else { 21 }, -5, one(CHECK), false, true);
+    if pose.check {
+        grid.art(&CHECK_MARK, if pose.hat.is_some() { 24 } else { 21 }, -5, one(CHECK), false, true);
     }
-    if let Some((lit, rays)) = p.bulb {
-        art(&mut put, &BULB_GLASS, 23, -6, one(if lit { BULB } else { BULB_OFF }), false, true);
-        art(&mut put, &BULB_BASE, 23, -2, one(BULB_OFF), false, true);
+    if let Some((lit, rays)) = pose.bulb {
+        grid.art(&BULB_GLASS, 23, -6, one(if lit { BULB } else { BULB_OFF }), false, true);
+        grid.art(&BULB_BASE, 23, -2, one(BULB_OFF), false, true);
         if rays {
             for (x, y) in [(21, -5), (29, -5), (22, -7), (28, -7)] {
-                put(x, y, 1, 1, BULB.alpha(0.85), true);
+                grid.put(x, y, 1, 1, BULB.alpha(0.85), true);
             }
         }
     }
-    for &(x, y, s) in DOTS.iter().take(p.dots as usize) {
-        put(x, y, s, s, FG, true);
+    for &(x, y, s) in DOTS.iter().take(pose.dots as usize) {
+        grid.put(x, y, s, s, FG, true);
     }
-    if p.cross {
-        art(&mut put, &CROSS_MARK, 23, -5, one(CROSS), false, true);
+    if pose.cross {
+        grid.art(&CROSS_MARK, 23, -5, one(CROSS), false, true);
     }
-    if let Some(fell) = p.hourglass {
+}
+
+/// A ampulheta na garra (um comando demorado), com a areia caindo.
+fn draw_hourglass(grid: &mut Grid, pose: &Pose) {
+    if let Some(fell) = pose.hourglass {
         // a ampulheta na garra da esquerda: a areia de cima vai para baixo, um grão caindo
         let (hx, hy) = (-2, 0);
-        put(hx, hy, 5, 1, BOARD, true);
-        put(hx, hy + 6, 5, 1, BOARD, true);
-        put(hx + 1, hy + 1, 3, 2, glass(), true);
-        put(hx + 2, hy + 3, 1, 1, glass(), true);
-        put(hx + 1, hy + 4, 3, 2, glass(), true);
+        grid.put(hx, hy, 5, 1, BOARD, true);
+        grid.put(hx, hy + 6, 5, 1, BOARD, true);
+        grid.put(hx + 1, hy + 1, 3, 2, glass(), true);
+        grid.put(hx + 2, hy + 3, 1, 1, glass(), true);
+        grid.put(hx + 1, hy + 4, 3, 2, glass(), true);
         let top_sand = (3.0 * (1.0 - fell)).round() as i32;
         let bottom_sand = 3 - top_sand;
         if top_sand >= 1 {
-            put(hx + 1, hy + 2, top_sand.min(3), 1, SAND, true);
+            grid.put(hx + 1, hy + 2, top_sand.min(3), 1, SAND, true);
         }
         if top_sand >= 3 {
-            put(hx + 2, hy + 1, 1, 1, SAND, true);
+            grid.put(hx + 2, hy + 1, 1, 1, SAND, true);
         }
         if bottom_sand >= 1 {
-            put(hx + 1, hy + 5, bottom_sand.min(3), 1, SAND, true);
+            grid.put(hx + 1, hy + 5, bottom_sand.min(3), 1, SAND, true);
         }
         if bottom_sand >= 3 {
-            put(hx + 2, hy + 4, 1, 1, SAND, true);
+            grid.put(hx + 2, hy + 4, 1, 1, SAND, true);
         }
         if fell < 0.98 {
-            put(hx + 2, hy + 3, 1, 1, SAND, true);
+            grid.put(hx + 2, hy + 3, 1, 1, SAND, true);
         }
     }
-    if let Some(pan) = p.binoculars {
+}
+
+/// O binóculo (pesquisando na web).
+fn draw_binoculars(grid: &mut Grid, pose: &Pose) {
+    if let Some(pan) = pose.binoculars {
         let color = |ch: u8| match ch {
             b'K' => Some(LENS),
             b'W' => Some(GLINT),
             _ => Some(glass()),
         };
-        art(&mut put, &BINOC_ART, 5 + pan, 2, color, false, true);
+        grid.art(&BINOC_ART, 5 + pan, 2, color, false, true);
     }
-    if let Some(written) = p.clipboard {
+}
+
+/// A prancheta e o lápis (planejando), com as linhas aparecendo.
+fn draw_clipboard(grid: &mut Grid, pose: &Pose) {
+    if let Some(written) = pose.clipboard {
         // a prancheta na frente, com o papel; as linhas aparecem enquanto ele escreve
-        put(7, 5, 8, 9, BOARD, true);
-        put(9, 4, 4, 1, CLIP, true);
-        put(8, 6, 6, 7, PAGE, true);
+        grid.put(7, 5, 8, 9, BOARD, true);
+        grid.put(9, 4, 4, 1, CLIP, true);
+        grid.put(8, 6, 6, 7, PAGE, true);
         let mut left = written;
         for row in 0..3 {
             let n = left.clamp(0, 5);
             if n > 0 {
-                put(8, 7 + 2 * row, n, 1, CODE[(row as usize + 1) % 5], true);
+                grid.put(8, 7 + 2 * row, n, 1, CODE[(row as usize + 1) % 5], true);
             }
             left -= 5;
         }
@@ -2093,13 +2274,17 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
         let row = (written.clamp(0, 14) / 5).min(2);
         let col = 8 + (written - row * 5).clamp(0, 5);
         let (px, py) = (col, 6 + 2 * row);
-        put(px, py, 1, 1, EYE, true);
-        put(px + 1, py - 1, 1, 1, PENCIL, true);
-        put(px + 2, py - 2, 1, 1, PENCIL, true);
-        put(px + 3, py - 3, 1, 1, ERASER, true);
-        art(&mut put, &["LBB", "BBK"], px + 3, py - 2, claw_color, false, true);
+        grid.put(px, py, 1, 1, EYE, true);
+        grid.put(px + 1, py - 1, 1, 1, PENCIL, true);
+        grid.put(px + 2, py - 2, 1, 1, PENCIL, true);
+        grid.put(px + 3, py - 3, 1, 1, ERASER, true);
+        grid.art(&["LBB", "BBK"], px + 3, py - 2, claw_color, false, true);
     }
-    if let Some((n, spots)) = p.helpers {
+}
+
+/// Os ajudantes pequenininhos (os subagentes).
+fn draw_helpers(grid: &mut Grid, pose: &Pose) {
+    if let Some((n, spots)) = pose.helpers {
         // os ajudantes, mexendo quando ele mexe (cada um no seu tempo)
         let color = |ch: u8| match ch {
             b'L' => Some(LIGHT),
@@ -2108,11 +2293,10 @@ pub fn cells(p: &Pose) -> Vec<Cell> {
             _ => Some(BODY),
         };
         for (k, &(x, y)) in spots.iter().take(n as usize).enumerate() {
-            let bob = p.ms.map_or(0, |ms| ((ms / 220.0) as i32 + k as i32) % 2);
-            art(&mut put, &HELPER_ART, x, y - bob, color, false, false);
+            let bob = pose.ms.map_or(0, |ms| ((ms / 220.0) as i32 + k as i32) % 2);
+            grid.art(&HELPER_ART, x, y - bob, color, false, false);
         }
     }
-    out
 }
 
 /// A opacidade de um "z" nascido em `born` e que some em `dies` (frações do ciclo `z`).
@@ -2170,9 +2354,9 @@ pub fn origin(s: f32, cx: f32, cy: f32, unit: f32) -> (f32, f32, f32) {
 
 /// Desenha o Clawd com o centro da grade em (cx, cy), num lugar de `unit` pontos. Devolve a
 /// largura da grade.
-pub fn draw(c: &mut Canvas, cx: f32, cy: f32, unit: f32, p: &Pose) -> f32 {
+pub fn draw(c: &mut Canvas, cx: f32, cy: f32, unit: f32, pose: &Pose) -> f32 {
     let (x0, y0, u) = origin(c.s, cx, cy, unit);
-    for (x, y, cw, ch, col) in cells(p) {
+    for (x, y, cw, ch, col) in cells(pose) {
         let (ax, ay) = (x0 + x as f32 * u, y0 + y as f32 * u);
         c.fill_round_rect(ax, ay, ax + cw as f32 * u, ay + ch as f32 * u, 0.0, col);
     }

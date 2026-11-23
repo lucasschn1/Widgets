@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::{draw_buttons, hit, Clock, OK, OPEN};
-use crate::config::Get;
+use crate::data::config::Get;
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{Rgba, FG, MUTED, WHITE};
+use crate::ui::theme::{Rgba, FG, MUTED, WHITE};
 use crate::widgets::island_ui as iu;
 use crate::widgets::{alert_hash, on_island, Ctx, Env, IslandForm, IslandItem, Kind, Mode, Rect4, Request};
 
@@ -23,10 +23,26 @@ const DOWN: Rgba = Rgba::rgb(255, 92, 80);
 const REARM: f64 = 0.7;
 /// pontos do gráfico do dia (de 5 em 5 minutos: um dia inteiro)
 const MAX_SAMPLES: usize = 300;
+/// de quanto em quanto tempo ver se é hora de buscar (e, buscando, se a resposta chegou)
+const CHECK_EVERY: Duration = Duration::from_secs(30);
+const FETCH_POLL: Duration = Duration::from_millis(300);
 
-/// (código, chave na resposta, nome, limite em %, casas decimais do preço)
-const ASSETS: [(&str, &str, &str, f64, usize); 2] = [("USD", "USDBRL", "Dólar", 1.5, 2), ("BTC", "BTCBRL", "Bitcoin", 5.0, 0)];
+/// Um ativo acompanhado: o código (no cache), a chave na resposta da AwesomeAPI, o nome, o
+/// limite que avisa (variação em %) e as casas decimais do preço.
+struct AssetInfo {
+    code: &'static str,
+    field: &'static str,
+    name: &'static str,
+    limit: f64,
+    decimals: usize,
+}
 
+const ASSETS: [AssetInfo; 2] = [
+    AssetInfo { code: "USD", field: "USDBRL", name: "Dólar", limit: 1.5, decimals: 2 },
+    AssetInfo { code: "BTC", field: "BTCBRL", name: "Bitcoin", limit: 5.0, decimals: 0 },
+];
+
+/// O que se sabe de um ativo hoje.
 #[derive(Clone, Debug, PartialEq)]
 struct Asset {
     bid: f64,
@@ -60,8 +76,8 @@ pub struct Quote {
 }
 
 /// "R$ 5,94", "R$ 369.262"
-pub fn brl(v: f64, decimals: usize) -> String {
-    let text = format!("{:.*}", decimals, v.abs());
+pub fn brl(value: f64, decimals: usize) -> String {
+    let text = format!("{:.*}", decimals, value.abs());
     let (int, frac) = text.split_once('.').unwrap_or((&text, ""));
     let mut grouped = String::new();
     for (i, ch) in int.chars().enumerate() {
@@ -70,19 +86,19 @@ pub fn brl(v: f64, decimals: usize) -> String {
         }
         grouped.push(ch);
     }
-    let sign = if v < 0.0 { "−" } else { "" };
+    let sign = if value < 0.0 { "−" } else { "" };
     if frac.is_empty() { format!("R$ {sign}{grouped}") } else { format!("R$ {sign}{grouped},{frac}") }
 }
 
 /// "+1,6%", "−6,4%"
-pub fn pct(v: f64) -> String {
-    let sign = if v < 0.0 { "−" } else { "+" };
-    format!("{sign}{:.1}%", v.abs()).replace('.', ",")
+pub fn pct(change: f64) -> String {
+    let sign = if change < 0.0 { "−" } else { "+" };
+    format!("{sign}{:.1}%", change.abs()).replace('.', ",")
 }
 
 impl Quote {
     pub fn new(cache: &Value) -> Quote {
-        let mut q = Quote {
+        let mut quote = Quote {
             clock: Clock::default(),
             assets: [Asset::default(), Asset::default()],
             day: 0,
@@ -92,55 +108,58 @@ impl Quote {
             check_at: Instant::now(),
             next_fetch: Instant::now(),
         };
-        q.restore(&cache["cotacao"]);
-        q
+        quote.restore(&cache["cotacao"]);
+        quote
     }
 
     /// O dólar e o bitcoin com estas variações (e um dia de preços), às 14:30.
     #[cfg(test)]
     pub fn sample(usd: f64, btc: f64) -> Quote {
-        let now = crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 17.5 * 3600.0;
-        let mut q = Quote::new(&Value::Null);
-        q.clock = Clock::at(now, -3.0 * 3600.0);
-        for (i, (base, p)) in [(5.94, usd), (369262.0, btc)].into_iter().enumerate() {
-            for k in 0..=60 {
-                let f = k as f64 / 60.0;
-                let price = base * (1.0 + p / 100.0 * f + 0.002 * (f * 17.0).sin());
-                q.receive_one(i, price, p * f, base * 1.03, base * 0.97, now - (60 - k) as f64 * 300.0);
+        let now = crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 17.5 * 3600.0;
+        let mut quote = Quote::new(&Value::Null);
+        quote.clock = Clock::at(now, -3.0 * 3600.0);
+        // 61 preços de 5 em 5 minutos, andando até a variação pedida (com uma ondulação)
+        for (i, (base, change)) in [(5.94, usd), (369262.0, btc)].into_iter().enumerate() {
+            for step in 0..=60 {
+                let along = step as f64 / 60.0;
+                let price = base * (1.0 + change / 100.0 * along + 0.002 * (along * 17.0).sin());
+                quote.receive_one(i, price, change * along, base * 1.03, base * 0.97, now - (60 - step) as f64 * 300.0);
             }
         }
-        q
+        quote
     }
 
-    fn restore(&mut self, c: &Value) {
-        self.day = c.i64_of("dia").unwrap_or(0);
-        self.updated = c.f64_of("em").unwrap_or(0.0);
-        self.ok = c["ok"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-        for (i, (code, ..)) in ASSETS.iter().enumerate() {
-            let a = &c[*code];
-            if !a.is_object() {
+    /// Lê o que ficou guardado no cache.
+    fn restore(&mut self, saved: &Value) {
+        self.day = saved.i64_of("dia").unwrap_or(0);
+        self.updated = saved.f64_of("em").unwrap_or(0.0);
+        self.ok = saved["ok"].as_array().map(|keys| keys.iter().filter_map(|key| key.as_str().map(String::from)).collect()).unwrap_or_default();
+        for (i, info) in ASSETS.iter().enumerate() {
+            let asset = &saved[info.code];
+            if !asset.is_object() {
                 continue;
             }
             self.assets[i] = Asset {
-                bid: a.f64_of("preco").unwrap_or(0.0),
-                pct: a.f64_of("variacao").unwrap_or(0.0),
-                high: a.f64_of("max").unwrap_or(0.0),
-                low: a.f64_of("min").unwrap_or(0.0),
-                samples: a["dia"].as_array().map(|l| l.iter().filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?))).collect()).unwrap_or_default(),
-                count: a.i64_of("avisos").unwrap_or(0) as u32,
-                armed: a.bool_of("pronto").unwrap_or(true),
+                bid: asset.f64_of("preco").unwrap_or(0.0),
+                pct: asset.f64_of("variacao").unwrap_or(0.0),
+                high: asset.f64_of("max").unwrap_or(0.0),
+                low: asset.f64_of("min").unwrap_or(0.0),
+                samples: asset["dia"].as_array().map(|list| list.iter().filter_map(|point| Some((point[0].as_f64()?, point[1].as_f64()?))).collect()).unwrap_or_default(),
+                count: asset.i64_of("avisos").unwrap_or(0) as u32,
+                armed: asset.bool_of("pronto").unwrap_or(true),
             };
         }
     }
 
+    /// O que guardar no cache.
     fn save(&self) -> Value {
-        let mut c = json!({"dia": self.day, "em": self.updated, "ok": self.ok});
-        for (i, (code, ..)) in ASSETS.iter().enumerate() {
-            let a = &self.assets[i];
-            c[*code] = json!({"preco": a.bid, "variacao": a.pct, "max": a.high, "min": a.low, "avisos": a.count, "pronto": a.armed,
-                "dia": a.samples.iter().map(|p| json!([p.0, p.1])).collect::<Vec<_>>()});
+        let mut saved = json!({"dia": self.day, "em": self.updated, "ok": self.ok});
+        for (i, info) in ASSETS.iter().enumerate() {
+            let asset = &self.assets[i];
+            saved[info.code] = json!({"preco": asset.bid, "variacao": asset.pct, "max": asset.high, "min": asset.low, "avisos": asset.count, "pronto": asset.armed,
+                "dia": asset.samples.iter().map(|&(at, price)| json!([at, price])).collect::<Vec<_>>()});
         }
-        c
+        saved
     }
 
     /// Um preço novo do ativo `i`: guarda no gráfico do dia e vê se cruzou o limite.
@@ -149,43 +168,45 @@ impl Quote {
         if day != self.day {
             // dia novo: o gráfico e os avisos recomeçam
             self.day = day;
-            for a in &mut self.assets {
-                a.samples.clear();
-                a.count = 0;
-                a.armed = true;
+            for asset in &mut self.assets {
+                asset.samples.clear();
+                asset.count = 0;
+                asset.armed = true;
             }
             self.ok.clear();
         }
-        let limit = ASSETS[i].3;
-        let a = &mut self.assets[i];
-        (a.bid, a.pct, a.high, a.low) = (bid, pct, high, low);
-        a.samples.push((at, bid));
-        if a.samples.len() > MAX_SAMPLES {
-            a.samples.remove(0);
+        let limit = ASSETS[i].limit;
+        let asset = &mut self.assets[i];
+        (asset.bid, asset.pct, asset.high, asset.low) = (bid, pct, high, low);
+        asset.samples.push((at, bid));
+        if asset.samples.len() > MAX_SAMPLES {
+            asset.samples.remove(0);
         }
         if pct.abs() >= limit {
-            if a.armed {
-                a.armed = false;
-                a.count += 1;
+            if asset.armed {
+                asset.armed = false;
+                asset.count += 1;
             }
         } else if pct.abs() < limit * REARM {
-            a.armed = true;
+            asset.armed = true;
         }
         self.updated = at;
     }
 
+    /// Lê a resposta da AwesomeAPI (os números vêm como texto).
     fn receive(&mut self, data: &Value, at: f64) {
-        for (i, (_, field, ..)) in ASSETS.iter().enumerate() {
-            let q = &data[*field];
-            let num = |k: &str| q.str_of(k).and_then(|s| s.parse::<f64>().ok());
-            if let (Some(bid), Some(p)) = (num("bid"), num("pctChange")) {
-                self.receive_one(i, bid, p, num("high").unwrap_or(bid), num("low").unwrap_or(bid), at);
+        for (i, info) in ASSETS.iter().enumerate() {
+            let answer = &data[info.field];
+            let num = |key: &str| answer.str_of(key).and_then(|text| text.parse::<f64>().ok());
+            if let (Some(bid), Some(change)) = (num("bid"), num("pctChange")) {
+                self.receive_one(i, bid, change, num("high").unwrap_or(bid), num("low").unwrap_or(bid), at);
             }
         }
     }
 
+    /// A chave do aviso do ativo `i` (muda a cada vez que ele cruza o limite no dia).
     fn key(&self, i: usize) -> String {
-        format!("{}|{}|{}", ASSETS[i].0, self.day, self.assets[i].count)
+        format!("{}|{}|{}", ASSETS[i].code, self.day, self.assets[i].count)
     }
 
     /// Os ativos com aviso agora (o dólar primeiro): acima do limite, ainda não dispensados.
@@ -193,21 +214,22 @@ impl Quote {
         let today = self.clock.day(self.clock.now()) == self.day;
         (0..ASSETS.len())
             .filter(|&i| {
-                let a = &self.assets[i];
-                today && a.count > 0 && a.pct.abs() >= ASSETS[i].3 && !self.ok.contains(&self.key(i))
+                let asset = &self.assets[i];
+                today && asset.count > 0 && asset.pct.abs() >= ASSETS[i].limit && !self.ok.contains(&self.key(i))
             })
             .collect()
     }
 
+    /// A cor da variação do ativo `i`: verde subindo, vermelho caindo.
     fn color(&self, i: usize) -> Rgba {
         if self.assets[i].pct < 0.0 { DOWN } else { UP }
     }
 
     /// "Dólar subiu 1,6% hoje"
     fn headline(&self, i: usize) -> String {
-        let a = &self.assets[i];
-        let verb = if a.pct < 0.0 { "caiu" } else { "subiu" };
-        format!("{} {verb} {}% hoje", ASSETS[i].2, format!("{:.1}", a.pct.abs()).replace('.', ","))
+        let asset = &self.assets[i];
+        let verb = if asset.pct < 0.0 { "caiu" } else { "subiu" };
+        format!("{} {verb} {}% hoje", ASSETS[i].name, format!("{:.1}", asset.pct.abs()).replace('.', ","))
     }
 }
 
@@ -217,15 +239,14 @@ const BITCOIN: Rgba = Rgba::rgb(247, 147, 26);
 
 /// Uma carteira (o dólar) com `size` de largura: a nota aparecendo atrás, o corpo e o fecho.
 pub(super) fn wallet(c: &mut Canvas, cx: f32, cy: f32, size: f32) {
-    let s = size;
     // a nota saindo por cima
-    c.fill_round_rect(cx - 0.36 * s, cy - 0.44 * s, cx + 0.30 * s, cy - 0.12 * s, 0.06 * s, Rgba::rgb(170, 232, 190));
+    c.fill_round_rect(cx - 0.36 * size, cy - 0.44 * size, cx + 0.30 * size, cy - 0.12 * size, 0.06 * size, Rgba::rgb(170, 232, 190));
     // o corpo
-    c.fill_round_rect(cx - 0.5 * s, cy - 0.26 * s, cx + 0.5 * s, cy + 0.40 * s, 0.13 * s, WALLET);
-    c.fill_round_rect(cx - 0.5 * s, cy - 0.26 * s, cx + 0.5 * s, cy - 0.16 * s, 0.05 * s, Rgba(255, 255, 255, 60));
+    c.fill_round_rect(cx - 0.5 * size, cy - 0.26 * size, cx + 0.5 * size, cy + 0.40 * size, 0.13 * size, WALLET);
+    c.fill_round_rect(cx - 0.5 * size, cy - 0.26 * size, cx + 0.5 * size, cy - 0.16 * size, 0.05 * size, Rgba(255, 255, 255, 60));
     // a aba do fecho, com o botão
-    c.fill_round_rect(cx + 0.10 * s, cy - 0.04 * s, cx + 0.56 * s, cy + 0.24 * s, 0.09 * s, Rgba::rgb(36, 140, 82));
-    c.fill_circle(cx + 0.33 * s, cy + 0.10 * s, 0.06 * s, Rgba::rgb(220, 255, 230));
+    c.fill_round_rect(cx + 0.10 * size, cy - 0.04 * size, cx + 0.56 * size, cy + 0.24 * size, 0.09 * size, Rgba::rgb(36, 140, 82));
+    c.fill_circle(cx + 0.33 * size, cy + 0.10 * size, 0.06 * size, Rgba::rgb(220, 255, 230));
 }
 
 /// A moeda do bitcoin: o círculo laranja com o ₿.
@@ -249,12 +270,13 @@ fn sparkline(c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, samples: &[(f64
     if samples.len() < 2 {
         return;
     }
-    let (lo, hi) = samples.iter().fold((f64::MAX, f64::MIN), |m, p| (m.0.min(p.1), m.1.max(p.1)));
+    let (lo, hi) = samples.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &(_, price)| (lo.min(price), hi.max(price)));
     let (t0, t1) = (samples[0].0, samples[samples.len() - 1].0);
+    // (o preço parado o dia todo ainda desenha uma linha, sem dividir por zero)
     let span = (hi - lo).max(hi.abs() * 1e-4).max(1e-9);
     let pts: Vec<(f32, f32)> = samples
         .iter()
-        .map(|&(t, v)| (x0 + (x1 - x0) * ((t - t0) / (t1 - t0).max(1.0)) as f32, y1 - (y1 - y0) * ((v - lo) / span) as f32))
+        .map(|&(at, price)| (x0 + (x1 - x0) * ((at - t0) / (t1 - t0).max(1.0)) as f32, y1 - (y1 - y0) * ((price - lo) / span) as f32))
         .collect();
     c.line(&pts, color, 1.6);
     if let Some(&(x, y)) = pts.last() {
@@ -277,7 +299,7 @@ impl Kind for Quote {
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
         let wall = Instant::now();
-        self.check_at = wall + Duration::from_secs(30);
+        self.check_at = wall + CHECK_EVERY;
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(data) => {
@@ -290,21 +312,23 @@ impl Kind for Quote {
                     return true;
                 }
                 Err(TryRecvError::Empty) => {
-                    self.check_at = wall + Duration::from_millis(300);
+                    self.check_at = wall + FETCH_POLL;
                     return false;
                 }
                 Err(TryRecvError::Disconnected) => self.pending = None,
             }
         }
-        if wall >= self.next_fetch && on_island(ctx.cfg, "cotacao") {
+        // busca para o aviso e para a ilha em repouso (se ela mostra as cotações)
+        let wanted = on_island(ctx.cfg, "cotacao") || super::rest::wants(ctx.cfg, super::rest::Look::Quotes);
+        if wall >= self.next_fetch && wanted {
             self.next_fetch = wall + EVERY;
             let (tx, rx) = channel();
             std::thread::spawn(move || {
-                let _ = tx.send(crate::util::fetch_json(URL).ok());
-                crate::events::wake();
+                let _ = tx.send(crate::data::util::fetch_json(URL).ok());
+                crate::platform::events::wake();
             });
             self.pending = Some(rx);
-            self.check_at = wall + Duration::from_millis(300);
+            self.check_at = wall + FETCH_POLL;
         }
         false
     }
@@ -319,41 +343,41 @@ impl Kind for Quote {
         let Some(&i) = alerts.first() else { return };
         let (x, y, w, h) = r;
         let cy = y + h / 2.0;
-        let a = &self.assets[i];
-        let (name, decimals) = (ASSETS[i].2, ASSETS[i].4);
+        let asset = &self.assets[i];
+        let (name, decimals) = (ASSETS[i].name, ASSETS[i].decimals);
         let color = self.color(i);
         match form {
             IslandForm::Bubble => badge(c, x + w / 2.0, cy, 13.0, i, color),
             IslandForm::Compact => {
                 badge(c, x + 26.0, cy, 12.0, i, color);
-                iu::compact_text(c, x + 46.0, r, &format!("{name} {}", brl(a.bid, decimals)), &pct(a.pct), color);
+                iu::compact_text(c, x + 46.0, r, &format!("{name} {}", brl(asset.bid, decimals)), &pct(asset.pct), color);
             }
             IslandForm::Banner => {
                 badge(c, x + 26.0, cy, 12.0, i, color);
-                iu::compact_text(c, x + 46.0, r, &self.headline(i), &brl(a.bid, decimals), color);
+                iu::compact_text(c, x + 46.0, r, &self.headline(i), &brl(asset.bid, decimals), color);
             }
             IslandForm::Medium => {
                 badge(c, x + 39.0, cy, 20.0, i, color);
                 let max_w = w - 74.0 - 86.0;
                 // o mínimo e o máximo do dia, se couberem (no bitcoin, com os milhares, não cabem)
-                let full = format!("{} · mín. {} · máx. {}", brl(a.bid, decimals), brl(a.low, decimals).trim_start_matches("R$ "), brl(a.high, decimals).trim_start_matches("R$ "));
-                let sub = if c.text_width(&full, Face::Regular, 11.5) <= max_w { full } else { format!("{} agora", brl(a.bid, decimals)) };
+                let full = format!("{} · mín. {} · máx. {}", brl(asset.bid, decimals), brl(asset.low, decimals).trim_start_matches("R$ "), brl(asset.high, decimals).trim_start_matches("R$ "));
+                let sub = if c.text_width(&full, Face::Regular, 11.5) <= max_w { full } else { format!("{} agora", brl(asset.bid, decimals)) };
                 iu::two_lines(c, x + 74.0, cy, max_w, &self.headline(i), &sub, color);
                 draw_buttons(c, form, r, hot, None);
             }
             IslandForm::Large => {
                 iu::header(c, r, "COTAÇÃO", color, &format!("às {}", self.clock.hhmm(self.updated)), MUTED);
                 // as duas, uma em cada linha: nome, preço, variação e o gráfico do dia
-                for (row, k) in [0usize, 1].into_iter().enumerate() {
-                    let a = &self.assets[k];
+                for (row, which) in [0usize, 1].into_iter().enumerate() {
+                    let asset = &self.assets[which];
                     let ry = y + 58.0 + 52.0 * row as f32;
-                    let col = self.color(k);
-                    let strong = alerts.contains(&k);
-                    badge(c, x + 36.0, ry + 4.0, 14.0, k, col);
-                    c.text(x + 60.0, ry - 6.0, ASSETS[k].2, Face::Regular, 11.5, MUTED, Anchor::LM, None);
-                    c.text(x + 60.0, ry + 12.0, &brl(a.bid, ASSETS[k].4), Face::Semibold, if strong { 17.0 } else { 15.0 }, FG, Anchor::LM, Some(130.0));
-                    c.text(x + 222.0, ry + 4.0, &pct(a.pct), Face::Semibold, 13.0, col, Anchor::RM, None);
-                    sparkline(c, x + 236.0, ry - 10.0, x + w - 24.0, ry + 16.0, &a.samples, col);
+                    let col = self.color(which);
+                    let strong = alerts.contains(&which);
+                    badge(c, x + 36.0, ry + 4.0, 14.0, which, col);
+                    c.text(x + 60.0, ry - 6.0, ASSETS[which].name, Face::Regular, 11.5, MUTED, Anchor::LM, None);
+                    c.text(x + 60.0, ry + 12.0, &brl(asset.bid, ASSETS[which].decimals), Face::Semibold, if strong { 17.0 } else { 15.0 }, FG, Anchor::LM, Some(130.0));
+                    c.text(x + 222.0, ry + 4.0, &pct(asset.pct), Face::Semibold, 13.0, col, Anchor::RM, None);
+                    sparkline(c, x + 236.0, ry - 10.0, x + w - 24.0, ry + 16.0, &asset.samples, col);
                 }
                 draw_buttons(c, form, r, hot, Some("Gráfico"));
             }
@@ -375,8 +399,8 @@ impl Kind for Quote {
             }
             OPEN => {
                 let i = self.alerts().first().copied().unwrap_or(0);
-                let q = if i == 0 { "dólar hoje" } else { "bitcoin em reais" };
-                ctx.open(format!("https://www.google.com/search?q={}", crate::util::urlencode(q)));
+                let search = if i == 0 { "dólar hoje" } else { "bitcoin em reais" };
+                ctx.open(format!("https://www.google.com/search?q={}", crate::data::util::urlencode(search)));
             }
             _ => {}
         }
@@ -407,7 +431,7 @@ mod tests {
     #[test]
     fn alerts_on_strong_moves_only() {
         let cfg = json!({"app": {}});
-        let now = crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 15.0 * 3600.0;
+        let now = crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 15.0 * 3600.0;
         let mut q = Quote::new(&Value::Null);
         q.clock = Clock::at(now, -3.0 * 3600.0);
         q.receive_one(0, 5.9, 0.9, 5.9, 5.9, now);
@@ -449,7 +473,7 @@ mod tests {
     fn reads_the_api_answer() {
         let data = json!({"USDBRL": {"bid": "5.9389", "pctChange": "1.62", "high": "5.95", "low": "5.85"}, "BTCBRL": {"bid": "369262", "pctChange": "-1.769", "high": "379309", "low": "365765"}});
         let mut q = Quote::new(&Value::Null);
-        let now = crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 15.0 * 3600.0;
+        let now = crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + 15.0 * 3600.0;
         q.clock = Clock::at(now, -3.0 * 3600.0);
         q.receive(&data, now);
         assert_eq!(q.assets[0].bid, 5.9389);

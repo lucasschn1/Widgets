@@ -14,11 +14,11 @@ use serde_json::{json, Value};
 use super::quote::{bitcoin, brl, pct, wallet, URL as QUOTES_URL};
 use super::skywatch::{draw_station, toward};
 use super::{location, Clock, OK};
-use crate::astro;
-use crate::config::Get;
-use crate::drawing::weather_art;
+use crate::data::astro;
+use crate::data::config::Get;
+use crate::gfx::drawing::weather_art;
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{ease_in_out, Rgba, FG, MUTED};
+use crate::ui::theme::{ease_in_out, Rgba, FG, MUTED};
 use crate::widgets::island_ui as iu;
 use crate::widgets::{alert_hash, on_island, Ctx, Env, IslandForm, IslandItem, Kind, Mode, Rect4, Request};
 
@@ -36,6 +36,18 @@ const ACTIVE: f64 = 20.0;
 const QUOTES_FRESH: f64 = 2.0 * 3600.0;
 /// espera as cotações chegarem no máximo este tanto
 const QUOTES_WAIT: Duration = Duration::from_secs(4);
+/// sem conexão, tenta buscar as cotações de novo só depois deste tanto
+const QUOTES_RETRY: f64 = 10.0 * 60.0;
+/// de quanto em quanto tempo ver se é hora de cumprimentar (e se as cotações chegaram)
+const CHECK_EVERY: Duration = Duration::from_secs(5);
+const FETCH_POLL: Duration = Duration::from_millis(300);
+/// os períodos: a manhã começa às 6 h, a tarde ao meio-dia e a noite às 18 h (ou no fim do
+/// expediente); antes das 6 h, madrugada, sem saudação
+const MORNING_FROM: f64 = 6.0 * 3600.0;
+const AFTERNOON_FROM: f64 = 12.0 * 3600.0;
+const NIGHT_FROM: f64 = 18.0 * 3600.0;
+/// o "boa noite" logo depois do "bom descanso" do fim do expediente
+const AFTER_WORKDAY: f64 = 15.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Period {
@@ -45,6 +57,7 @@ pub enum Period {
 }
 
 impl Period {
+    /// Como o período fica guardado no cache.
     fn code(self) -> &'static str {
         match self {
             Period::Morning => "manha",
@@ -52,14 +65,15 @@ impl Period {
             Period::Night => "noite",
         }
     }
-    fn from_code(s: &str) -> Option<Period> {
-        [Period::Morning, Period::Afternoon, Period::Night].into_iter().find(|p| p.code() == s)
+    fn from_code(code: &str) -> Option<Period> {
+        [Period::Morning, Period::Afternoon, Period::Night].into_iter().find(|period| period.code() == code)
     }
     /// "Bom dia" (para a prévia das saudações)
     #[cfg(test)]
     pub fn hello_text(self) -> &'static str {
         self.hello()
     }
+    /// A saudação do período.
     fn hello(self) -> &'static str {
         match self {
             Period::Morning => "Bom dia",
@@ -67,6 +81,7 @@ impl Period {
             Period::Night => "Boa noite",
         }
     }
+    /// A cor do período na ilha (o sol da manhã, o laranja da tarde, o azul da noite).
     fn color(self) -> Rgba {
         match self {
             Period::Morning => Rgba::rgb(255, 200, 92),
@@ -74,12 +89,30 @@ impl Period {
             Period::Night => Rgba::rgb(160, 168, 255),
         }
     }
+    /// O desenho do período (o sol ou a lua).
     fn art(self) -> &'static str {
         match self {
             Period::Night => "moon",
             _ => "sun",
         }
     }
+}
+
+/// Uma cotação na saudação: "Dólar", o preço e a variação desde ontem (em %).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QuoteLine {
+    name: &'static str,
+    price: f64,
+    change: f64,
+}
+
+/// Algo no céu desta noite: o nome, a hora e a frase completa ("ISS", "19:42", "A ISS passa às
+/// 19:42, olhe para o noroeste").
+#[derive(Clone, Debug, PartialEq)]
+struct SkyEvent {
+    name: String,
+    at: String,
+    line: String,
 }
 
 /// Uma saudação pronta: o texto já montado na hora em que apareceu.
@@ -89,11 +122,10 @@ struct Shown {
     at: f64,
     day: i64,
     weather: Weather,
-    /// (nome, preço, variação desde ontem): o dólar e o bitcoin
-    quotes: Vec<(&'static str, f64, f64)>,
-    /// de noite: a lua cheia e a ISS, (nome, hora, frase completa): ("ISS", "19:42", "A ISS
-    /// passa às 19:42, olhe para o noroeste")
-    sky: Vec<(String, String, String)>,
+    /// o dólar e o bitcoin
+    quotes: Vec<QuoteLine>,
+    /// de noite: a lua cheia e a ISS
+    sky: Vec<SkyEvent>,
 }
 
 /// O que a saudação mostra de cada vez (troca a cada `PAGE_FOR`).
@@ -119,19 +151,19 @@ impl Shown {
     /// A frase do tempo, completa: "18° agora, máx. 27°, chuva às 15h"; de noite, "amanhã 22°,
     /// céu limpo".
     fn weather_line(&self) -> Option<String> {
-        let w = &self.weather;
+        let weather = &self.weather;
         if self.period == Period::Night {
-            return w.tomorrow.as_ref().map(|(max, desc)| if desc.is_empty() { format!("amanhã {max}°") } else { format!("amanhã {max}°, {desc}") });
+            return weather.tomorrow.as_ref().map(|(max, desc)| if desc.is_empty() { format!("amanhã {max}°") } else { format!("amanhã {max}°, {desc}") });
         }
         let mut parts = Vec::new();
-        if let Some(t) = w.now {
-            parts.push(if self.period == Period::Morning { format!("{t}° agora") } else { format!("{t}°") });
+        if let Some(temp) = weather.now {
+            parts.push(if self.period == Period::Morning { format!("{temp}° agora") } else { format!("{temp}°") });
         }
-        if let Some(m) = w.max {
-            parts.push(format!("máx. {m}°"));
+        if let Some(max) = weather.max {
+            parts.push(format!("máx. {max}°"));
         }
-        if let Some(h) = w.rain {
-            parts.push(format!("chuva às {h}h"));
+        if let Some(hour) = weather.rain {
+            parts.push(format!("chuva às {hour}h"));
         }
         (!parts.is_empty()).then(|| parts.join(", "))
     }
@@ -152,38 +184,38 @@ impl Shown {
     /// quanto a troca já andou (0 a 1).
     fn page_at(&self, elapsed: f64) -> (Page, Option<(Page, f32)>) {
         let pages = self.pages();
-        let k = (elapsed.max(0.0) / PAGE_FOR).floor() as usize;
-        let into = elapsed - k as f64 * PAGE_FOR;
-        let turn = (k > 0 && pages.len() > 1 && into < TURN).then(|| (pages[(k - 1) % pages.len()], (into / TURN) as f32));
-        (pages[k % pages.len()], turn)
+        let index = (elapsed.max(0.0) / PAGE_FOR).floor() as usize;
+        let into = elapsed - index as f64 * PAGE_FOR;
+        let turn = (index > 0 && pages.len() > 1 && into < TURN).then(|| (pages[(index - 1) % pages.len()], (into / TURN) as f32));
+        (pages[index % pages.len()], turn)
     }
 
     /// A frase do tempo na pílula esticada (cabe numa linha): "Bom dia · 18° agora, máx. 27°".
     fn banner(&self) -> String {
         let hello = self.period.hello();
-        let w = &self.weather;
-        let rest = match (self.period, w.now, w.max) {
+        let weather = &self.weather;
+        let rest = match (self.period, weather.now, weather.max) {
             (Period::Night, ..) => self.weather_line(),
-            (Period::Morning, Some(t), Some(m)) => Some(format!("{t}° agora, máx. {m}°")),
-            (_, Some(t), Some(m)) => Some(format!("{t}°, máx. {m}°")),
+            (Period::Morning, Some(temp), Some(max)) => Some(format!("{temp}° agora, máx. {max}°")),
+            (_, Some(temp), Some(max)) => Some(format!("{temp}°, máx. {max}°")),
             _ => self.weather_line(),
         };
         match rest {
-            Some(r) => format!("{hello} · {r}"),
+            Some(rest) => format!("{hello} · {rest}"),
             None => format!("{hello}!"),
         }
     }
 
     /// O céu desta noite, curto: "Lua cheia às 18:57 · ISS às 21:00".
     fn sky_short(&self) -> String {
-        let one = |(name, at, _): &(String, String, String)| if at == "hoje" { format!("{name} hoje") } else { format!("{name} às {at}") };
+        let one = |event: &SkyEvent| if event.at == "hoje" { format!("{} hoje", event.name) } else { format!("{} às {}", event.name, event.at) };
         self.sky.iter().map(one).collect::<Vec<_>>().join(" · ")
     }
 }
 
-/// O símbolo de cada cotação: a carteira (o dólar) e a moeda do bitcoin.
-fn symbol(c: &mut Canvas, k: usize, cx: f32, cy: f32, r: f32) {
-    if k == 0 {
+/// O símbolo de cada cotação: a carteira (o dólar, `which` 0) e a moeda do bitcoin.
+fn symbol(c: &mut Canvas, which: usize, cx: f32, cy: f32, r: f32) {
+    if which == 0 {
         wallet(c, cx, cy, r * 2.0);
     } else {
         bitcoin(c, cx, cy, r);
@@ -191,84 +223,88 @@ fn symbol(c: &mut Canvas, k: usize, cx: f32, cy: f32, r: f32) {
 }
 
 /// "5,94", "369 mil" (sem o R$: o símbolo do lado já diz o que é)
-fn short_price(v: f64) -> String {
-    if v >= 10000.0 {
-        format!("{:.0} mil", v / 1000.0)
+fn short_price(price: f64) -> String {
+    if price >= 10000.0 {
+        format!("{:.0} mil", price / 1000.0)
     } else {
-        format!("{v:.2}").replace('.', ",")
+        format!("{price:.2}").replace('.', ",")
     }
 }
 
-/// O preço inteiro: "R$ 5,94", "R$ 369.262".
-fn long_price(k: usize, v: f64) -> String {
-    brl(v, if k == 0 { 2 } else { 0 })
+/// O preço inteiro: "R$ 5,94" (o dólar, `which` 0), "R$ 369.262" (o bitcoin).
+fn long_price(which: usize, price: f64) -> String {
+    brl(price, if which == 0 { 2 } else { 0 })
+}
+
+/// A cor da variação: verde subindo, vermelho caindo.
+fn change_color(change: f64) -> Rgba {
+    if change < 0.0 { DOWN } else { UP }
 }
 
 /// Uma página da saudação na pílula (fechada, esticada ou média).
-fn draw_page(c: &mut Canvas, form: IslandForm, r: Rect4, s: &Shown, page: Page) {
+fn draw_page(c: &mut Canvas, form: IslandForm, r: Rect4, shown: &Shown, page: Page) {
     let (x, y, w, h) = r;
     let cy = y + h / 2.0;
-    let color = s.period.color();
-    let hello = s.period.hello();
+    let color = shown.period.color();
+    let hello = shown.period.hello();
     let art = |c: &mut Canvas, name: &str, cx: f32, cy: f32, size: f32| {
         let img = weather_art(name, (size * c.s).round() as u32);
         c.image(&img, cx - size / 2.0, cy - size / 2.0);
     };
-    let col = |p: f64| if p < 0.0 { DOWN } else { UP };
     match page {
         Page::Weather => match form {
             IslandForm::Compact => {
-                art(c, s.period.art(), x + 26.0, cy, 26.0);
-                let value = match s.period {
-                    Period::Night => s.weather.tomorrow.as_ref().map(|t| format!("amanhã {}°", t.0)),
-                    _ => s.weather.now.map(|t| format!("{t}°")),
+                art(c, shown.period.art(), x + 26.0, cy, 26.0);
+                let value = match shown.period {
+                    Period::Night => shown.weather.tomorrow.as_ref().map(|(max, _)| format!("amanhã {max}°")),
+                    _ => shown.weather.now.map(|temp| format!("{temp}°")),
                 };
                 iu::compact_text(c, x + 46.0, r, hello, value.as_deref().unwrap_or(""), color);
             }
             IslandForm::Banner => {
-                art(c, s.period.art(), x + 26.0, cy, 26.0);
-                iu::compact_text(c, x + 46.0, r, &s.banner(), "", color);
+                art(c, shown.period.art(), x + 26.0, cy, 26.0);
+                iu::compact_text(c, x + 46.0, r, &shown.banner(), "", color);
             }
             _ => {
-                art(c, s.period.art(), x + 39.0, cy, 46.0);
-                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &format!("{hello}!"), &s.weather_line().unwrap_or_default(), color);
+                art(c, shown.period.art(), x + 39.0, cy, 46.0);
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &format!("{hello}!"), &shown.weather_line().unwrap_or_default(), color);
             }
         },
         Page::Quotes => match form {
             // o dólar e o bitcoin lado a lado: o símbolo, o preço e a variação
             IslandForm::Compact | IslandForm::Banner => {
-                // um depois do outro, cada um do tamanho que precisa, centralizados
-                let parts: Vec<(usize, String, String, f64)> = s
-                    .quotes
+                // um depois do outro, cada um do tamanho que precisa, centralizados: (preço,
+                // variação) escritos
+                let quotes: Vec<&QuoteLine> = shown.quotes.iter().take(2).collect();
+                let texts: Vec<(String, String)> = quotes
                     .iter()
                     .enumerate()
-                    .take(2)
-                    .map(|(k, &(_, price, p))| (k, if form == IslandForm::Banner { long_price(k, price) } else { short_price(price) }, pct(p), p))
+                    .map(|(which, quote)| (if form == IslandForm::Banner { long_price(which, quote.price) } else { short_price(quote.price) }, pct(quote.change)))
                     .collect();
                 let gap = if form == IslandForm::Banner { 20.0 } else { 12.0 };
                 let width = |c: &Canvas, text: &str, change: &str| 25.0 + c.text_width(text, Face::Semibold, 12.5) + 4.0 + c.text_width(change, Face::Semibold, 11.5);
-                let total: f32 = parts.iter().map(|(_, t, ch, _)| width(c, t, ch)).sum::<f32>() + gap * (parts.len().max(1) - 1) as f32;
+                let total: f32 = texts.iter().map(|(text, change)| width(c, text, change)).sum::<f32>() + gap * (texts.len().max(1) - 1) as f32;
                 let mut x0 = x + ((w - total) / 2.0).max(14.0);
-                for (k, text, change, p) in &parts {
-                    symbol(c, *k, x0 + 10.0, cy, 9.5);
+                for (which, ((text, change), quote)) in texts.iter().zip(&quotes).enumerate() {
+                    symbol(c, which, x0 + 10.0, cy, 9.5);
                     let tw = c.text(x0 + 25.0, cy, text, Face::Semibold, 12.5, FG, Anchor::LM, None);
-                    c.text(x0 + 25.0 + tw + 4.0, cy, change, Face::Semibold, 11.5, col(*p), Anchor::LM, None);
+                    c.text(x0 + 25.0 + tw + 4.0, cy, change, Face::Semibold, 11.5, change_color(quote.change), Anchor::LM, None);
                     x0 += width(c, text, change) + gap;
                 }
             }
             // uma em cada linha, com o nome
             _ => {
-                for (k, &(name, price, p)) in s.quotes.iter().enumerate().take(2) {
-                    let ry = cy + if k == 0 { -12.0 } else { 12.0 };
-                    symbol(c, k, x + 34.0, ry, 9.5);
-                    c.text(x + 52.0, ry, name, Face::Regular, 12.0, MUTED, Anchor::LM, None);
-                    c.text(x + 112.0, ry, &long_price(k, price), Face::Semibold, 13.0, FG, Anchor::LM, None);
-                    c.text(x + w - 92.0, ry, &pct(p), Face::Semibold, 12.0, col(p), Anchor::RM, None);
+                for (which, quote) in shown.quotes.iter().enumerate().take(2) {
+                    let ry = cy + if which == 0 { -12.0 } else { 12.0 };
+                    symbol(c, which, x + 34.0, ry, 9.5);
+                    c.text(x + 52.0, ry, quote.name, Face::Regular, 12.0, MUTED, Anchor::LM, None);
+                    c.text(x + 112.0, ry, &long_price(which, quote.price), Face::Semibold, 13.0, FG, Anchor::LM, None);
+                    c.text(x + w - 92.0, ry, &pct(quote.change), Face::Semibold, 12.0, change_color(quote.change), Anchor::RM, None);
                 }
             }
         },
         Page::Sky => {
-            let (name, at, _) = &s.sky[0];
+            let SkyEvent { name, at, .. } = &shown.sky[0];
             let icon = |c: &mut Canvas, cx: f32, size: f32| {
                 if name == "ISS" {
                     draw_station(c, cx, cy, size * 0.46);
@@ -283,11 +319,11 @@ fn draw_page(c: &mut Canvas, form: IslandForm, r: Rect4, s: &Shown, page: Page) 
                 }
                 IslandForm::Banner => {
                     icon(c, x + 26.0, 26.0);
-                    iu::compact_text(c, x + 46.0, r, &format!("Esta noite · {}", s.sky_short()), "", color);
+                    iu::compact_text(c, x + 46.0, r, &format!("Esta noite · {}", shown.sky_short()), "", color);
                 }
                 _ => {
                     icon(c, x + 39.0, 46.0);
-                    iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, "Esta noite", &s.sky_short(), color);
+                    iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, "Esta noite", &shown.sky_short(), color);
                 }
             }
         }
@@ -309,17 +345,18 @@ pub struct Greeting {
     fake: Option<(f64, bool)>,
 }
 
-/// O período de `t` (None de madrugada). A noite começa às 18 h, ou no fim do expediente se ele
-/// for antes (de segunda a sexta, com o fim do expediente ligado), logo depois do "bom descanso".
-pub fn period_at(clock: &Clock, t: f64, cfg: &Value) -> Option<Period> {
-    let secs = (t + clock.offset()).rem_euclid(86400.0);
-    let mut night: f64 = 18.0 * 3600.0;
-    if clock.weekday(t) < 5 && on_island(cfg, "expediente") {
-        night = night.min(super::workday::end_of(cfg) + 15.0);
+/// O período do horário `at` (None de madrugada). A noite começa às 18 h, ou no fim do expediente
+/// se ele for antes (de segunda a sexta, com o fim do expediente ligado), logo depois do "bom
+/// descanso".
+pub fn period_at(clock: &Clock, at: f64, cfg: &Value) -> Option<Period> {
+    let secs = (at + clock.offset()).rem_euclid(86400.0);
+    let mut night: f64 = NIGHT_FROM;
+    if clock.weekday(at) < 5 && on_island(cfg, "expediente") {
+        night = night.min(super::workday::end_of(cfg) + AFTER_WORKDAY);
     }
-    if secs < 6.0 * 3600.0 {
+    if secs < MORNING_FROM {
         None
-    } else if secs < 12.0 * 3600.0 {
+    } else if secs < AFTERNOON_FROM {
         Some(Period::Morning)
     } else if secs < night {
         Some(Period::Afternoon)
@@ -330,68 +367,69 @@ pub fn period_at(clock: &Clock, t: f64, cfg: &Value) -> Option<Period> {
 
 /// O Pomodoro está no foco (correndo)?
 fn focusing(cfg: &Value, now: f64) -> bool {
-    let st = &cfg["pomodoro"]["estado"];
-    st.str_of("fase") == Some("foco") && st.f64_of("fim").is_some_and(|end| end > now)
+    let state = &cfg["pomodoro"]["estado"];
+    state.str_of("fase") == Some("foco") && state.f64_of("fim").is_some_and(|end| end > now)
 }
 
 /// "Céu limpo" → "céu limpo"
-fn lower_first(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_lowercase().collect::<String>() + c.as_str()).unwrap_or_default()
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|first| first.to_lowercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
 
 /// O tempo para a saudação, do que o Tempo guardou.
 fn weather_of(cache: &Value) -> Weather {
-    let w = &cache["weather"];
-    if !w.is_object() {
+    let saved = &cache["weather"];
+    if !saved.is_object() {
         return Weather::default();
     }
-    let tomorrow = &w["day_info"][1];
+    let tomorrow = &saved["day_info"][1];
     let tomorrow = tomorrow.i64_of("max").map(|max| (max, tomorrow.str_of("desc").map(lower_first).unwrap_or_default()));
-    // a primeira hora de hoje com chuva (sem estar chovendo agora)
+    // a primeira hora de hoje com chuva (sem estar chovendo agora); cada hora guardada é
+    // [rótulo, ícone, temperatura, código, chance, dia (0 = hoje), hora]
     let is_rain = |code: i64| (51..68).contains(&code) || (80..83).contains(&code) || code >= 95;
-    let hours = w["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let rain = if w.i64_of("code").is_some_and(is_rain) {
+    let hours = saved["hours"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let rain = if saved.i64_of("code").is_some_and(is_rain) {
         None
     } else {
-        hours.iter().filter(|h| h[2].is_i64() && h[5].as_i64() == Some(0)).skip(1).find(|h| h[3].as_i64().is_some_and(is_rain)).and_then(|h| h[6].as_i64())
+        hours.iter().filter(|hour| hour[2].is_i64() && hour[5].as_i64() == Some(0)).skip(1).find(|hour| hour[3].as_i64().is_some_and(is_rain)).and_then(|hour| hour[6].as_i64())
     };
-    Weather { now: w.i64_of("temp"), max: w.i64_of("max"), rain, tomorrow }
+    Weather { now: saved.i64_of("temp"), max: saved.i64_of("max"), rain, tomorrow }
 }
 
 impl Greeting {
     pub fn new(cache: &Value) -> Greeting {
-        let c = &cache["saudacao"];
-        let done = (c.i64_of("dia").unwrap_or(0), c["feitas"].as_array().map(|l| l.iter().filter_map(|v| v.as_str().and_then(Period::from_code)).collect()).unwrap_or_default());
+        let saved = &cache["saudacao"];
+        let periods = saved["feitas"].as_array().map(|list| list.iter().filter_map(|code| code.as_str().and_then(Period::from_code)).collect()).unwrap_or_default();
+        let done = (saved.i64_of("dia").unwrap_or(0), periods);
         Greeting { clock: Clock::default(), showing: None, done, quotes: None, fetching: None, quotes_tried: f64::MIN, check_at: Instant::now(), fake: None }
     }
 
     /// A saudação de um período já na ilha, com o tempo e as cotações de exemplo.
     #[cfg(test)]
     pub fn sample(period: Period) -> Greeting {
-        let monday = crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0;
+        let monday = crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0;
         let hour = match period {
             Period::Morning => 8.0,
             Period::Afternoon => 14.0,
             Period::Night => 19.0,
         };
         let now = monday + (hour + 3.0) * 3600.0;
-        let mut g = Greeting::new(&Value::Null);
-        g.clock = Clock::at(now, -3.0 * 3600.0);
-        g.fake = Some((1.0, false));
-        g.quotes = Some((now, [(5.94, 0.3), (369262.0, -1.8)]));
-        let cfg = json!({"tempo": {"lat": -23.55, "lon": -46.63, "place": "São Paulo"}, "app": {}});
+        let mut greeting = Greeting::new(&Value::Null);
+        greeting.clock = Clock::at(now, -3.0 * 3600.0);
+        greeting.fake = Some((1.0, false));
+        greeting.quotes = Some((now, [(5.94, 0.3), (369262.0, -1.8)]));
+        let mut cfg = json!({"tempo": {"lat": -23.55, "lon": -46.63, "place": "São Paulo"}, "app": {}});
         let mut cache = sample_cache(now);
         let mut out = Vec::new();
-        let mut c = cfg.clone();
-        g.tick(&mut Ctx { cfg: &mut c, cache: &mut cache, key: "saudacao", out: &mut out });
-        g
+        greeting.tick(&mut Ctx { cfg: &mut cfg, cache: &mut cache, key: "saudacao", out: &mut out });
+        greeting
     }
 
     /// Na prévia das saudações: o relógio `secs` segundos depois de ela aparecer.
     #[cfg(test)]
     pub fn preview_at(&mut self, secs: f64) {
-        if let Some(at) = self.showing.as_ref().map(|s| s.at) {
+        if let Some(at) = self.showing.as_ref().map(|shown| shown.at) {
             self.clock = Clock::at(at + secs.clamp(0.0, SHOW_FOR - 0.01), self.clock.offset());
         }
     }
@@ -404,21 +442,21 @@ impl Greeting {
         if self.done.0 == self.clock.day(now) && self.done.1.contains(&period) {
             return None;
         }
-        let (idle, fullscreen) = self.fake.unwrap_or_else(|| (crate::win::idle_secs(), !crate::win::fullscreen_screens().is_empty()));
+        let (idle, fullscreen) = self.fake.unwrap_or_else(|| (crate::platform::win::idle_secs(), !crate::platform::win::fullscreen_screens().is_empty()));
         (idle < ACTIVE && !fullscreen && !focusing(cfg, now)).then_some(period)
     }
 
     /// As cotações de agora: as do aviso de cotação (se recentes) ou as buscadas aqui.
     fn quotes_now(&self, cache: &Value) -> Option<[(f64, f64); 2]> {
         let now = self.clock.now();
-        let c = &cache["cotacao"];
-        if c.f64_of("em").is_some_and(|t| now - t < QUOTES_FRESH) {
-            let q = |code: &str| Some((c[code].f64_of("preco")?, c[code].f64_of("variacao")?));
-            if let (Some(a), Some(b)) = (q("USD"), q("BTC")) {
-                return Some([a, b]);
+        let saved = &cache["cotacao"];
+        if saved.f64_of("em").is_some_and(|at| now - at < QUOTES_FRESH) {
+            let quote = |code: &str| Some((saved[code].f64_of("preco")?, saved[code].f64_of("variacao")?));
+            if let (Some(usd), Some(btc)) = (quote("USD"), quote("BTC")) {
+                return Some([usd, btc]);
             }
         }
-        self.quotes.filter(|q| now - q.0 < QUOTES_FRESH).map(|q| q.1)
+        self.quotes.filter(|(at, _)| now - at < QUOTES_FRESH).map(|(_, quotes)| quotes)
     }
 
     /// Monta a saudação do período com o que se sabe agora.
@@ -426,42 +464,48 @@ impl Greeting {
         let now = self.clock.now();
         let weather = weather_of(cache);
         let quotes = match self.quotes_now(cache) {
-            Some([usd, btc]) => vec![("Dólar", usd.0, usd.1), ("Bitcoin", btc.0, btc.1)],
+            Some([usd, btc]) => vec![QuoteLine { name: "Dólar", price: usd.0, change: usd.1 }, QuoteLine { name: "Bitcoin", price: btc.0, change: btc.1 }],
             None => Vec::new(),
         };
         let mut sky = Vec::new();
         if period == Period::Night {
-            if let Some((lat, lon, _)) = location(cfg) {
+            if let Some(super::Place { lat, lon, .. }) = location(cfg) {
                 let day = self.clock.day(now);
                 let midnight = self.clock.midnight(day + 1);
                 // lua cheia esta noite (a lua cheia mais perto das 21 h de hoje)
                 let tonight = self.clock.midnight(day) + 21.0 * 3600.0;
-                if astro::full_moons(tonight - 86400.0, tonight + 86400.0).iter().any(|&f| (f - tonight).abs() <= 12.0 * 3600.0) {
-                    let line = match astro::next_moonrise(self.clock.midnight(day) + 12.0 * 3600.0, lat, lon) {
-                        Some(t) if t > now => ("Lua cheia".to_string(), self.clock.hhmm(t), format!("Lua cheia nasce às {}, {}", self.clock.hhmm(t), toward(astro::moon_alt_az(t, lat, lon).1))),
-                        _ => ("Lua cheia".to_string(), "hoje".to_string(), "Lua cheia no céu esta noite".to_string()),
+                if astro::full_moons(tonight - 86400.0, tonight + 86400.0).iter().any(|&full| (full - tonight).abs() <= 12.0 * 3600.0) {
+                    let event = match astro::next_moonrise(self.clock.midnight(day) + 12.0 * 3600.0, lat, lon) {
+                        Some(rise) if rise > now => SkyEvent {
+                            name: "Lua cheia".to_string(),
+                            at: self.clock.hhmm(rise),
+                            line: format!("Lua cheia nasce às {}, {}", self.clock.hhmm(rise), toward(astro::moon_alt_az(rise, lat, lon).1)),
+                        },
+                        _ => SkyEvent { name: "Lua cheia".to_string(), at: "hoje".to_string(), line: "Lua cheia no céu esta noite".to_string() },
                     };
-                    sky.push(line);
+                    sky.push(event);
                 }
-                // a Estação Espacial passando antes da meia-noite
+                // a Estação Espacial passando antes da meia-noite (cada passagem: [hora, azimute, altura])
                 let passes = cache["iss_visiveis"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-                if let Some(p) = passes.iter().find(|p| p[0].as_f64().is_some_and(|t| t > now && t < midnight)) {
-                    let (t, az) = (p[0].as_f64().unwrap_or(now), p[1].as_f64().unwrap_or(0.0));
-                    let at = self.clock.hhmm(t);
-                    let long = format!("A ISS passa às {at}, olhe para o {}", astro::compass(az));
-                    sky.push(("ISS".to_string(), at, long));
+                if let Some(pass) = passes.iter().find(|pass| pass[0].as_f64().is_some_and(|at| at > now && at < midnight)) {
+                    let (when, azimuth) = (pass[0].as_f64().unwrap_or(now), pass[1].as_f64().unwrap_or(0.0));
+                    let at = self.clock.hhmm(when);
+                    let line = format!("A ISS passa às {at}, olhe para o {}", astro::compass(azimuth));
+                    sky.push(SkyEvent { name: "ISS".to_string(), at, line });
                 }
             }
         }
         Shown { period, at: now, day: self.clock.day(now), weather, quotes, sky }
     }
 
+    /// A saudação na ilha agora (enquanto não passou o tempo dela).
     fn visible(&self) -> Option<&Shown> {
-        self.showing.as_ref().filter(|s| self.clock.now() - s.at < SHOW_FOR)
+        self.showing.as_ref().filter(|shown| self.clock.now() - shown.at < SHOW_FOR)
     }
 
+    /// Guarda no cache os períodos já cumprimentados hoje.
     fn save(&self, cache: &mut Value) {
-        cache["saudacao"] = json!({"dia": self.done.0, "feitas": self.done.1.iter().map(|p| p.code()).collect::<Vec<_>>()});
+        cache["saudacao"] = json!({"dia": self.done.0, "feitas": self.done.1.iter().map(|period| period.code()).collect::<Vec<_>>()});
     }
 }
 
@@ -480,9 +524,9 @@ impl Kind for Greeting {
 
     fn tick(&mut self, ctx: &mut Ctx) -> bool {
         let wall = Instant::now();
-        self.check_at = wall + Duration::from_secs(5);
+        self.check_at = wall + CHECK_EVERY;
         let now = self.clock.now();
-        if self.showing.as_ref().is_some_and(|s| now - s.at >= SHOW_FOR) {
+        if self.showing.as_ref().is_some_and(|shown| now - shown.at >= SHOW_FOR) {
             self.showing = None;
         }
         // as cotações que a própria saudação foi buscar
@@ -490,16 +534,16 @@ impl Kind for Greeting {
             match rx.try_recv() {
                 Ok(data) => {
                     self.fetching = None;
-                    let q = data.and_then(|d| {
-                        let one = |k: &str| Some((d[k].str_of("bid")?.parse::<f64>().ok()?, d[k].str_of("pctChange")?.parse::<f64>().ok()?));
+                    let quotes = data.and_then(|data| {
+                        let one = |code: &str| Some((data[code].str_of("bid")?.parse::<f64>().ok()?, data[code].str_of("pctChange")?.parse::<f64>().ok()?));
                         Some([one("USDBRL")?, one("BTCBRL")?])
                     });
-                    if let Some(q) = q {
-                        self.quotes = Some((now, q));
+                    if let Some(quotes) = quotes {
+                        self.quotes = Some((now, quotes));
                     }
                 }
                 Err(TryRecvError::Empty) if since.elapsed() < QUOTES_WAIT => {
-                    self.check_at = wall + Duration::from_millis(300);
+                    self.check_at = wall + FETCH_POLL;
                     return false;
                 }
                 _ => self.fetching = None,
@@ -514,94 +558,95 @@ impl Kind for Greeting {
         }
         let Some(period) = self.due(ctx.cfg) else { return false };
         // com as cotações: se não há uma recente, busca antes (espera até 4 s)
-        if self.quotes_now(ctx.cache).is_none() && self.fetching.is_none() && now - self.quotes_tried > 10.0 * 60.0 {
+        if self.quotes_now(ctx.cache).is_none() && self.fetching.is_none() && now - self.quotes_tried > QUOTES_RETRY {
             self.quotes_tried = now;
             let (tx, rx) = channel();
             std::thread::spawn(move || {
-                let _ = tx.send(crate::util::fetch_json(QUOTES_URL).ok());
-                crate::events::wake();
+                let _ = tx.send(crate::data::util::fetch_json(QUOTES_URL).ok());
+                crate::platform::events::wake();
             });
             self.fetching = Some((rx, wall));
-            self.check_at = wall + Duration::from_millis(300);
+            self.check_at = wall + FETCH_POLL;
             return false;
         }
         self.showing = Some(self.compose(period, ctx.cfg, ctx.cache));
         // os períodos de antes ficam para trás (ligou às 14 h: nada de "bom dia")
-        for p in [Period::Morning, Period::Afternoon, Period::Night] {
-            if !self.done.1.contains(&p) {
-                self.done.1.push(p);
+        for earlier in [Period::Morning, Period::Afternoon, Period::Night] {
+            if !self.done.1.contains(&earlier) {
+                self.done.1.push(earlier);
             }
-            if p == period {
+            if earlier == period {
                 break;
             }
         }
         self.save(ctx.cache);
         ctx.out.push(Request::SaveCache);
+        // acabou de aparecer: o próximo passo vem logo
         self.check_at = wall + Duration::from_secs(1);
         true
     }
 
     fn island_item(&self, _env: &Env) -> Option<IslandItem> {
-        let s = self.visible()?;
-        Some(IslandItem::alert(s.period.color(), alert_hash(&format!("saudacao|{}|{}", s.day, s.period.code()))))
+        let shown = self.visible()?;
+        Some(IslandItem::alert(shown.period.color(), alert_hash(&format!("saudacao|{}|{}", shown.day, shown.period.code()))))
     }
 
     fn island_draw(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, _env: &Env) {
-        let Some(s) = self.visible() else { return };
+        let Some(shown) = self.visible() else { return };
         let (x, y, w, h) = r;
-        let color = s.period.color();
-        let hello = s.period.hello();
+        let color = shown.period.color();
+        let hello = shown.period.hello();
         match form {
             IslandForm::Bubble => {
-                let img = weather_art(s.period.art(), (28.0 * c.s).round() as u32);
+                let img = weather_art(shown.period.art(), (28.0 * c.s).round() as u32);
                 c.image(&img, x + w / 2.0 - 14.0, y + h / 2.0 - 14.0);
             }
             IslandForm::Large => {
                 let date = {
                     const DAYS: [&str; 7] = ["segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo"];
-                    format!("{}, {}", DAYS[self.clock.weekday(s.at) as usize], self.clock.date_text(s.at))
+                    format!("{}, {}", DAYS[self.clock.weekday(shown.at) as usize], self.clock.date_text(shown.at))
                 };
                 iu::header(c, r, &hello.to_uppercase(), color, &date, MUTED);
-                let img = weather_art(s.period.art(), (48.0 * c.s).round() as u32);
+                let img = weather_art(shown.period.art(), (48.0 * c.s).round() as u32);
                 c.image(&img, x + w - 78.0, y + 42.0);
                 c.text(x + 22.0, y + 60.0, &format!("{hello}!"), Face::Semibold, 22.0, FG, Anchor::LM, Some(w - 120.0));
                 let mut ly = y + 88.0;
-                if let Some(wl) = s.weather_line() {
-                    let mut t = wl;
-                    if let Some(f) = t.get_mut(0..1) {
-                        f.make_ascii_uppercase();
+                if let Some(mut line) = shown.weather_line() {
+                    // com a primeira letra maiúscula, no começo da linha
+                    if let Some(first) = line.get_mut(0..1) {
+                        first.make_ascii_uppercase();
                     }
-                    c.text(x + 22.0, ly, &t, Face::Regular, 12.5, MUTED, Anchor::LM, Some(w - 44.0));
+                    c.text(x + 22.0, ly, &line, Face::Regular, 12.5, MUTED, Anchor::LM, Some(w - 44.0));
                     ly += 22.0;
                 }
-                for (k, &(name, price, p)) in s.quotes.iter().enumerate() {
-                    symbol(c, k, x + 31.0, ly + 6.0, 9.0);
-                    c.text(x + 48.0, ly + 6.0, name, Face::Regular, 12.0, MUTED, Anchor::LM, None);
-                    c.text(x + 110.0, ly + 6.0, &long_price(k, price), Face::Semibold, 14.0, FG, Anchor::LM, None);
-                    let col = if p < 0.0 { DOWN } else { UP };
-                    c.text(x + 236.0, ly + 6.0, &format!("{} desde ontem", pct(p)), Face::Regular, 12.0, col, Anchor::LM, None);
+                for (which, quote) in shown.quotes.iter().enumerate() {
+                    symbol(c, which, x + 31.0, ly + 6.0, 9.0);
+                    c.text(x + 48.0, ly + 6.0, quote.name, Face::Regular, 12.0, MUTED, Anchor::LM, None);
+                    c.text(x + 110.0, ly + 6.0, &long_price(which, quote.price), Face::Semibold, 14.0, FG, Anchor::LM, None);
+                    c.text(x + 236.0, ly + 6.0, &format!("{} desde ontem", pct(quote.change)), Face::Regular, 12.0, change_color(quote.change), Anchor::LM, None);
                     ly += 24.0;
                 }
-                for (_, _, line) in &s.sky {
-                    c.text(x + 22.0, ly + 6.0, line, Face::Regular, 12.5, FG, Anchor::LM, Some(w - 44.0));
+                for event in &shown.sky {
+                    c.text(x + 22.0, ly + 6.0, &event.line, Face::Regular, 12.5, FG, Anchor::LM, Some(w - 44.0));
                     ly += 22.0;
                 }
                 super::draw_buttons(c, form, r, hot, None);
             }
             _ => {
                 // o tempo e as cotações (e, de noite, o céu) se alternando
-                let (page, turn) = s.page_at(self.clock.now() - s.at);
+                let (page, turn) = shown.page_at(self.clock.now() - shown.at);
                 match turn {
-                    Some((prev, t)) => {
-                        let a = ease_in_out(t);
-                        c.push_opacity(1.0 - a);
-                        draw_page(c, form, (x, y - 9.0 * a, w, h), s, prev);
+                    Some((prev, progress)) => {
+                        // a de antes sobe e apaga; a nova sobe de baixo e acende
+                        let eased = ease_in_out(progress);
+                        c.push_opacity(1.0 - eased);
+                        draw_page(c, form, (x, y - 9.0 * eased, w, h), shown, prev);
                         c.pop_clip();
-                        c.push_opacity(a);
-                        draw_page(c, form, (x, y + 9.0 * (1.0 - a), w, h), s, page);
+                        c.push_opacity(eased);
+                        draw_page(c, form, (x, y + 9.0 * (1.0 - eased), w, h), shown, page);
                         c.pop_clip();
                     }
-                    None => draw_page(c, form, r, s, page),
+                    None => draw_page(c, form, r, shown, page),
                 }
                 if form == IslandForm::Medium {
                     super::draw_buttons(c, form, r, hot, None);
@@ -616,11 +661,11 @@ impl Kind for Greeting {
 
     /// Na troca de página, quadros lisos; fora dela, o relógio da ilha basta.
     fn island_fps(&self, form: IslandForm) -> u32 {
-        let Some(s) = self.visible() else { return 0 };
-        if matches!(form, IslandForm::Bubble | IslandForm::Large) || s.pages().len() < 2 {
+        let Some(shown) = self.visible() else { return 0 };
+        if matches!(form, IslandForm::Bubble | IslandForm::Large) || shown.pages().len() < 2 {
             return 0;
         }
-        let into = (self.clock.now() - s.at).rem_euclid(PAGE_FOR);
+        let into = (self.clock.now() - shown.at).rem_euclid(PAGE_FOR);
         if into > PAGE_FOR - 0.3 || into < TURN + 0.1 { 60 } else { 4 }
     }
 
@@ -653,7 +698,7 @@ mod tests {
 
     /// Uma segunda-feira, na hora local `hour`.
     fn at(hour: f64) -> f64 {
-        crate::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + (hour + 3.0) * 3600.0
+        crate::data::util::days_from_civil(2026, 11, 23) as f64 * 86400.0 + (hour + 3.0) * 3600.0
     }
 
     fn run(g: &mut Greeting, cfg: &Value, cache: &mut Value) -> bool {
@@ -735,7 +780,7 @@ mod tests {
         assert_eq!(s.period, Period::Night);
         assert_eq!(s.weather_line().as_deref(), Some("amanhã 22°, céu limpo"));
         assert_eq!(s.banner(), "Boa noite · amanhã 22°, céu limpo");
-        assert!(s.sky.iter().any(|l| l.2.contains("ISS passa às 20:30")), "{:?}", s.sky);
+        assert!(s.sky.iter().any(|event| event.line.contains("ISS passa às 20:30")), "{:?}", s.sky);
         // 24/11/2026 é noite de lua cheia: a lua vem primeiro, a ISS depois
         assert_eq!(s.sky_short(), "Lua cheia hoje · ISS às 20:30");
         assert_eq!(s.pages(), vec![Page::Weather, Page::Quotes, Page::Sky], "de noite também com as cotações");
@@ -753,7 +798,7 @@ mod tests {
         g.fake = Some((1.0, false));
         g.quotes = Some((g.clock.now(), [(5.94, 0.3), (369262.0, -1.8)]));
         assert!(run(&mut g, &cfg, &mut cache));
-        assert!(g.visible().unwrap().sky.iter().any(|l| l.2.starts_with("Lua cheia")), "{:?}", g.visible().unwrap().sky);
+        assert!(g.visible().unwrap().sky.iter().any(|event| event.line.starts_with("Lua cheia")), "{:?}", g.visible().unwrap().sky);
     }
 
     /// O tempo por 7 s, as cotações por 7 s, e de novo, até o tempo da saudação acabar (ou o OK);

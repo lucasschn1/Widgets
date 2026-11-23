@@ -14,11 +14,11 @@ use std::time::{Duration, Instant, SystemTime};
 use super::clawd::{self, Anim, Crab, Mood};
 use super::odometer;
 use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Request, Status, SMALL, WIDE};
-use crate::claude_history::{self as history, Tool, Turn, HISTORY_DAYS};
-use crate::claude_usage::{self as usage, Link, Notice, Usage, Window, FIVE_HOURS};
+use crate::data::claude_history::{self as history, Tool, Turn, HISTORY_DAYS};
+use crate::data::claude_usage::{self as usage, Link, Notice, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
-use crate::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
-use crate::win;
+use crate::ui::theme::{ease_in_out, Rgba, FG, MUTED, WHITE};
+use crate::platform::win;
 
 // ---------- cores ----------
 /// o símbolo do Claude e o botão de conectar
@@ -90,7 +90,7 @@ const HOT: f64 = 0.9;
 const GROW_MS: f32 = 900.0;
 const TURN_MS: f32 = 450.0;
 /// O arco acima de 90%.
-const RED: Rgba = crate::theme::RED;
+const RED: Rgba = crate::ui::theme::RED;
 
 // ---------- fontes: a Outfit, embutida no app ----------
 /// a porcentagem
@@ -157,16 +157,16 @@ impl Grow {
 
     /// O valor agora: sai rápido e chega devagar (curva cúbica).
     fn value(&self) -> f64 {
-        let t = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
-        self.from + (self.to - self.from) * ease(t)
+        let progress = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
+        self.from + (self.to - self.from) * ease(progress)
     }
 
     /// A porcentagem contando junto com o arco (de um inteiro ao outro, no mesmo ritmo): 43,6 é o
     /// 3 rolando para o 4.
     fn count(&self) -> f64 {
-        let t = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
-        let (a, b) = ((self.from * 100.0).round(), (self.to * 100.0).round());
-        a + (b - a) * ease(t)
+        let progress = (self.elapsed_ms() / GROW_MS).clamp(0.0, 1.0) as f64;
+        let (from_pct, to_pct) = ((self.from * 100.0).round(), (self.to * 100.0).round());
+        from_pct + (to_pct - from_pct) * ease(progress)
     }
 
     /// Há quantos milissegundos o arco passou de 90%, se ele subiu passando por aí e já passou.
@@ -175,8 +175,8 @@ impl Grow {
             return None;
         }
         // quando a curva passa de 90%: o inverso de `ease`
-        let p = (HOT - self.from) / (self.to - self.from);
-        let cross = (1.0 - (1.0 - p).cbrt()) as f32 * GROW_MS;
+        let hot_at = (HOT - self.from) / (self.to - self.from);
+        let cross = (1.0 - (1.0 - hot_at).cbrt()) as f32 * GROW_MS;
         let ms = self.elapsed_ms() - cross;
         (ms >= 0.0).then_some(ms)
     }
@@ -307,8 +307,8 @@ fn geom(mode: Mode) -> Geom {
 
 /// O centro (x) dos dois medidores, no médio e no grande.
 fn gauge_xs(mode: Mode) -> [f32; 2] {
-    let g = geom(mode);
-    [g.gauges[0].1, g.gauges.get(1).map_or(g.gauges[0].1, |x| x.1)]
+    let gauge = geom(mode);
+    [gauge.gauges[0].1, gauge.gauges.get(1).map_or(gauge.gauges[0].1, |x| x.1)]
 }
 
 /// A nota de quando reinicia, embaixo de cada anel: (altura, largura máxima). O pequeno não tem.
@@ -785,7 +785,7 @@ impl Claude {
                 // (os exemplos, com a hora fixa, não leem o aviso de verdade)
                 if self.fixed_now.is_none() {
                     let changed = now - still;
-                    act.notice = crate::claude_usage::load_notice().filter(|n| n.transcript == path && n.at + 1.5 >= changed && now - n.at < NOTICE_FOR);
+                    act.notice = crate::data::claude_usage::load_notice().filter(|n| n.transcript == path && n.at + 1.5 >= changed && now - n.at < NOTICE_FOR);
                 }
             }
             act.busy = match (act.busy, busy) {
@@ -918,14 +918,14 @@ impl Claude {
     /// (de lado não caberia entre as pontas do anel); no médio e no grande, de lado, com a tela à
     /// mostra.
     fn crab_pose(&self, mode: Mode) -> clawd::Pose {
-        let mut p = self.crab.pose(self.mood(), self.gaze, view_of(mode));
+        let mut pose = self.crab.pose(self.mood(), self.gaze, view_of(mode));
         // andando de lado no médio: as patas se revezam
         if let (Mode::M, Some((_, _, start))) = (mode, self.slide.filter(|_| self.sliding())) {
-            if p.legs == clawd::Legs::Stand {
-                p.legs = if (start.elapsed().as_millis() / 100) % 2 == 0 { clawd::Legs::StepA } else { clawd::Legs::StepB };
+            if pose.legs == clawd::Legs::Stand {
+                pose.legs = if (start.elapsed().as_millis() / 100) % 2 == 0 { clawd::Legs::StepA } else { clawd::Legs::StepB };
             }
         }
-        p
+        pose
     }
 
     /// Desenha o Clawd no lugar dele (na barra de tarefas, o lugar fica vazio, com um aviso).
@@ -1027,15 +1027,15 @@ impl Claude {
         if let Some(v) = v {
             let frac = v.clamp(0.0, 1.0) as f32;
             let end = START + SWEEP * frac;
-            let a = end.to_radians();
-            let (dx, dy) = (cx + r * a.cos(), cy + r * a.sin());
+            let angle = end.to_radians();
+            let (dx, dy) = (cx + r * angle.cos(), cy + r * angle.sin());
             let mut color = ORANGE;
             let mut dot = w * 0.36;
             if v >= HOT {
-                let k = since.map_or(1.0, |t| (t / TURN_MS).clamp(0.0, 1.0));
-                color = ORANGE.mix(RED, k);
+                let turn = since.map_or(1.0, |t| (t / TURN_MS).clamp(0.0, 1.0));
+                color = ORANGE.mix(RED, turn);
                 c.fill_circle(dx, dy, w * 1.15, color.alpha(0.28));
-                dot *= 1.0 + 0.55 * (k * std::f32::consts::PI).sin();
+                dot *= 1.0 + 0.55 * (turn * std::f32::consts::PI).sin();
             }
             if frac > 0.0 {
                 c.arc(cx, cy, r, START, end, color, w);
@@ -1061,12 +1061,12 @@ impl Claude {
     }
 
     fn draw_gauges(&self, c: &mut Canvas, mode: Mode, now: f64, only: Option<Limit>) {
-        let g = geom(mode);
-        for &(limit, cx) in g.gauges {
+        let gauge = geom(mode);
+        for &(limit, cx) in gauge.gauges {
             if only.is_none_or(|o| o == limit) {
-                let grow = self.grow[limit.index()].filter(|g| g.elapsed_ms() < GROW_MS);
-                let since = self.grow[limit.index()].and_then(|g| g.since_hot());
-                Self::gauge(c, &g, cx, limit, self.shown(limit, now), grow.map(|g| g.count()), since, self.shows_icon(limit, mode));
+                let grow = self.grow[limit.index()].filter(|gauge| gauge.elapsed_ms() < GROW_MS);
+                let since = self.grow[limit.index()].and_then(|gauge| gauge.since_hot());
+                Self::gauge(c, &gauge, cx, limit, self.shown(limit, now), grow.map(|gauge| gauge.count()), since, self.shows_icon(limit, mode));
             }
         }
     }
@@ -1267,8 +1267,8 @@ impl Claude {
     /// subindo uma depois da outra); o que sai some logo no começo; e o Clawd pula.
     fn draw_morph(&self, c: &mut Canvas, from: Mode, to: Mode, p: f32) {
         let now = self.now();
-        let e = ease_in_out(p);
-        let mix = |a: f32, b: f32| a + (b - a) * e;
+        let eased = ease_in_out(p);
+        let mix = |a: f32, b: f32| a + (b - a) * eased;
         let (ga, gb) = (geom(from), geom(to));
         for limit in [Limit::Daily, Limit::Weekly] {
             let at = |g: &Geom| g.gauges.iter().find(|x| x.0 == limit).map(|x| x.1);
@@ -1483,8 +1483,8 @@ fn gauge_icon(c: &mut Canvas, g: &Geom, cx: f32, limit: Limit) {
 fn sun(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
     c.fill_circle(cx, cy, r * 0.42, color);
     for i in 0..8 {
-        let a = (i as f32 * 45.0).to_radians();
-        let (dx, dy) = (a.cos(), a.sin());
+        let angle = (i as f32 * 45.0).to_radians();
+        let (dx, dy) = (angle.cos(), angle.sin());
         c.line(&[(cx + dx * r * 0.68, cy + dy * r * 0.68), (cx + dx * r, cy + dy * r)], color, r * 0.17);
     }
 }
@@ -1511,19 +1511,19 @@ fn calendar(c: &mut Canvas, cx: f32, cy: f32, r: f32, color: Rgba) {
 
 /// O centro (x) do medidor no ponto (x, y), se houver um ali. O pequeno só mostra o diário.
 fn gauge_at(x: f32, y: f32, mode: Mode) -> Option<f32> {
-    let g = geom(mode);
-    g.gauges.iter().map(|&(_, cx)| cx).find(|&cx| (x - cx).hypot(y - g.cy) <= g.r + g.w)
+    let gauge = geom(mode);
+    gauge.gauges.iter().map(|&(_, cx)| cx).find(|&cx| (x - cx).hypot(y - gauge.cy) <= gauge.r + gauge.w)
 }
 
 /// "seg., 09:00", "amanhã, 09:00" ou "hoje, 18:40" para um horário (segundos desde 1970).
 fn day_and_time(epoch: f64, now: f64) -> String {
-    let t = win::local_time();
-    let today = t.hour as f64 * 3600.0 + t.minute as f64 * 60.0 + t.second as f64;
+    let local = win::local_time();
+    let today = local.hour as f64 * 3600.0 + local.minute as f64 * 60.0 + local.second as f64;
     let days = ((today + (epoch - now)) / 86400.0).floor() as i64;
     let day = match days {
         0 => "hoje".to_string(),
         1 => "amanhã".to_string(),
-        d => ["seg.", "ter.", "qua.", "qui.", "sex.", "sáb.", "dom."][(t.weekday as i64 + d).rem_euclid(7) as usize].to_string(),
+        d => ["seg.", "ter.", "qua.", "qui.", "sex.", "sáb.", "dom."][(local.weekday as i64 + d).rem_euclid(7) as usize].to_string(),
     };
     format!("{day}, {}", win::clock_at(epoch))
 }
@@ -1623,10 +1623,10 @@ impl Kind for Claude {
                 Some((cx - hw, cy - hh, cx + hw, cy + hh, 6.0))
             }
             _ => {
-                let g = geom(mode);
+                let gauge = geom(mode);
                 let cx = gauge_at(x, y, mode)?;
-                let r = g.r + g.w;
-                Some((cx - r, g.cy - r, cx + r, g.cy + r, r))
+                let reach = gauge.r + gauge.w;
+                Some((cx - reach, gauge.cy - reach, cx + reach, gauge.cy + reach, reach))
             }
         }
     }
@@ -2212,7 +2212,7 @@ mod tests {
             let (a, b) = (super::super::Layout::of(from), super::super::Layout::of(to));
             for k in 0..steps {
                 let p = k as f32 / (steps - 1) as f32;
-                let e = crate::theme::ease_spring(p);
+                let e = crate::ui::theme::ease_spring(p);
                 let (cw, ch) = (a.w + (b.w - a.w) * e, a.h + (b.h - a.h) * e);
                 let img = frame(&w, from, to, Some(p), (cw, ch));
                 let (x, y) = (k as f32 * cell_w + 10.0, row as f32 * cell_h + 10.0);
