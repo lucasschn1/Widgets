@@ -41,6 +41,8 @@ pub enum Action {
     Seg(&'static str, String),
     Visible(&'static str, bool),
     Widget(&'static str, u32),
+    /// silenciar (ou voltar a mostrar) as notificações de um app na ilha (a identidade dele)
+    MuteApp(String),
     Edit,
     Arrange,
     SaveLayout,

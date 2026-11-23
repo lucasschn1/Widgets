@@ -89,6 +89,7 @@ pub fn title(key: &str) -> &'static str {
         // as fontes da ilha que não são widgets (o mundo lá fora e a ilha em repouso)
         source if outside::KEYS.contains(&source) => outside::title(source),
         outside::REST => "Ilha em repouso",
+        outside::apps::KEY => "Notificações dos apps",
         _ => "Widget",
     }
 }
@@ -571,7 +572,8 @@ pub fn alert_hash(text: &str) -> u64 {
 
 /// Se o widget `key` pode aparecer na ilha (Configurações → o widget → "Mostrar na ilha").
 pub fn on_island(cfg: &Value, key: &str) -> bool {
-    config::setting_bool(cfg, "ilha_widgets") && cfg[key].bool_of("na_ilha").unwrap_or(true)
+    // as notificações dos outros apps só com a pessoa ligando (é ler o que chega para ela)
+    config::setting_bool(cfg, "ilha_widgets") && cfg[key].bool_of("na_ilha").unwrap_or(key != outside::apps::KEY)
 }
 
 /// Grava o tamanho do widget na seção dele do config.json, junto com a altura que ele tem nesse

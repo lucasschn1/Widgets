@@ -107,6 +107,7 @@ pub fn ease_in_out(t: f32) -> f32 {
 pub fn icon(name: &str) -> &'static str {
     match name {
         "geral" => "\u{e713}",
+        "ilha" => "\u{e7c4}",
         "aparencia" => "\u{e790}",
         "widgets" => "\u{eca5}",
         "clima" => "\u{e753}",

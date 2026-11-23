@@ -7,3 +7,4 @@ pub mod startup;
 pub mod sysinfo;
 pub mod battery;
 pub mod updates;
+pub mod notifications;

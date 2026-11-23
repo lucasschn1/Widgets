@@ -149,6 +149,7 @@ pub(crate) fn cases() -> Vec<(String, Box<dyn Kind>, Value)> {
     }
     out.push(("bateria entrou na tomada".into(), Box::new(Battery::sample_plug_event(true)), cfg.clone()));
     out.push(("bateria saiu da tomada".into(), Box::new(Battery::sample_plug_event(false)), cfg.clone()));
+    out.push(("bateria fone conectou".into(), Box::new(Battery::sample_arrival()), cfg.clone()));
     for ms in [0, 150, 400, 800] {
         out.push((format!("bateria ligando na tomada {ms}"), Box::new(Battery::sample_plugging(ms)), cfg.clone()));
         out.push((format!("bateria cheia {ms}"), Box::new(Battery::sample_full(ms)), cfg.clone()));
@@ -384,12 +385,14 @@ fn outside_feeds_draw_and_answer_in_every_form() {
     com();
     for (name, kind, cfg) in outside::samples() {
         assert!(check_island(&name, kind.as_ref(), &cfg), "{name} devia estar na ilha");
-        assert!(outside::KEYS.contains(&kind.key()) || kind.key() == outside::REST, "{name}");
+        assert!(outside::KEYS.contains(&kind.key()) || [outside::REST, outside::apps::KEY].contains(&kind.key()), "{name}");
     }
-    // as fontes e, por último, a ilha em repouso (que não tem interruptor no mundo lá fora)
+    // as fontes, as notificações dos apps e, por último, a ilha em repouso (essas duas não têm
+    // interruptor no mundo lá fora)
     let created: Vec<&str> = outside::create_all(&json!({})).iter().map(|k| k.key()).collect();
-    assert_eq!(created, [outside::KEYS.as_slice(), &[outside::REST]].concat());
+    assert_eq!(created, [outside::KEYS.as_slice(), &[outside::apps::KEY, outside::REST]].concat());
     assert_eq!(widgets::title(outside::REST), "Ilha em repouso");
+    assert_eq!(widgets::title(outside::apps::KEY), "Notificações dos apps");
     for key in outside::KEYS {
         assert!(!outside::title(key).is_empty() && !outside::description(key).is_empty(), "{key}");
         assert_eq!(widgets::title(key), outside::title(key));

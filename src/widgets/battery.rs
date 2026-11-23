@@ -12,6 +12,7 @@
 //! Parado, nada se mexe. (O reflexo do mouse na borda de vidro é do cartão, em todos os widgets.)
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -261,6 +262,16 @@ const ISLAND_LOW: f32 = LOW_AT as f32;
 const ISLAND_URGENT: f32 = 10.0;
 /// ao entrar ou sair da tomada, a ilha mostra a carga por este tempo
 const PLUG_SHOW: Duration = Duration::from_secs(8);
+/// um aparelho que acabou de conectar fica na ilha por este tempo
+const ARRIVAL_SHOW: Duration = Duration::from_secs(8);
+/// só avisa de novo quando o aparelho ficou desconectado ao menos isto: fones e controles que
+/// piscam a conexão não esticam a ilha a cada vez
+const AWAY_FOR: Duration = Duration::from_secs(2 * 60);
+/// teclado, mouse e caneta cochilam sozinhos (e reconectam quando mexidos): para eles, só depois
+/// de muito tempo longe, como na volta ao PC
+const AWAY_FOR_INPUT: Duration = Duration::from_secs(30 * 60);
+/// logo depois de abrir o app, as primeiras listas trazem todo mundo "chegando": não avisa
+const ARRIVAL_QUIET_START: Duration = Duration::from_secs(20);
 /// de quanto em quanto tempo conferir se entrou ou saiu da tomada e se chegou uma lista nova de
 /// dispositivos (só isso: barato)
 const CHECK_EVERY: Duration = Duration::from_millis(500);
@@ -298,6 +309,18 @@ struct Rolled {
     /// a de baixo do anel do grande
     under: String,
     at: Instant,
+}
+
+/// Um aparelho que acabou de conectar (o aviso na ilha).
+#[derive(Clone, Debug, PartialEq)]
+struct Arrival {
+    name: String,
+    kind: DevKind,
+    /// a bateria dele, se informa
+    level: Option<u8>,
+    at: Instant,
+    /// quantos já chegaram (cada um é um aviso novo na ilha)
+    count: u64,
 }
 
 /// Um aparelho chegando (true) ou saindo (false) da lista conectada, e desde quando.
@@ -351,6 +374,15 @@ pub struct Battery {
     plug_event: Option<(bool, Instant)>,
     /// quantas vezes entrou ou saiu (cada uma é um aviso novo na ilha)
     plug_count: u64,
+    /// o último aparelho que conectou: a ilha mostra por `ARRIVAL_SHOW`
+    arrival: Option<Arrival>,
+    /// quantos aparelhos já conectaram com aviso (não volta a zero com o OK: o mesmo aparelho
+    /// chegando de novo é outro aviso)
+    arrivals: u64,
+    /// quando cada aparelho desconectou (para não avisar quem só piscou a conexão)
+    away_since: HashMap<String, Instant>,
+    /// quando o widget nasceu (as primeiras listas não avisam)
+    born: Instant,
     /// próxima conferida rápida da tomada e dos dispositivos
     next_check: Instant,
 }
@@ -396,6 +428,10 @@ impl Battery {
             doubt: 0,
             plug_event: None,
             plug_count: 0,
+            arrival: None,
+            arrivals: 0,
+            away_since: HashMap::new(),
+            born: Instant::now(),
             next_check: Instant::now() + CHECK_EVERY,
         }
     }
@@ -482,6 +518,15 @@ impl Battery {
         }
         b.plug_event = Some((plugged, Instant::now()));
         b.plug_count = 1;
+        b
+    }
+
+    /// O fone acabou de conectar: o aviso na ilha.
+    #[cfg(test)]
+    pub fn sample_arrival() -> Battery {
+        let mut b = Battery::sample_plug_event(false);
+        b.plug_event = None;
+        b.arrival = Some(Arrival { name: "Fone WH-1000XM5".into(), kind: DevKind::Headphones, level: Some(82), at: Instant::now(), count: 1 });
         b
     }
 
@@ -1297,6 +1342,18 @@ impl Battery {
         changed || !looks_same
     }
 
+    /// O aparelho `d`, que acabou de conectar, ganha o aviso na ilha? Não logo depois de abrir o
+    /// app (aí todos "chegam"), nem quando ele só piscou a conexão: precisa ter ficado longe por
+    /// `AWAY_FOR` (`AWAY_FOR_INPUT` para teclado, mouse e caneta, que cochilam sozinhos). Um que
+    /// nunca esteve conectado desde que o app abriu conta como longe.
+    fn announces(&self, d: &Device, now: Instant) -> bool {
+        if now.saturating_duration_since(self.born) < ARRIVAL_QUIET_START {
+            return false;
+        }
+        let away_for = if matches!(d.kind, DevKind::Keyboard | DevKind::Mouse | DevKind::Pen) { AWAY_FOR_INPUT } else { AWAY_FOR };
+        self.away_since.get(&d.name).is_none_or(|since| now.saturating_duration_since(*since) >= away_for)
+    }
+
     /// A lista nova de aparelhos: quem chegou e quem saiu (as animações) e os avisos de pouca
     /// bateria.
     fn apply_devices(&mut self, list: Vec<Device>, ctx: &mut Ctx) -> bool {
@@ -1306,12 +1363,18 @@ impl Battery {
         let was = |name: &str| self.devices.iter().find(|d| d.name == name).is_some_and(|d| d.connected);
         let now = Instant::now();
         let mut changes: Vec<Change> = self.changes.iter().filter(|c| ms_since(c.since) < DEVICE_MS).cloned().collect();
+        let mut arrived = None;
         for d in &list {
             if d.connected && !was(&d.name) {
                 changes.push(Change { name: d.name.clone(), arriving: true, since: now });
+                if self.announces(d, now) {
+                    arrived = Some(d.clone());
+                }
+                self.away_since.remove(&d.name);
             }
             if !d.connected && was(&d.name) {
                 changes.push(Change { name: d.name.clone(), arriving: false, since: now });
+                self.away_since.insert(d.name.clone(), now);
             }
             // pouca bateria: avisa uma vez, e de novo só depois de carregar
             match d.level {
@@ -1322,6 +1385,10 @@ impl Battery {
                 Some(l) if l >= REARM => self.warned.retain(|n| n != &d.name),
                 _ => {}
             }
+        }
+        if let Some(d) = arrived {
+            self.arrivals += 1;
+            self.arrival = Some(Arrival { name: d.name, kind: d.kind, level: d.level, at: now, count: self.arrivals });
         }
         self.changes = changes;
         self.devices = list;
@@ -1435,12 +1502,16 @@ fn sample_history(now: f64, end: f32) -> Vec<(f64, f32, bool)> {
 }
 
 impl Kind for Battery {
-    /// Na ilha quando o notebook (fora da tomada) ou um aparelho conectado fica abaixo de 20%.
+    /// Na ilha quando o notebook (fora da tomada) ou um aparelho conectado fica abaixo de 20%;
+    /// por alguns segundos, quando um aparelho conecta ou o notebook entra ou sai da tomada.
     fn island_item(&self, _env: &Env) -> Option<IslandItem> {
         if let Some(low) = self.island_low() {
             let mut item = IslandItem::alert(level_color(low.level), alert_hash(&low.key()));
             item.urgent = low.level < ISLAND_URGENT;
             return Some(item);
+        }
+        if let Some(arrival) = self.arrival_shown() {
+            return Some(IslandItem::alert(arrival_color(arrival), alert_hash(&format!("chegou|{}|{}", arrival.name, arrival.count))));
         }
         let plugged = self.plug_shown()?;
         let col = if plugged { OK } else { level_color(self.power.as_ref()?.percent) };
@@ -1553,9 +1624,10 @@ impl Kind for Battery {
         match action {
             OPEN_POWER => ctx.open("ms-settings:batterysaver"),
             OPEN_BLUETOOTH => ctx.open("ms-settings:bluetooth"),
-            DISMISS => match self.island_low() {
-                Some(low) => self.island_ok.push(low.key()),
-                None => self.plug_event = None,
+            DISMISS => match (self.island_low(), self.arrival_shown()) {
+                (Some(low), _) => self.island_ok.push(low.key()),
+                (None, Some(_)) => self.arrival = None,
+                (None, None) => self.plug_event = None,
             },
             _ => {}
         }
@@ -1585,9 +1657,12 @@ impl Kind for Battery {
         if self.power.is_some() || self.feed.is_some() {
             next = next.min(self.next_check);
         }
-        // o aviso da tomada sai da ilha na hora certa
+        // o aviso da tomada (e o do aparelho que conectou) sai da ilha na hora certa
         if let Some((_, at)) = self.plug_event.filter(|e| e.1.elapsed() < PLUG_SHOW) {
             next = next.min(at + PLUG_SHOW);
+        }
+        if let Some(arrival) = self.arrival_shown() {
+            next = next.min(arrival.at + ARRIVAL_SHOW);
         }
         Some(next)
     }
@@ -1614,6 +1689,9 @@ impl Kind for Battery {
             }
             if self.plug_event.is_some_and(|e| e.1.elapsed() >= PLUG_SHOW) {
                 self.plug_event = None;
+            }
+            if self.arrival.as_ref().is_some_and(|a| a.at.elapsed() >= ARRIVAL_SHOW) {
+                self.arrival = None;
             }
             if now >= self.next_power {
                 self.next_power = now + POWER_EVERY;
@@ -1698,6 +1776,78 @@ mod tests {
         let mut out = Vec::new();
         let r = f(&mut Ctx { cfg: &mut cfg, cache: &mut cache, key: "bateria", out: &mut out });
         (r, out)
+    }
+
+    /// O aparelho que conecta aparece na ilha, menos logo depois de abrir o app e quando ele só
+    /// piscou a conexão (teclado e mouse, que cochilam, precisam ficar bem mais tempo longe).
+    #[test]
+    fn a_device_connecting_shows_on_the_island() {
+        let env_cfg = json!({"app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let mut b = Battery::sample();
+        for d in &mut b.devices {
+            d.level = d.level.map(|l| l.max(60));
+        }
+        b.born = Instant::now() - Duration::from_secs(60);
+        let with = |b: &Battery, name: &str, connected: bool| -> Vec<Device> {
+            let mut list = b.devices.clone();
+            list.iter_mut().find(|d| d.name.starts_with(name)).unwrap().connected = connected;
+            list
+        };
+        // o fone sai e volta logo: só piscou, nada na ilha
+        let list = with(&b, "Fone", false);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        let list = with(&b, "Fone", true);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        assert!(b.arrival.is_none());
+        // longe por 3 min: volta com o aviso
+        let list = with(&b, "Fone", false);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        *b.away_since.get_mut("Fone WH-1000XM5").unwrap() -= Duration::from_secs(3 * 60);
+        let list = with(&b, "Fone", true);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        let arrival = b.arrival.clone().expect("o fone conectou");
+        assert_eq!((arrival.name.as_str(), arrival.level), ("Fone WH-1000XM5", Some(82)));
+        let item = b.island_item(&env).expect("na ilha");
+        assert!(item.alert && !item.urgent);
+        // OK tira o aviso
+        ctx_run(|ctx| b.act(DISMISS, ctx));
+        assert!(b.arrival.is_none() && b.island_item(&env).is_none());
+        // o mouse longe 3 min (cochilou): nada; 31 min (a pessoa voltou): avisa
+        let list = with(&b, "Mouse", false);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        *b.away_since.get_mut("Mouse MX Master 3S").unwrap() -= Duration::from_secs(3 * 60);
+        let list = with(&b, "Mouse", true);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        assert!(b.arrival.is_none(), "o mouse só cochilou");
+        let list = with(&b, "Mouse", false);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        *b.away_since.get_mut("Mouse MX Master 3S").unwrap() -= Duration::from_secs(31 * 60);
+        let list = with(&b, "Mouse", true);
+        ctx_run(|ctx| b.apply_devices(list, ctx));
+        assert_eq!(b.arrival.as_ref().map(|a| a.count), Some(2), "cada chegada é um aviso novo");
+        // passado o tempo, sai da ilha sozinho
+        b.arrival.as_mut().unwrap().at -= ARRIVAL_SHOW;
+        assert!(b.island_item(&env).is_none());
+        // logo depois de abrir o app, todos "chegam" de uma vez: nada
+        let mut fresh = Battery::empty();
+        let list = b.devices.clone();
+        ctx_run(|ctx| fresh.apply_devices(list, ctx));
+        assert!(fresh.arrival.is_none());
+    }
+
+    /// A bateria fraca passa na frente do aparelho que conectou.
+    #[test]
+    fn low_battery_beats_a_device_connecting() {
+        let env_cfg = json!({"app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let mut b = Battery::sample();
+        b.arrival = Some(Arrival { name: "Fone WH-1000XM5".into(), kind: DevKind::Headphones, level: Some(82), at: Instant::now(), count: 1 });
+        let item = b.island_item(&env).unwrap();
+        assert!(item.alert);
+        assert_eq!(b.island_low().map(|l| l.name), Some("Teclado K380".to_string()));
+        ctx_run(|ctx| b.act(DISMISS, ctx));
+        assert!(b.arrival.is_some(), "o OK foi para a bateria fraca");
     }
 
     #[test]
@@ -2236,6 +2386,11 @@ impl Low {
     }
 }
 
+/// A cor do aparelho que conectou: a da carga dele (verde sem a carga, só "conectou").
+fn arrival_color(arrival: &Arrival) -> Rgba {
+    arrival.level.map_or(OK, |l| level_color(l as f32))
+}
+
 fn kind_icon(kind: DevKind) -> &'static str {
     match kind {
         DevKind::Headphones => "fones",
@@ -2280,6 +2435,45 @@ impl Battery {
             .filter(|l| l.level < ISLAND_LOW && !(l.icon == "notebook" && plugged))
             .filter(|l| !self.island_ok.contains(&l.key()))
             .min_by(|a, b| a.level.total_cmp(&b.level))
+    }
+
+    /// O aparelho que acabou de conectar, enquanto a ilha o mostra.
+    fn arrival_shown(&self) -> Option<&Arrival> {
+        self.arrival.as_ref().filter(|a| a.at.elapsed() < ARRIVAL_SHOW)
+    }
+
+    /// A ilha logo depois de um aparelho conectar: o ícone dele, o nome e a carga, "Fone
+    /// WH-1000XM5 conectou · 82%" (o verbo não depende do nome ser masculino ou feminino).
+    fn draw_arrival(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, arrival: &Arrival) {
+        let (x, y, w, h) = r;
+        let cy = y + h / 2.0;
+        let col = arrival_color(arrival);
+        let glyph = kind_icon(arrival.kind);
+        let pct = arrival.level.map(|l| format!("{l}%")).unwrap_or_default();
+        let icon = |c: &mut Canvas, cx: f32, size: f32| {
+            c.text(cx, cy, crate::ui::theme::icon(glyph), Face::Icons, size, col, Anchor::MM, None);
+        };
+        match form {
+            IslandForm::Bubble => icon(c, x + w / 2.0, 17.0),
+            IslandForm::Compact => {
+                icon(c, x + 26.0, 15.0);
+                iu::compact_text(c, x + 46.0, r, &arrival.name, &pct, col);
+            }
+            IslandForm::Banner => {
+                icon(c, x + 26.0, 15.0);
+                iu::compact_text(c, x + 46.0, r, &format!("{} conectou", arrival.name), &pct, col);
+            }
+            IslandForm::Medium => {
+                iu::badge_icon(c, x + 39.0, cy, 22.0, glyph, col);
+                let sub = if pct.is_empty() { "Acabou de conectar".to_string() } else { format!("Acabou de conectar · {pct}") };
+                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &arrival.name, &sub, col);
+                for (a, b) in island_buttons(form, w, h) {
+                    iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(a));
+                }
+            }
+            // aberta: a lista de sempre, com o que chegou em destaque
+            IslandForm::Large => self.draw_island_list(c, r, hot, &arrival.name),
+        }
     }
 
     /// Acabou de entrar (true) ou sair (false) da tomada: a ilha mostra a carga por alguns segundos.
@@ -2347,6 +2541,9 @@ impl Battery {
 
     fn draw_island(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
         if self.island_low().is_none() {
+            if let Some(arrival) = self.arrival_shown() {
+                return self.draw_arrival(c, form, r, hot, arrival);
+            }
             if let Some(plugged) = self.plug_shown() {
                 return self.draw_plug(c, form, r, hot, plugged);
             }
@@ -2395,7 +2592,10 @@ impl Battery {
             iu::bar(c, x + 160.0, x + w - 70.0, ry, d.level / 100.0, dc);
             c.text(x + w - 22.0, ry, &format!("{:.0}%", d.level), Face::Semibold, 12.0, if strong { dc } else { SOFT }, Anchor::RM, None);
         }
+        let arrived = self.arrival_shown().filter(|_| self.island_low().is_none());
         let foot = match &self.power {
+            // logo depois de um aparelho conectar: "Fone WH-1000XM5 conectou"
+            _ if arrived.is_some() => arrived.map_or(String::new(), |a| format!("{} conectou", a.name)),
             // logo depois de entrar ou sair da tomada: "Carregando · cheia às 15:03"
             Some(_) if self.plug_shown().is_some() => self.header_line(),
             Some(p) if p.charging => "Notebook carregando".to_string(),

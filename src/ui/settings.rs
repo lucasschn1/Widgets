@@ -16,6 +16,22 @@ pub const H: f32 = 640.0;
 pub const SIDEBAR: f32 = 240.0;
 pub const TOP: f32 = 78.0;
 pub use crate::platform::updates::VERSION;
+use crate::platform::notifications::Access;
+use crate::widgets::outside::apps;
+
+/// Os botões das notificações dos apps (pelo `Action::Widget("app", ...)`): pedir a permissão,
+/// abrir a privacidade das notificações e as notificações do Windows.
+pub const ASK_NOTIFY_ACCESS: u32 = 3;
+pub const OPEN_NOTIFY_PRIVACY: u32 = 4;
+pub const OPEN_NOTIFY_SETTINGS: u32 = 5;
+/// no máximo estes apps na lista das notificações (os vistos por último)
+const APP_LIST_MAX: usize = 12;
+/// o interruptor de cada app da lista (o id da área precisa durar a vida toda do app)
+const APP_SWITCHES: [&str; APP_LIST_MAX] =
+    ["app_notif:0", "app_notif:1", "app_notif:2", "app_notif:3", "app_notif:4", "app_notif:5", "app_notif:6", "app_notif:7", "app_notif:8", "app_notif:9", "app_notif:10", "app_notif:11"];
+/// "Seguir a tela em uso" e "Mostrar o texto das mensagens"
+pub const FOLLOW_SWITCH: &str = "ilha_segue_tela";
+pub const TEXT_SWITCH: &str = "notif_texto";
 
 pub const NOTIFY: [(&str, &str, &str); 7] = [
     ("cpu", "CPU alta", "Quando a CPU passa de 90% por 3 minutos"),
@@ -97,11 +113,14 @@ pub struct View<'a> {
     pub startup: bool,
     pub update_status: String,
     pub update_version: Option<String>,
+    /// a permissão do Windows para ler as notificações dos outros apps
+    pub notify_access: Access,
 }
 
 fn nav_items() -> Vec<(&'static str, String, &'static str)> {
     let mut items = vec![
         ("geral", "Geral".to_string(), "geral"),
+        ("ilha", "Ilha dinâmica".into(), "ilha"),
         ("aparencia", "Aparência".into(), "aparencia"),
         ("widgets", "Galeria de widgets".into(), "widgets"),
         ("-", "SEUS WIDGETS".into(), ""),
@@ -122,6 +141,7 @@ fn nav_items() -> Vec<(&'static str, String, &'static str)> {
 fn page_color(page: &str) -> Rgba {
     match page {
         "geral" => Rgba::rgb(142, 142, 152),
+        "ilha" => Rgba::rgb(94, 92, 230),
         "aparencia" => Rgba::rgb(175, 92, 230),
         "widgets" => Rgba::rgb(10, 122, 245),
         "tempo" => Rgba::rgb(48, 166, 230),
@@ -151,6 +171,7 @@ pub fn island_id(key: &str) -> &'static str {
         "pomodoro" => "na_ilha:pomodoro",
         "sistema" => "na_ilha:sistema",
         "github" => "na_ilha:github",
+        "tempo" => "na_ilha:tempo",
         _ => "na_ilha:bateria",
     }
 }
@@ -161,6 +182,7 @@ fn page_title(page: &str) -> (String, Option<String>) {
     }
     let (title, subtitle) = match page {
         "geral" => ("Geral", Some("Como os widgets se comportam no dia a dia.")),
+        "ilha" => ("Ilha dinâmica", Some("O que aparece na ilha, onde ela fica e as notificações dos outros apps.")),
         "aparencia" => ("Aparência", Some("Vidro, texto e animações. Tudo muda na hora.")),
         "widgets" => ("Galeria de widgets", Some("Escolha quais widgets ficam na sua área de trabalho.")),
         "avisos" => ("Notificações", Some("Quando os widgets podem chamar sua atenção.")),
@@ -248,6 +270,10 @@ fn rows(ui: &mut Ui, x: f32, y: f32, w: f32, rows: Vec<Row>) -> f32 {
     for Row(_, desc, control) in &rows {
         let text_w = w - 36.0 - control.width(w);
         let full = desc.as_ref().map(|d| ui.wrap(d, 11.5, text_w, 99)).unwrap_or_default();
+        #[cfg(test)]
+        if full.len() > 2 {
+            tests::cut(desc.as_deref().unwrap_or(""));
+        }
         let ls = if full.len() <= 2 { full } else { vec![full[0].clone(), full[1..].join(" ")] };
         heights.push(if ls.is_empty() { 54.0 } else { 66.0 + 17.0 * (ls.len() as f32 - 1.0) });
         lines.push((text_w, ls));
@@ -383,6 +409,7 @@ fn draw_page(st: &mut SettingsState, ui: &mut Ui, v: &View) {
     let (x, w) = (32.0, W - SIDEBAR - 64.0);
     let height = match st.page {
         "geral" => page_geral(ui, x, w, v),
+        "ilha" => page_ilha(ui, x, w, v),
         "aparencia" => page_aparencia(st, ui, x, w, v),
         "widgets" => page_widgets(st, ui, x, w, v),
         "avisos" => page_avisos(ui, x, w, v),
@@ -421,15 +448,12 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
         Row("Acompanhar a economia de energia".into(), Some("Pausa as animações contínuas quando a economia de energia do Windows está ligada".into()), setting_switch(v, "economia_bateria")),
         Row("Desenhar pela placa de vídeo".into(), Some("Animações mais lisas, com menos CPU (experimental; vale ao abrir o app de novo)".into()), setting_switch(v, "placa_de_video")),
     ]);
-    let y = section(ui, x, y, "Ilha flutuante");
-    let y = rows(ui, x, y, w, vec![
-        Row("Widgets na ilha".into(), Some("O Pomodoro correndo, a CPU alta, pedidos de revisão, a bateria (fraca ou na tomada) e a chuva chegando aparecem na ilha, ao lado da música".into()), setting_switch(v, "ilha_widgets")),
-        Row("Onde fica".into(), Some("Na barra de tarefas, à esquerda do Iniciar. Arraste para qualquer lugar; clique direito nela para voltar".into()), Control::None),
-    ]);
-    let y = section(ui, x, y, "A ilha em repouso");
-    let y = rows(ui, x, y, w, rest_rows(v));
-    let y = section(ui, x, y, "O mundo lá fora, na ilha");
-    let y = rows(ui, x, y, w, outside_rows(v));
+    let y = section(ui, x, y, "Ilha dinâmica");
+    let y = rows(ui, x, y, w, vec![Row(
+        "Tudo da ilha num lugar só".into(),
+        Some("Os widgets na ilha, as notificações dos apps, a ilha em repouso e o mundo lá fora".into()),
+        btn("ir_ilha", "Abrir", Action::Go("ilha")),
+    )]);
     let y = section(ui, x, y, "Organizar");
     let y = rows(ui, x, y, w, vec![
         Row("Modo edição".into(), Some("Feche, redimensione e mova todos os widgets de uma vez".into()), Control::Button("editar", "Editar widgets".into(), Action::Edit, "primary", Some("edit"))),
@@ -454,6 +478,106 @@ fn page_geral(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     ));
     let y = rows(ui, x, y, w, layout_rows);
     restore(ui, x, y, w, "geral")
+}
+
+/// O que cada widget mostra na ilha (na página da ilha).
+fn island_description(key: &str) -> &'static str {
+    match key {
+        "pomodoro" => "O tempo correndo, com o último minuto na frente de tudo",
+        "sistema" => "A CPU ou a memória altas por alguns minutos, com os apps que mais gastam",
+        "github" => "Um pedido de revisão novo",
+        "bateria" => "Bateria fraca, a tomada entrando ou saindo e um fone ou mouse conectando",
+        _ => "Chuva chegando, trovoada e amanhã bem mais frio ou mais quente",
+    }
+}
+
+/// A página da ilha dinâmica: os widgets nela, onde ela fica, as notificações dos outros apps, a
+/// ilha em repouso e o mundo lá fora.
+fn page_ilha(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
+    let cfg = &v.sh.cfg;
+    let y = section(ui, x, 4.0, "Widgets na ilha");
+    let mut widget_rows = vec![Row(
+        "Widgets na ilha".into(),
+        Some("Os widgets abaixo aparecem na ilha quando têm algo a dizer, ao lado da música. O Tocando agora vira a ilha com um clique no widget".into()),
+        setting_switch(v, "ilha_widgets"),
+    )];
+    for key in ISLAND_KEYS {
+        widget_rows.push(Row(widgets::title(key).into(), Some(island_description(key).into()), sw(island_id(key), widgets::on_island(cfg, key), Action::Toggle(island_id(key)))));
+    }
+    let y = rows(ui, x, y, w, widget_rows);
+    let y = section(ui, x, y, "Notificações dos apps");
+    let y = rows(ui, x, y, w, notify_rows(v));
+    let apps_rows = muted_rows(v);
+    let y = if apps_rows.is_empty() {
+        y
+    } else {
+        let y = section(ui, x, y, "Apps que aparecem na ilha");
+        rows(ui, x, y, w, apps_rows)
+    };
+    let y = section(ui, x, y, "Onde fica");
+    let y = rows(ui, x, y, w, vec![
+        Row("Na barra de tarefas".into(), Some("À esquerda do Iniciar. Arraste para qualquer lugar; clique direito nela para voltar à barra ou ir para o alto da tela".into()), Control::None),
+        Row("Seguir a tela em uso".into(), Some("Com dois monitores, a ilha vai para o monitor da janela em que você está, no mesmo lugar".into()), sw(FOLLOW_SWITCH, cfg["midia"].bool_of("ilha_segue_tela").unwrap_or(false), Action::Toggle(FOLLOW_SWITCH))),
+    ]);
+    let y = section(ui, x, y, "A ilha em repouso");
+    let y = rows(ui, x, y, w, rest_rows(v));
+    let y = section(ui, x, y, "O mundo lá fora, na ilha");
+    rows(ui, x, y, w, outside_rows(v))
+}
+
+/// As notificações dos outros apps: ligar, a permissão do Windows, o texto e como não ver duas
+/// vezes.
+fn notify_rows(v: &View) -> Vec<Row> {
+    let cfg = &v.sh.cfg;
+    let switch_id = "na_ilha:notificacoes_apps";
+    let on = apps::enabled(cfg);
+    let mut r = vec![Row(
+        "Mostrar as notificações dos apps".into(),
+        Some("WhatsApp, Teams, Outlook… A que chega estica a ilha com o ícone do app, quem mandou e o começo da mensagem. Nada sai do seu PC".into()),
+        sw(switch_id, on, Action::Toggle(switch_id)),
+    )];
+    if !on {
+        return r;
+    }
+    r.push(match v.notify_access {
+        Access::Allowed => Row("Permissão do Windows".into(), Some("Liberada".into()), Control::None),
+        Access::Denied => Row(
+            "Permissão do Windows".into(),
+            Some("Negada. Libere o Widgets em Privacidade → Notificações".into()),
+            btn("notif_privacidade", "Abrir o Windows", Action::Widget("app", OPEN_NOTIFY_PRIVACY)),
+        ),
+        Access::Unasked => Row("Permissão do Windows".into(), Some("O Windows pergunta uma vez".into()), Control::Button("notif_permitir", "Permitir".into(), Action::Widget("app", ASK_NOTIFY_ACCESS), "primary", None)),
+        Access::Unavailable => Row("Permissão do Windows".into(), Some("Este Windows não deixa ler as notificações".into()), Control::None),
+    });
+    r.push(Row(
+        "Mostrar o texto das mensagens".into(),
+        Some("Desligado, a ilha mostra só o app e quem mandou (bom para compartilhar a tela)".into()),
+        sw(TEXT_SWITCH, apps::shows_text(cfg), Action::Toggle(TEXT_SWITCH)),
+    ));
+    r.push(Row(
+        "Sem o aviso repetido do Windows".into(),
+        Some("Para ver só a ilha, desligue os banners do app nas notificações do Windows".into()),
+        btn("notif_windows", "Abrir o Windows", Action::Widget("app", OPEN_NOTIFY_SETTINGS)),
+    ));
+    r
+}
+
+/// Os apps já vistos na central, cada um com o interruptor de aparecer na ilha.
+fn muted_rows(v: &View) -> Vec<Row> {
+    if !apps::enabled(&v.sh.cfg) {
+        return Vec::new();
+    }
+    let muted = apps::muted(&v.sh.cfg);
+    apps::seen_apps(&v.sh.cache)
+        .into_iter()
+        .take(APP_LIST_MAX)
+        .zip(APP_SWITCHES)
+        .map(|((app_id, name), switch)| {
+            let label = if name.is_empty() { app_id.clone() } else { name };
+            let on = !muted.contains(&app_id);
+            Row(label, None, sw(switch, on, Action::MuteApp(app_id)))
+        })
+        .collect()
 }
 
 /// O interruptor de cada fonte do mundo lá fora (o pôr do sol, a lua...).
@@ -857,10 +981,10 @@ fn hero(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, k
     let mut toggles: Vec<(&'static str, String, bool, Action)> = vec![("ver:hero", "Na área de trabalho".into(), visible, Action::Visible(key, !visible))];
     if ISLAND_KEYS.contains(&key) {
         let on = widgets::on_island(&v.sh.cfg, key);
-        let label = if config::setting_bool(&v.sh.cfg, "ilha_widgets") { "Na ilha flutuante" } else { "Na ilha (desligada em Geral)" };
+        let label = if config::setting_bool(&v.sh.cfg, "ilha_widgets") { "Na ilha dinâmica" } else { "Na ilha (desligada nas opções da ilha)" };
         toggles.push((island_id(key), label.into(), on, Action::Toggle(island_id(key))));
     } else if key == "midia" {
-        toggles.push(("", "Clique no widget para virar a ilha".into(), false, Action::Go("geral")));
+        toggles.push(("", "Clique no widget para virar a ilha".into(), false, Action::Go("ilha")));
     }
     // os interruptores encostados embaixo, um a cada 30 pontos
     let mut ty = y + h - 18.0 - 30.0 * toggles.len() as f32;
@@ -976,8 +1100,10 @@ mod tests {
     /// Desenha uma página das Configurações (como a janela desenha) e devolve a imagem e a altura
     /// do conteúdo. `scroll`: quanto a página está rolada.
     fn page(name: &'static str, scroll: f32, s: f32) -> (Image, f32, f32) {
-        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}});
-        let sh = Shared::new(cfg, serde_json::json!({}), s);
+        // as notificações dos apps ligadas, com dois apps já vistos (a página da ilha inteira)
+        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}, apps::KEY: {"na_ilha": true, apps::MUTED_FIELD: ["Teams!App"]}});
+        let cache = serde_json::json!({apps::KEY: {apps::SEEN_FIELD: {"WhatsApp!App": "WhatsApp", "Teams!App": "Microsoft Teams"}}});
+        let sh = Shared::new(cfg, cache, s);
         let render = |key: &'static str, mode: Mode, scale: f32| {
             let kind = widgets::sample(key, &sh.cfg, &sh.cache)?;
             Some((crate::card::render_kind(kind.as_ref(), mode, scale, &sh), widgets::Layout::of(mode).radius * scale))
@@ -991,6 +1117,7 @@ mod tests {
             startup: false,
             update_status: String::new(),
             update_version: None,
+            notify_access: Access::Allowed,
         };
         let mut st = SettingsState::new(name);
         st.scrolls.insert(name, scroll);
@@ -1032,6 +1159,32 @@ mod tests {
 
     pub(super) fn placed(x: f32, top: f32, bottom: f32) {
         PLACED.with(|p| p.borrow_mut().push((x, top, bottom)));
+    }
+
+    thread_local! {
+        /// as descrições que não couberam em duas linhas (a segunda acaba em "…")
+        static CUT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn cut(desc: &str) {
+        CUT.with(|c| c.borrow_mut().push(desc.to_string()));
+    }
+
+    /// Nenhuma descrição das Configurações fica cortada com "…" (cabe em duas linhas, ao lado do
+    /// controle da linha).
+    #[test]
+    fn descriptions_are_never_cut() {
+        com();
+        let pages: Vec<&'static str> = nav_items().into_iter().map(|(page, _, _)| page).filter(|p| *p != "-").collect();
+        let mut cut_off = Vec::new();
+        for page in pages {
+            CUT.with(|c| c.borrow_mut().clear());
+            let (_, _, max_scroll) = page_draw(page, 0.0);
+            let _ = page_draw(page, max_scroll);
+            cut_off.extend(CUT.with(|c| c.borrow().clone()).into_iter().map(|d| format!("{page}: {d}")));
+        }
+        cut_off.dedup();
+        assert!(cut_off.is_empty(), "cortadas: {cut_off:#?}");
     }
 
     #[test]
@@ -1086,6 +1239,7 @@ mod tests {
             startup: false,
             update_status: String::new(),
             update_version: None,
+            notify_access: Access::Allowed,
         };
         for step in 0..3 {
             let mut st = crate::ui::prompt::WelcomeState::new(&sh.cfg, widgets::KEYS, false, true);
@@ -1109,10 +1263,11 @@ mod tests {
     #[ignore]
     fn settings_pages() {
         com();
-        let pages = ["geral", "aparencia", "widgets", "pomodoro", "midia", "avisos", "dicas", "sobre"];
+        let pages = ["geral", "ilha", "aparencia", "widgets", "pomodoro", "midia", "avisos", "dicas", "sobre"];
         let mut list: Vec<(&'static str, bool)> = pages.iter().map(|p| (*p, false)).collect();
         list.push(("widgets", true));
         list.push(("geral", true));
+        list.push(("ilha", true));
         for (name, end) in list {
             let (_, _, max_scroll) = page(name, 0.0, 1.25);
             let (img, _, _) = page(name, if end { max_scroll } else { 0.0 }, 1.25);
@@ -1120,6 +1275,12 @@ mod tests {
             crate::gfx::save_png(&img, &path).unwrap();
             println!("{}", path.display());
         }
+        // a página da ilha é comprida: o meio também (as notificações dos apps)
+        let (_, _, max_scroll) = page("ilha", 0.0, 1.25);
+        let (img, _, _) = page("ilha", max_scroll * 0.38, 1.25);
+        let path = std::env::temp_dir().join("config_ilha_meio.png");
+        crate::gfx::save_png(&img, &path).unwrap();
+        println!("{}", path.display());
     }
 }
 
