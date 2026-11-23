@@ -186,6 +186,7 @@ fn window_shot(title: &str, w: f32, h: f32, draw: impl FnOnce(&mut crate::ui::pa
         startup: true,
         update_status: String::new(),
         update_version: None,
+        notify_access: crate::platform::notifications::Access::Allowed,
     };
     let mut c = Canvas::new(pw, ph, S);
     c.image(&bg, 0.0, 0.0);

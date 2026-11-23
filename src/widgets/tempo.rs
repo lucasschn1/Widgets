@@ -154,6 +154,46 @@ fn wmo(code: i64) -> &'static str {
     }
 }
 
+/// A condição do tempo em poucas letras, para a ilha (onde "Predominantemente limpo" não cabe ao
+/// lado de mais nada).
+fn wmo_short(code: i64) -> &'static str {
+    match code {
+        1 => "Quase limpo",
+        2 => "Algumas nuvens",
+        48 => "Neblina",
+        56 | 57 => "Garoa gelada",
+        66 | 67 => "Chuva gelada",
+        77 => "Neve fina",
+        80 | 81 => "Pancadas",
+        82 => "Temporal",
+        85 | 86 => "Neve",
+        96 | 99 => "Granizo",
+        _ => wmo(code),
+    }
+}
+
+/// Todas as condições (inteira, curta) e todos os avisos das próximas horas (inteiro, curto) que
+/// o Tempo pode guardar, com as horas mais largas, para os testes da ilha conferirem que nada
+/// fica cortado com "…".
+#[cfg(test)]
+pub fn all_island_texts() -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let codes: Vec<i64> = (0..=99).filter(|code| wmo(*code) != "—").collect();
+    let mut descs: Vec<(String, String)> = codes.iter().map(|code| (wmo(*code).to_string(), wmo_short(*code).to_string())).collect();
+    descs.push(("Ventania".into(), "Ventania".into()));
+    let hours = |codes: &[i64]| json!(codes.iter().enumerate().map(|(i, code)| json!([if i == 0 { "Agora" } else { "23h" }, "x", 20, code, 0])).collect::<Vec<_>>());
+    let mut lines: Vec<(String, String)> = Vec::new();
+    for now in &codes {
+        for next in &codes {
+            lines.extend(sky_line(&hours(&[*now, *next]), None).map(|l| (l.text, l.short)));
+            lines.extend(sky_line(&hours(&[0, 0, *next]), None).map(|l| (l.text, l.short)));
+        }
+    }
+    lines.extend(sky_line(&hours(&[0, 0]), Some(120)).map(|l| (l.text, l.short)));
+    lines.sort();
+    lines.dedup();
+    (descs, lines)
+}
+
 /// Nome do ícone (ver weather_art) para um código de tempo da Open-Meteo.
 pub fn weather_icon(code: i64, is_day: bool) -> &'static str {
     match code {
@@ -310,30 +350,42 @@ fn days(data: &Value) -> Value {
     Value::Array(out)
 }
 
-/// O aviso das próximas horas e o ícone dele, ou nada: "Trovoadas até 17h, depois chuva",
-/// "Chuva até 0h, depois nublado", "Neve a partir das 15h", "Neblina até 10h, depois nublado",
-/// "Ventos de até 64 km/h" (`gusts`: só quando está ventando forte).
-fn sky_line(hours: &Value, gusts: Option<i64>) -> Option<(String, &'static str)> {
+/// O aviso das próximas horas: o texto inteiro, o curto (para a ilha) e o ícone.
+#[derive(Clone, Debug, PartialEq)]
+struct SkyLine {
+    text: String,
+    short: String,
+    icon: &'static str,
+}
+
+/// O aviso das próximas horas, ou nada: "Trovoadas até 17h, depois chuva" ("Trovoada até
+/// 17h"), "Chuva até 0h, depois nublado" ("Chuva até 0h"), "Neve a partir das 15h" ("Neve às
+/// 15h"), "Ventos de até 64 km/h" ("Vento de 64 km/h"; `gusts`: só quando está ventando forte).
+fn sky_line(hours: &Value, gusts: Option<i64>) -> Option<SkyLine> {
     let list = hours.as_array()?;
     let code = |h: &Value| h[3].as_i64().unwrap_or(0);
     let label = |h: &Value| h[0].as_str().unwrap_or("").to_string();
-    let kinds: [(fn(i64) -> bool, &str, &'static str); 4] = [(is_storm, "Trovoadas", "thunder"), (is_rain, "Chuva", "rain"), (is_snow, "Neve", "snow"), (is_fog, "Neblina", "fog")];
+    // (o que é, o nome no aviso inteiro, o nome no curto, o ícone)
+    type Kind = (fn(i64) -> bool, &'static str, &'static str, &'static str);
+    let kinds: [Kind; 4] = [(is_storm, "Trovoadas", "Trovoada", "thunder"), (is_rain, "Chuva", "Chuva", "rain"), (is_snow, "Neve", "Neve", "snow"), (is_fog, "Neblina", "Neblina", "fog")];
     let first = code(list.first()?);
     // o que está acontecendo agora, e até quando
-    for (is, name, icon) in kinds {
+    for (is, name, short, icon) in kinds {
         if is(first) {
-            let text = match list.iter().position(|h| !is(code(h))) {
-                Some(i) => format!("{name} até {}, depois {}", label(&list[i]), wmo(code(&list[i])).to_lowercase()),
-                None => format!("{name} nas próximas horas"),
+            let (text, short) = match list.iter().position(|h| !is(code(h))) {
+                Some(i) => (format!("{name} até {}, depois {}", label(&list[i]), wmo(code(&list[i])).to_lowercase()), format!("{short} até {}", label(&list[i]))),
+                None => (format!("{name} nas próximas horas"), format!("{short} por horas")),
             };
-            return Some((text, icon));
+            return Some(SkyLine { text, short, icon });
         }
     }
     if let Some(kmh) = gusts {
-        return Some((format!("Ventos de até {kmh} km/h"), "wind"));
+        return Some(SkyLine { text: format!("Ventos de até {kmh} km/h"), short: format!("Vento de {kmh} km/h"), icon: "wind" });
     }
     // chuva ou neve chegando
-    list.iter().skip(1).find_map(|h| kinds[1..3].iter().find(|k| (k.0)(code(h))).map(|k| (format!("{} a partir das {}", k.1, label(h)), k.2)))
+    list.iter().skip(1).find_map(|h| {
+        kinds[1..3].iter().find(|k| (k.0)(code(h))).map(|k| SkyLine { text: format!("{} a partir das {}", k.1, label(h)), short: format!("{} às {}", k.2, label(h)), icon: k.3 })
+    })
 }
 
 /// As horas com o nascer e o pôr do sol no meio, como no Tempo da Apple: uma coluna "18:52" com
@@ -427,15 +479,17 @@ fn process(data: &Value, place: &str) -> Value {
         "is_day": is_day,
         "icon": if windy { "wind" } else { weather_icon(code, is_day) },
         "desc": if windy { "Ventania" } else { wmo(code) },
+        "desc_short": if windy { "Ventania" } else { wmo_short(code) },
         "windy": windy,
         "utc_offset": data["utc_offset_seconds"].as_f64(),
         "max": round(&daily["temperature_2m_max"][0]),
         "min": round(&daily["temperature_2m_min"][0]),
         "details": format!("Sensação {}°  ·  Umidade {}%  ·  Vento {} km/h",
             round(&cur["apparent_temperature"]), round(&cur["relative_humidity_2m"]), round(&cur["wind_speed_10m"])),
-        "rain_line": line.as_ref().map(|l| l.0.clone()),
+        "rain_line": line.as_ref().map(|l| l.text.clone()),
+        "rain_line_short": line.as_ref().map(|l| l.short.clone()),
         "rain_in": rain_in(data),
-        "line_icon": line.map(|l| l.1),
+        "line_icon": line.map(|l| l.icon),
         "hours": hours,
         "days": days(data),
         "day_info": day_info,
@@ -649,11 +703,14 @@ struct Alert {
     /// a pílula fechada: o nome e o valor forte ("Chuva", "20 min")
     short: String,
     value: String,
-    /// a pílula esticada com o aviso (com o mesmo valor à direita)
+    /// a pílula esticada com o aviso (com o mesmo valor à direita), e a versão curta quando o
+    /// inteiro não cabe (sem a cidade)
     banner: String,
-    /// a ilha aberta: o título e a linha de baixo
+    banner_short: String,
+    /// a ilha aberta: o título e a linha de baixo (e a curta, quando a inteira não cabe)
     title: String,
     sub: String,
+    sub_short: String,
     /// o céu do aviso (a chuva que vem, a trovoada) e o ícone
     weather: Weather,
     icon: String,
@@ -830,6 +887,12 @@ impl Tempo {
         format!("Agora {} · {}", self.temp_text(), weather.str_of("desc").unwrap_or(""))
     }
 
+    /// A linha de baixo curta: "Agora 24° · Quase limpo".
+    fn now_line_short(&self, weather: &Value) -> String {
+        let desc = weather.str_of("desc_short").or(weather.str_of("desc")).unwrap_or("");
+        format!("Agora {} · {}", self.temp_text(), desc)
+    }
+
     /// Trovoada agora, ou chegando nas próximas horas (com a hora).
     fn storm_alert(&self, weather: &Value) -> Option<Alert> {
         let code = self.code();
@@ -842,13 +905,17 @@ impl Tempo {
             hours.iter().skip(1).take(STORM_SOON).find(|h| is_storm(h[3].as_i64().unwrap_or(0))).map(|h| Some(h[0].as_str().unwrap_or("").to_string()))
         };
         let in_place = self.in_place();
-        let now_line = self.now_line(weather);
-        let (value, banner, title, sub) = match arrives? {
-            None => ("agora".to_string(), format!("Trovoada{in_place}"), "Trovoada agora".to_string(), weather.str_of("rain_line").map(String::from).unwrap_or(now_line)),
-            Some(hour) => (hour.clone(), format!("Trovoada chegando{in_place}"), format!("Trovoada às {hour}"), now_line),
+        let (now_line, now_short) = (self.now_line(weather), self.now_line_short(weather));
+        let (value, banner, banner_short, title, sub, sub_short) = match arrives? {
+            None => {
+                let line = weather.str_of("rain_line").map(String::from);
+                let short = weather.str_of("rain_line_short").map(String::from).or(line.clone());
+                ("agora".to_string(), format!("Trovoada{in_place}"), "Trovoada".to_string(), "Trovoada agora".to_string(), line.unwrap_or(now_line), short.unwrap_or(now_short))
+            }
+            Some(hour) => (hour.clone(), format!("Trovoada chegando{in_place}"), "Trovoada chegando".to_string(), format!("Trovoada às {hour}"), now_line, now_short),
         };
         let sky = if is_storm(code) { self.sky_weather() } else { Weather::Storm };
-        Some(Alert { key: format!("trovoada|{date}"), short: "Trovoada".into(), value, banner, title, sub, weather: sky, icon: "thunder".into(), color: STORM_COLOR })
+        Some(Alert { key: format!("trovoada|{date}"), short: "Trovoada".into(), value, banner, banner_short, title, sub, sub_short, weather: sky, icon: "thunder".into(), color: STORM_COLOR })
     }
 
     /// Chuva começando na próxima hora (até um minuto depois da hora prevista: "agora").
@@ -861,7 +928,19 @@ impl Tempo {
         let minutes = minutes_left.max(0.0).round() as i64;
         let (value, title) = if minutes < 1 { ("agora".to_string(), "Chuva começando".to_string()) } else { (format!("{minutes} min"), format!("Chuva em {minutes} min")) };
         let banner = format!("Chuva chegando{}", self.in_place());
-        Some(Alert { key: key.clone(), short: "Chuva".into(), value, banner, title, sub: self.now_line(weather), weather: Weather::Rain, icon: "rain".into(), color: RAIN_BLUE })
+        Some(Alert {
+            key: key.clone(),
+            short: "Chuva".into(),
+            value,
+            banner,
+            banner_short: "Chuva chegando".into(),
+            title,
+            sub: self.now_line(weather),
+            sub_short: self.now_line_short(weather),
+            weather: Weather::Rain,
+            icon: "rain".into(),
+            color: RAIN_BLUE,
+        })
     }
 
     /// Amanhã bem mais frio ou mais quente que hoje (a máxima muda `TEMP_JUMP` graus ou mais).
@@ -879,8 +958,10 @@ impl Tempo {
             short: "Amanhã".into(),
             value: format!("{}{}°", if change < 0 { "−" } else { "+" }, change.abs()),
             banner: format!("Amanhã {verb}: máxima de {tomorrow_max}°"),
+            banner_short: format!("Amanhã {verb}"),
             title: format!("Amanhã {verb} {}°", change.abs()),
             sub: format!("Máxima de {tomorrow_max}° (hoje, {today_max}°)"),
+            sub_short: format!("Máxima de {tomorrow_max}°"),
             weather: self.sky_weather(),
             icon: tomorrow.str_of("icon").unwrap_or("clouds").to_string(),
             color: if change < 0 { COLD } else { WARM },
@@ -919,12 +1000,15 @@ impl Tempo {
             IslandForm::Bubble => art(c, x + w / 2.0, cy, 28.0),
             IslandForm::Compact | IslandForm::Banner => {
                 art(c, x + 26.0, cy, 26.0);
-                let label = if form == IslandForm::Banner { &alert.banner } else { &alert.short };
+                let options = if form == IslandForm::Banner { [alert.banner.as_str(), alert.banner_short.as_str(), alert.short.as_str()] } else { [alert.short.as_str(); 3] };
+                let label = iu::fitting(c, &options, Face::Regular, 12.0, iu::compact_room(c, x + 46.0, r, &alert.value));
                 iu::compact_text(c, x + 46.0, r, label, &alert.value, alert.color);
             }
             IslandForm::Medium => {
                 art(c, x + 39.0, cy, 46.0);
-                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 86.0, &alert.title, &alert.sub, alert.color);
+                let room = w - 74.0 - 86.0;
+                let sub = iu::fitting(c, &[&alert.sub, &alert.sub_short], Face::Regular, 11.5, room);
+                iu::two_lines(c, x + 74.0, cy, room, &alert.title, sub, alert.color);
                 for (act, b) in island_buttons(form, w, h) {
                     iu::pill_button(c, (x + b.0, y + b.1, x + b.2, y + b.3), "OK", false, hot == Some(act));
                 }
@@ -950,7 +1034,8 @@ impl Tempo {
         sky::draw_front(c, x, y, lw, lh, lr, alert.weather, secs, &self.island_storm);
         iu::header(c, r, "TEMPO", WHITE, &self.place_short(), MUTED);
         c.text(x + 22.0, y + 58.0, &alert.title, Face::Semibold, 20.0, FG, Anchor::LM, Some(w - 44.0));
-        c.text(x + 22.0, y + 82.0, &alert.sub, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
+        let sub = iu::fitting(c, &[&alert.sub, &alert.sub_short], Face::Regular, 12.0, w - 44.0);
+        c.text(x + 22.0, y + 82.0, sub, Face::Regular, 12.0, MUTED, Anchor::LM, Some(w - 44.0));
         // as próximas horas (sem o nascer e o pôr do sol, que não têm temperatura)
         let hours: Vec<&Value> = self.weather.as_ref().and_then(|w| w["hours"].as_array()).map(|list| list.iter().filter(|h| h[2].is_i64()).take(6).collect()).unwrap_or_default();
         let (x0, x1) = (x + 14.0, x + w - 14.0);
@@ -2513,6 +2598,44 @@ impl Tempo {
 mod tests {
     use super::*;
 
+    /// Cada aviso do Tempo em cada forma da ilha, num PNG por aviso (para conferir a olho):
+    /// cargo test --release tempo_island_png -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn tempo_island_png() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let s = 1.5;
+        let forms = [IslandForm::Bubble, IslandForm::Compact, IslandForm::Banner, IslandForm::Medium, IslandForm::Large];
+        let samples = [("chuva", Tempo::sample_island("chuva")), ("trovoada", Tempo::sample_island("trovoada")), ("frio", Tempo::sample_island("frio")), ("trovoada_agora", Tempo::sample_sky(95, 15.0, false, Mode::M)), ("chuva_provavel", {
+            let mut t = Tempo::sample_island("chuva");
+            for hour in t.weather.as_mut().unwrap()["hours"].as_array_mut().unwrap() {
+                hour[4] = json!(80);
+            }
+            t
+        })];
+        let cfg = json!({"app": {}});
+        for (name, tempo) in samples {
+            let env = Env { cfg: &cfg, key: "tempo" };
+            let total_h: f32 = forms.iter().map(|f| iu::size(*f).h + 14.0).sum::<f32>() + 14.0;
+            let mut c = Canvas::new((400.0 * s) as u32, (total_h * s) as u32, s);
+            c.fill_round_rect(0.0, 0.0, 400.0, total_h, 0.0, Rgba::rgb(70, 80, 100));
+            let mut y = 14.0;
+            for form in forms {
+                let iu::FormSize { w, h, radius: r } = iu::size(form);
+                c.fill_round_rect(14.0, y, 14.0 + w, y + h, r, Rgba::rgb(0, 0, 0));
+                c.push_round_clip(14.0, y, 14.0 + w, y + h, r);
+                tempo.island_draw(&mut c, form, (14.0, y, w, h), None, &env);
+                c.pop_clip();
+                y += h + 14.0;
+            }
+            let path = std::env::temp_dir().join(format!("ilha_tempo_{name}.png"));
+            crate::gfx::save_png(&c.finish(), &path).unwrap();
+            println!("{}", path.display());
+        }
+    }
+
     /// Os avisos da ilha: a chuva chegando conta os minutos, a trovoada diz a hora, a mudança
     /// de temperatura diz quanto; o dia comum não avisa nada; o "OK" some com o aviso.
     #[test]
@@ -2835,7 +2958,12 @@ mod tests {
     #[test]
     fn the_line_follows_the_weather() {
         let hours = |codes: &[i64]| json!(codes.iter().enumerate().map(|(i, c)| json!([if i == 0 { "Agora".to_string() } else { format!("{}h", 14 + i) }, "x", 20, c, 0])).collect::<Vec<_>>());
-        let line = |codes: &[i64], gusts| sky_line(&hours(codes), gusts);
+        let line = |codes: &[i64], gusts| sky_line(&hours(codes), gusts).map(|l| (l.text, l.icon));
+        let short = |codes: &[i64], gusts| sky_line(&hours(codes), gusts).map(|l| l.short);
+        assert_eq!(short(&[95, 95, 63, 3], None).as_deref(), Some("Trovoada até 16h"));
+        assert_eq!(short(&[73, 73], None).as_deref(), Some("Neve por horas"));
+        assert_eq!(short(&[1, 1], Some(71)).as_deref(), Some("Vento de 71 km/h"));
+        assert_eq!(short(&[1, 1, 61], None).as_deref(), Some("Chuva às 16h"));
         assert_eq!(line(&[95, 95, 63, 3], None), Some(("Trovoadas até 16h, depois chuva".into(), "thunder")));
         assert_eq!(line(&[63, 3], None), Some(("Chuva até 15h, depois nublado".into(), "rain")));
         assert_eq!(line(&[73, 73], None), Some(("Neve nas próximas horas".into(), "snow")));
@@ -2859,6 +2987,35 @@ mod tests {
         assert_eq!(weather_icon(65, true), "heavy_rain");
         assert_eq!(weather_icon(99, true), "hail");
         assert_eq!(weather_icon(95, true), "thunder");
+    }
+
+    /// Na ilha, os avisos do Tempo nunca ficam cortados com "…": a versão curta (sem a cidade, com
+    /// a condição curta) sempre cabe, mesmo com a temperatura mais larga.
+    #[test]
+    fn island_alert_texts_are_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        let (descs, lines) = all_island_texts();
+        let medium = iu::size(IslandForm::Medium);
+        let medium_room = medium.w - 74.0 - 86.0;
+        // a linha de baixo: "Agora -18° · Quase limpo", ou o aviso das próximas horas (trovoada agora)
+        for (_, short) in &descs {
+            let sub = format!("Agora -18° · {short}");
+            assert!(c.text_width(&sub, Face::Regular, 11.5) <= medium_room, "{sub:?}");
+        }
+        for (_, short) in &lines {
+            assert!(c.text_width(short, Face::Regular, 11.5) <= medium_room, "{short:?}");
+        }
+        // a pílula esticada, sem a cidade, com o valor mais largo
+        let banner = iu::size(IslandForm::Banner);
+        let r = (0.0, 0.0, banner.w, banner.h);
+        for text in ["Trovoada chegando", "Chuva chegando", "Amanhã esfria", "Amanhã esquenta"] {
+            for value in ["agora", "60 min", "−12°", "23h"] {
+                assert!(c.text_width(text, Face::Regular, 12.0) <= iu::compact_room(&c, 46.0, r, value), "{text:?} com {value:?}");
+            }
+        }
     }
 
     /// Nenhuma condição do tempo fica cortada com "…": no médio e no grande cabe ao lado da

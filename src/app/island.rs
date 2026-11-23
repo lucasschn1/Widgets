@@ -71,9 +71,21 @@ pub const M_ISLAND_OPEN: u32 = 300_041;
 pub const M_ISLAND_CENTER: u32 = 300_042;
 pub const M_ISLAND_DOCK: u32 = 300_043;
 pub const M_ISLAND_HIDE: u32 = 300_044;
+pub const M_ISLAND_FOLLOW: u32 = 300_045;
+/// a opção "Seguir a tela em uso" (em `cfg[KEY]`)
+const FOLLOW_FIELD: &str = "ilha_segue_tela";
+/// de quanto em quanto tempo ver em qual monitor está a janela em uso
+const SCREEN_CHECK: Duration = Duration::from_millis(500);
+/// a janela em uso precisa ficar este tempo no outro monitor para a ilha ir atrás: um clique
+/// rápido lá (e a volta) não a faz atravessar a tela à toa
+const SCREEN_SETTLE: Duration = Duration::from_millis(1500);
 /// + o índice em `rest::Look::ALL`: liga ou desliga o que a ilha em repouso mostra
 pub const M_ISLAND_REST: u32 = 303_010;
 pub const M_ISLAND_REST_DOT: u32 = 303_020;
+/// + a ação da fonte da ilha (o "não mostrar as notificações deste app")
+pub const M_ISLAND_FEED: u32 = 303_100;
+/// quantas ações cada fonte pode pôr no menu da ilha
+const FEED_ACTIONS: u32 = 100;
 
 const BLACK: Rgba = Rgba::rgb(0, 0, 0);
 
@@ -129,6 +141,34 @@ const NEAR_MARGIN: f32 = 120.0;
 const DOT: f32 = 26.0;
 /// a gota aberta com um clique volta a ser gota com o mouse longe este tanto
 const DOT_BACK: Duration = Duration::from_secs(3);
+/// quanto a roda do mouse precisa girar para trocar (um "clique" da roda; no touchpad, a soma
+/// dos pedacinhos)
+const WHEEL_STEP: f32 = 1.0;
+
+/// O que a roda do mouse faz na ilha.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum WheelDoes {
+    /// o volume da música (com ela na pílula)
+    Volume,
+    /// troca o que a ilha em repouso mostra (o relógio, o tempo, as cotações...)
+    Looks,
+    /// troca o widget da pílula (com mais de um na ilha)
+    Widgets,
+}
+
+/// O que a roda faz com o mouse nas bolhas (`on_bubbles`) ou na pílula que mostra `shown`: nas
+/// bolhas, sempre troca o widget; na pílula, cada um usa a roda do seu jeito.
+fn wheel_does(on_bubbles: bool, shown: &str) -> WheelDoes {
+    if on_bubbles {
+        WheelDoes::Widgets
+    } else if shown == KEY {
+        WheelDoes::Volume
+    } else if shown == REST {
+        WheelDoes::Looks
+    } else {
+        WheelDoes::Widgets
+    }
+}
 
 /// Um widget com algo na ilha agora.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -227,6 +267,13 @@ struct Multi {
     menu_key: &'static str,
     /// a capa pequena (na bolha), já reduzida
     bubble_art: Option<(usize, u32, Image)>,
+    /// os widgets na ordem em que o App os acha, que não muda quando a ilha reordena: a roda do
+    /// mouse anda por ela (pela ordem da ilha, o escolhido iria para a frente e a roda voltaria
+    /// sempre aos mesmos dois)
+    order: Vec<&'static str>,
+    /// a roda do mouse: quanto já girou sem trocar, e quando foi a última troca
+    wheel: f32,
+    wheel_at: Instant,
 }
 
 impl Multi {
@@ -246,6 +293,9 @@ impl Multi {
             pop: None,
             menu_key: KEY,
             bubble_art: None,
+            order: Vec::new(),
+            wheel: 0.0,
+            wheel_at: now - Duration::from_secs(1),
         }
     }
 }
@@ -366,6 +416,24 @@ fn dock_slot(x: i32, y: i32) -> Option<((f32, f32), f32)> {
     Some((taskbar_slot(&taskbar, s), s))
 }
 
+/// A âncora da ilha levada da área de trabalho `from` (onde a escala da ilha é `s_from`) para
+/// `to` (escala `s_to`), no mesmo lugar relativo: na mesma fração da largura e na mesma distância
+/// (em pontos) da borda mais perto, a de cima ou a de baixo. No alto e no meio continua no alto e
+/// no meio; perto de baixo continua perto de baixo.
+fn anchor_on(anchor: (f32, f32), s_from: f32, from: Rect, to: Rect, s_to: f32) -> (f32, f32) {
+    let (fw, tw) = ((from.2 - from.0).max(1) as f32, (to.2 - to.0) as f32);
+    let x = to.0 as f32 + (anchor.0 - from.0 as f32) / fw * tw;
+    let from_top = anchor.1 - from.1 as f32;
+    let from_bottom = from.3 as f32 - anchor.1;
+    let y = if from_top <= from_bottom { to.1 as f32 + from_top / s_from * s_to } else { to.3 as f32 - from_bottom / s_from * s_to };
+    (x, y.clamp(to.1 as f32, to.3 as f32))
+}
+
+/// "Seguir a tela em uso" está ligado?
+fn follows_screen(cfg: &Value) -> bool {
+    cfg[KEY][FOLLOW_FIELD].as_bool().unwrap_or(false)
+}
+
 /// Botões de cada forma, em pixels lógicos a partir do canto da pílula.
 fn buttons(shape: Shape, lw: f32, lh: f32) -> Vec<(Btn, Rect4)> {
     let circle = |cx: f32, cy: f32, r: f32| (cx - r, cy - r, cx + r, cy + r);
@@ -426,6 +494,10 @@ pub struct Island {
     drawn: Option<u64>,
     /// a gota aberta com um clique (fica pílula até o mouse ir embora)
     opened_dot: bool,
+    /// quando ver de novo em qual monitor está a janela em uso, e o outro monitor onde ela está
+    /// (e desde quando), esperando `SCREEN_SETTLE`
+    screen_check: Instant,
+    screen_pending: Option<(Rect, Instant)>,
 }
 
 impl Island {
@@ -775,6 +847,7 @@ impl Island {
                 }
             }
         }
+        multi.order = found.iter().map(|e| e.key).collect();
         multi.entries = found;
         rank(&mut multi.entries, &multi.touched, multi.pinned.map(|(key, _)| key), &multi.unseen);
         if !had_bubble && multi.entries.len() > 1 {
@@ -800,6 +873,53 @@ impl Island {
         rank(&mut multi.entries, &multi.touched, multi.pinned.map(|(k, _)| k), &multi.unseen);
         multi.strip = false;
         self.switch_key(key);
+    }
+
+    /// A roda girou `steps` passos (positivo: para cima). Quando ela completa um passo, devolve a
+    /// direção da troca: 1 (o próximo, rolando para baixo, como na pilha) ou -1 (o anterior). Uma
+    /// troca por vez: a roda que continua girando durante o esmaecer não pula outro.
+    fn wheel_turn(&mut self, steps: f32, now: Instant) -> Option<i32> {
+        let multi = &mut self.multi;
+        if now.saturating_duration_since(multi.wheel_at).as_secs_f32() * 1000.0 < LAYER_FADE_MS * 0.8 {
+            multi.wheel = 0.0;
+            return None;
+        }
+        multi.wheel += steps;
+        if multi.wheel.abs() < WHEEL_STEP {
+            return None;
+        }
+        let dir = if multi.wheel < 0.0 { 1 } else { -1 };
+        multi.wheel = 0.0;
+        multi.wheel_at = now;
+        Some(dir)
+    }
+
+    /// Põe na pílula o widget seguinte (`dir` = 1) ou o anterior (-1), na ordem fixa e dando a
+    /// volta. Fica lá até a pessoa escolher outro, como no clique na bolha; o aviso esticando a
+    /// ilha recolhe (ela já está mexendo). Com um só na ilha, não faz nada (devolve false).
+    fn cycle(&mut self, dir: i32) -> bool {
+        let order = &self.multi.order;
+        if order.len() < 2 {
+            return false;
+        }
+        let current = self.key_for(self.shape);
+        let at = order.iter().position(|k| *k == current).unwrap_or(0) as i32;
+        let next = order[(at + dir).rem_euclid(order.len() as i32) as usize];
+        self.multi.banner = None;
+        self.choose(next, true);
+        true
+    }
+
+    /// Desliza (animando) para a âncora dada, com a escala do monitor de lá.
+    fn glide_to(&mut self, anchor: (f32, f32), docked: bool) {
+        self.from = self.geo();
+        self.anchor = anchor;
+        self.docked = docked;
+        self.s = island_scale(anchor.0 as i32, anchor.1 as i32 + 10);
+        self.to = self.target(self.shape);
+        self.anim_at = Instant::now();
+        self.anim_ms = STATE_MS;
+        self.next_frame = Instant::now();
     }
 
     /// A cor do widget `key` na ilha (o contorno do aviso, o brilho ao nascer).
@@ -1352,16 +1472,52 @@ impl App {
     /// Leva a ilha (animando) para a âncora dada e guarda o lugar.
     fn move_island(&mut self, anchor: (f32, f32), docked: bool) {
         if let Some(isl) = &mut self.island {
-            isl.from = isl.geo();
-            isl.anchor = anchor;
-            isl.docked = docked;
-            isl.s = island_scale(anchor.0 as i32, anchor.1 as i32 + 10);
-            isl.to = isl.target(isl.shape);
-            isl.anim_at = Instant::now();
-            isl.anim_ms = STATE_MS;
-            isl.next_frame = Instant::now();
+            isl.glide_to(anchor, docked);
         }
         self.save_island_pos();
+    }
+
+    /// Com "Seguir a tela em uso" ligado: a janela em uso ficou um instante em outro monitor, a
+    /// ilha vai para lá, no mesmo lugar relativo (na barra de tarefas, na barra de lá). Só
+    /// fechada e sem ninguém mexendo nela, para não fugir do mouse. Não guarda o lugar: o lugar
+    /// guardado continua o que a pessoa escolheu.
+    fn follow_active_screen(&mut self, now: Instant) {
+        if !follows_screen(&self.sh.cfg) {
+            return;
+        }
+        let Some(isl) = &mut self.island else { return };
+        if now < isl.screen_check {
+            return;
+        }
+        isl.screen_check = now + SCREEN_CHECK;
+        let (px, py) = win::pointer();
+        let busy = isl.morph != Morph::None || isl.dragging || isl.press.is_some() || isl.vanishing() || isl.hidden || !isl.shape.closed();
+        let (here, from) = win::monitor_at(isl.anchor.0 as i32, isl.anchor.1 as i32 + 10);
+        let Some(active) = win::foreground_screen().filter(|screen| *screen != here) else {
+            isl.screen_pending = None;
+            return;
+        };
+        let since = match isl.screen_pending {
+            Some((screen, since)) if screen == active => since,
+            _ => {
+                isl.screen_pending = Some((active, now));
+                now
+            }
+        };
+        if busy || isl.geo().contains(px, py) || now.saturating_duration_since(since) < SCREEN_SETTLE {
+            return;
+        }
+        isl.screen_pending = None;
+        let to = win::area_for(active);
+        let slot = if isl.docked { dock_slot((to.0 + to.2) / 2, to.3 - 1) } else { None };
+        let (anchor, docked) = match slot {
+            Some((slot, _)) => (slot, true),
+            None => {
+                let s_to = island_scale((to.0 + to.2) / 2, (to.1 + to.3) / 2);
+                (anchor_on(isl.anchor, isl.s, from, to, s_to), false)
+            }
+        };
+        isl.glide_to(anchor, docked);
     }
 
     /// Uma ilha nova (sem janela na tela ainda), fechada, na âncora dada.
@@ -1400,6 +1556,8 @@ impl App {
             dim: 1.0,
             drawn: None,
             opened_dot: false,
+            screen_check: now,
+            screen_pending: None,
         };
         isl.to = isl.target(Shape::Compact);
         isl.from = isl.to;
@@ -1820,11 +1978,19 @@ impl App {
                     items.push(MenuItem::Sub("Mostrar em repouso".into(), looks).icon("widgets"));
                     items.push(MenuItem::Cmd("Desligar a ilha em repouso".into(), M_ISLAND_HIDE).icon("close"));
                 } else if key != KEY {
+                    // os itens da própria fonte (silenciar o app da notificação)
+                    let env = Env { cfg: &self.sh.cfg, key };
+                    let own = self.feeds.iter().find(|f| f.key() == key).map(|f| f.menu(&env)).unwrap_or_default();
+                    items.extend(own.into_iter().filter_map(|item| match item {
+                        MenuItem::Cmd(label, action) if action < FEED_ACTIONS => Some(MenuItem::Cmd(label, M_ISLAND_FEED + action).icon("close")),
+                        _ => None,
+                    }));
                     items.push(MenuItem::Cmd(format!("Não mostrar {} na ilha", widgets::title(key)), M_ISLAND_HIDE).icon("close"));
                 }
                 items.push(MenuItem::Sep);
                 items.push(MenuItem::Sub("Modo foco".into(), focus_menu).icon("foco"));
                 items.push(MenuItem::Check("Na barra de tarefas".into(), isl.docked, M_ISLAND_DOCK).icon("pin"));
+                items.push(MenuItem::Check("Seguir a tela em uso".into(), follows_screen(&self.sh.cfg), M_ISLAND_FOLLOW).icon("mover"));
                 items.push(MenuItem::Cmd("Pôr no alto, no meio da tela".into(), M_ISLAND_CENTER).icon("mover"));
                 self.menu.popup(items, sx, sy, Some(KEY));
             }
@@ -1915,6 +2081,19 @@ impl App {
                 self.sh.save();
                 self.rest_changed();
             }
+            id if (M_ISLAND_FEED..M_ISLAND_FEED + FEED_ACTIONS).contains(&id) => {
+                let Some(key) = self.island.as_ref().map(|i| i.multi.menu_key) else { return true };
+                if let Some(f) = self.feeds.iter().position(|f| f.key() == key) {
+                    self.with_feed(f, |k, ctx| k.act(id - M_ISLAND_FEED, ctx));
+                }
+                self.island_sync_at = Instant::now();
+                self.island_sync();
+            }
+            M_ISLAND_FOLLOW => {
+                let on = !follows_screen(&self.sh.cfg);
+                self.sh.cfg.obj_mut(KEY).insert(FOLLOW_FIELD.into(), json!(on));
+                self.sh.save();
+            }
             M_ISLAND_CENTER | M_ISLAND_DOCK => {
                 let Some(isl) = &self.island else { return true };
                 let g = isl.geo();
@@ -1927,15 +2106,42 @@ impl App {
         true
     }
 
+    /// A roda do mouse na ilha: nas bolhas, troca o widget da pílula; na pílula, muda o volume
+    /// (com a música nela), troca o que a ilha em repouso mostra ou troca o widget (veja
+    /// `wheel_does`).
     pub(super) fn island_wheel(&mut self, delta: i32) {
-        // a roda mexe no volume só com a música na pílula
-        if !self.island.as_ref().is_some_and(|i| i.media && i.key_for(i.shape) == KEY) {
+        if delta == 0 {
             return;
         }
-        let Some(j) = self.media_index() else { return };
+        let (sx, sy) = win::pointer();
         let steps = delta as f32 / 120.0;
-        self.with_kind(j, |k, ctx| k.wheel(0.0, 0.0, steps, Mode::M, ctx));
-        // a barra de volume aparece já, sem esperar o próximo quadro
+        let now = Instant::now();
+        let Some(isl) = &mut self.island else { return };
+        if isl.morph != Morph::None || isl.vanishing() {
+            return;
+        }
+        match wheel_does(isl.near_bubbles(sx, sy), isl.key_for(isl.shape)) {
+            WheelDoes::Volume => {
+                if !isl.media {
+                    return;
+                }
+                let Some(j) = self.media_index() else { return };
+                self.with_kind(j, |k, ctx| k.wheel(0.0, 0.0, steps, Mode::M, ctx));
+            }
+            WheelDoes::Looks => {
+                let Some(dir) = isl.wheel_turn(steps, now) else { return };
+                let Some(f) = self.feeds.iter().position(|f| f.key() == REST) else { return };
+                // para a ilha em repouso, um passo para baixo (negativo) é o próximo
+                self.with_feed(f, |k, ctx| k.wheel(0.0, 0.0, -(dir as f32), Mode::M, ctx));
+            }
+            WheelDoes::Widgets => {
+                let Some(dir) = isl.wheel_turn(steps, now) else { return };
+                if !isl.cycle(dir) {
+                    return;
+                }
+            }
+        }
+        // a troca (ou a barra de volume) aparece já, sem esperar o próximo quadro
         if let Some(isl) = &mut self.island {
             isl.next_frame = Instant::now();
         }
@@ -1974,6 +2180,7 @@ impl App {
             return;
         }
         let paused = self.sh.paused.clone();
+        self.follow_active_screen(now);
         let Some(isl) = &mut self.island else { return };
         isl.hide_in_fullscreen(&paused);
         isl.follow_start_button(now);
@@ -2089,6 +2296,8 @@ pub(crate) fn readme_frames(info: &IslandInfo, card: (f32, f32, f32, f32, f32), 
         dim: 1.0,
         drawn: None,
         opened_dot: false,
+        screen_check: now,
+        screen_pending: None,
     };
     isl.to = isl.target(Shape::Compact);
     let mut out: Vec<(Option<(Image, (i32, i32))>, u32)> = vec![(None, 1100)];
@@ -2175,6 +2384,8 @@ pub(crate) fn readme_shapes(info: &IslandInfo, s: f32) -> Vec<Image> {
                 dim: 1.0,
                 drawn: None,
                 opened_dot: false,
+                screen_check: now,
+                screen_pending: None,
             };
             isl.render(&Scene::media(Some(info))).0
         })
@@ -2219,12 +2430,34 @@ mod tests {
             dim: 1.0,
             drawn: None,
             opened_dot: false,
+            screen_check: now,
+            screen_pending: None,
         };
         let card = Geo { x: 500.0, y: 300.0, w: 400.0, h: 188.0, r: 32.0 };
         let pill = Geo { x: 0.0, y: 0.0, w: shape.size().w * 1.25, h: shape.size().h * 1.25, r: shape.size().radius * 1.25 };
         isl.from = if morph == Morph::None { pill } else { card };
         isl.to = pill;
         isl
+    }
+
+    /// Levada para o outro monitor, a ilha fica no mesmo lugar relativo: no alto e no meio continua
+    /// no alto e no meio (na escala de lá), perto de baixo continua perto de baixo.
+    #[test]
+    fn the_island_keeps_its_place_on_the_other_screen() {
+        let left = (0, 0, 1920, 1040);
+        let right = (1920, 0, 1920 + 2560, 1400);
+        // no alto e no meio, a 10 pontos do topo na escala 1,25 (12,5 px)
+        let top = anchor_on((960.0, 12.5), 1.25, left, right, 1.5);
+        assert_eq!(top, (1920.0 + 1280.0, 15.0));
+        // perto de baixo, à esquerda
+        let low = anchor_on((480.0, 1000.0), 1.0, left, right, 1.0);
+        assert_eq!(low, (1920.0 + 640.0, 1360.0));
+        // e de volta, no mesmo lugar
+        let back = anchor_on(top, 1.5, right, left, 1.25);
+        assert!((back.0 - 960.0).abs() < 0.01 && (back.1 - 12.5).abs() < 0.01, "{back:?}");
+        // um monitor mais baixo não deixa a ilha sair da tela
+        let short = anchor_on((100.0, 900.0), 1.0, (0, 0, 1920, 2000), (0, 0, 1920, 600), 1.0);
+        assert!(short.1 >= 0.0 && short.1 <= 600.0);
     }
 
     /// Na barra de tarefas: à esquerda do Iniciar, no meio da altura da barra; com a barra
@@ -2530,6 +2763,56 @@ mod tests {
         assert_eq!(isl.multi.key, target);
         assert_eq!(isl.multi.entries[0].key, target);
         assert!(!isl.multi.strip);
+    }
+
+    #[test]
+    fn wheel_goes_where_the_mouse_is() {
+        assert_eq!(wheel_does(false, KEY), WheelDoes::Volume, "a música na pílula: o volume");
+        assert_eq!(wheel_does(false, REST), WheelDoes::Looks, "em repouso: o que ela mostra");
+        assert_eq!(wheel_does(false, "pomodoro"), WheelDoes::Widgets);
+        assert_eq!(wheel_does(true, KEY), WheelDoes::Widgets, "nas bolhas, sempre troca o widget");
+    }
+
+    #[test]
+    fn wheel_walks_the_widgets_in_a_fixed_order() {
+        let now = Instant::now();
+        let live = IslandItem::live(WHITE);
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        isl.update_entries(vec![entry("pomodoro", IslandItem { hurry: true, ..live }), entry("github", IslandItem::alert(WHITE, 1)), entry("midia", live)], now);
+        isl.multi.banner = None;
+        assert_eq!(isl.multi.key, "pomodoro");
+        // um passo por vez, na ordem em que o App acha os widgets, dando a volta
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            assert!(isl.cycle(1));
+            seen.push(isl.multi.key);
+        }
+        assert_eq!(seen, ["github", "midia", "pomodoro"]);
+        assert!(isl.cycle(-1));
+        assert_eq!(isl.multi.key, "midia");
+        assert_eq!(isl.multi.pinned, Some(("midia", true)), "fica até escolher outro");
+        // reordenar a ilha não muda a ordem da roda
+        isl.update_entries(vec![entry("pomodoro", IslandItem { hurry: true, ..live }), entry("github", IslandItem::alert(WHITE, 1)), entry("midia", live)], now);
+        assert!(isl.cycle(1));
+        assert_eq!(isl.multi.key, "pomodoro");
+        // com um só, nada
+        isl.update_entries(vec![entry("pomodoro", live)], now);
+        assert!(!isl.cycle(1));
+    }
+
+    #[test]
+    fn wheel_turns_one_step_at_a_time() {
+        let mut isl = island(Shape::Compact, Morph::None, 1.0);
+        let start = Instant::now();
+        // o touchpad manda pedacinhos: só troca quando somam um passo
+        assert_eq!(isl.wheel_turn(-0.4, start), None);
+        assert_eq!(isl.wheel_turn(-0.4, start), None);
+        assert_eq!(isl.wheel_turn(-0.4, start), Some(1), "para baixo: o próximo");
+        // girando durante o esmaecer, não pula outro
+        let during = start + Duration::from_millis(100);
+        assert_eq!(isl.wheel_turn(-3.0, during), None);
+        let after = start + Duration::from_millis(LAYER_FADE_MS as u64);
+        assert_eq!(isl.wheel_turn(1.0, after), Some(-1), "para cima: o anterior");
     }
 
     /// A ilha com vários widgets num PNG (para conferir):

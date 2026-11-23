@@ -147,6 +147,31 @@ pub fn on_screen(x: i32, y: i32) -> bool {
     monitors().iter().any(|screen| x >= screen.0 && x < screen.2 && y >= screen.1 && y < screen.3)
 }
 
+/// A tela inteira do monitor da janela em uso (a que recebe o teclado). None quando não dá para
+/// dizer onde a pessoa está: nenhuma janela, minimizada, uma janela deste app (a ilha, um
+/// cartão), a área de trabalho ou a barra de tarefas (que se espalham por todos os monitores).
+pub fn foreground_screen() -> Option<Rect> {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground.is_invalid() || !IsWindowVisible(foreground).as_bool() || IsIconic(foreground).as_bool() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(foreground, Some(&mut pid));
+        if pid == std::process::id() {
+            return None;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(foreground, &mut class) as usize;
+        let class = String::from_utf16_lossy(&class[..len]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return None;
+        }
+        let monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL);
+        (!monitor.is_invalid()).then(|| monitor_of(monitor)).flatten().map(|(found, _)| found.screen)
+    }
+}
+
 /// Área de trabalho do monitor onde está o mouse (onde a pessoa está olhando).
 pub fn area_at_pointer() -> Rect {
     let (x, y) = pointer();

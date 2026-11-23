@@ -179,10 +179,14 @@ struct Weather {
     temp: i64,
     icon: String,
     desc: String,
+    /// a condição em poucas letras ("Quase limpo"), para quando a inteira não cabe
+    desc_short: String,
     max: Option<i64>,
     min: Option<i64>,
     /// "Chuva a partir das 17h"
     line: Option<String>,
+    /// "Chuva às 17h"
+    line_short: Option<String>,
     /// as próximas horas: (hora, ícone, temperatura)
     hours: Vec<(i64, String, i64)>,
 }
@@ -247,6 +251,17 @@ struct Showing {
 struct Leaving {
     look: Look,
     progress: f32,
+    /// a troca vai para trás (a roda do mouse para cima): o que sai desce e o novo vem do alto
+    back: bool,
+}
+
+/// Uma troca feita pela roda do mouse: o turno em que ela caiu, quem estava na pílula e se foi
+/// para trás. Na conta do relógio, o que sai seria o do turno anterior; aqui é quem estava.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Wheeled {
+    turn: i64,
+    from: Look,
+    back: bool,
 }
 
 pub struct Rest {
@@ -278,12 +293,45 @@ pub struct Rest {
     held_while_open: Cell<Option<Look>>,
     /// o modo foco ligado (só a hora, o dia e o ícone), com o horário do fim ("" = até desligar)
     focus_mode: Option<String>,
+    /// segundos somados ao relógio na conta da vez de cada escolhido: a roda do mouse adianta
+    /// (ou atrasa) a vez, e a alternância continua dali, 7 s depois
+    shift: f64,
+    /// a última troca pela roda (para animar a saída de quem estava, e no sentido certo)
+    wheeled: Option<Wheeled>,
 }
 
 impl Default for Rest {
     fn default() -> Rest {
         Rest::new()
     }
+}
+
+/// Espaço entre a descrição do tempo e a linha das próximas horas, na mesma altura.
+const ROW_GAP: f32 = 14.0;
+
+/// Dois textos na mesma linha, um à esquerda e outro à direita, com `room` de espaço para os
+/// dois (fora o vão entre eles): devolve a largura máxima de cada um. Cabendo, cada um fica com o
+/// que precisa; não cabendo, nenhum fica com menos da metade (o outro cede o que sobra), sem
+/// nunca um passar por cima do outro. É só a última garantia: antes, `weather_row` escolhe as
+/// versões curtas, que cabem.
+fn share_row(left: f32, right: f32, room: f32) -> (f32, f32) {
+    if left + right <= room {
+        return (left, right);
+    }
+    let half = room / 2.0;
+    match (left <= half, right <= half) {
+        (true, _) => (left, room - left),
+        (_, true) => (room - right, right),
+        _ => (half, half),
+    }
+}
+
+/// A descrição e a linha das próximas horas que dividem uma linha da ilha aberta (`room` de
+/// espaço, fora o vão): as inteiras se couberem; senão, encurta primeiro a descrição, depois a
+/// linha, depois as duas ("Granizo" e "Trovoada até 17h"). Nunca cortadas com "…".
+fn weather_row<'a>(c: &Canvas, desc: [&'a str; 2], line: [&'a str; 2], room: f32) -> (&'a str, &'a str) {
+    let width = |desc: &str, line: &str| c.text_width(desc, Face::Regular, 12.5) + if line.is_empty() { 0.0 } else { ROW_GAP + c.text_width(line, Face::Regular, 12.0) };
+    [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().map(|(d, l)| (desc[d], line[l])).find(|(d, l)| width(d, l) <= room).unwrap_or((desc[1], line[1]))
 }
 
 /// "2h28", "40 min", "3 dias"
@@ -336,6 +384,8 @@ impl Rest {
             data_version: 0,
             held_while_open: Cell::new(None),
             focus_mode: None,
+            shift: 0.0,
+            wheeled: None,
         }
     }
 
@@ -359,6 +409,20 @@ impl Rest {
         r
     }
 
+    /// O tempo com textos compridos (a descrição e a linha das próximas horas disputando a mesma
+    /// altura na ilha aberta).
+    #[cfg(test)]
+    pub fn sample_long_weather() -> Rest {
+        let mut r = Rest::sample(Some(Look::Weather), false);
+        if let Some(wx) = r.weather.as_mut() {
+            wx.desc = "Trovoada com granizo".into();
+            wx.desc_short = "Granizo".into();
+            wx.line = Some("Trovoadas até 17h, depois predominantemente limpo".into());
+            wx.line_short = Some("Trovoada até 17h".into());
+        }
+        r
+    }
+
     /// No modo foco até 15:30.
     #[cfg(test)]
     pub fn sample_focus() -> Rest {
@@ -379,11 +443,22 @@ impl Rest {
         if count <= 1 || self.idle {
             return Showing { look: self.looks.first().copied().unwrap_or(Look::Clock), leaving: None };
         }
-        let turn = (now / ROTATE_EVERY).floor() as i64;
-        let into_turn = now - turn as f64 * ROTATE_EVERY;
+        let turn = self.turn(now);
+        let into_turn = now + self.shift - turn as f64 * ROTATE_EVERY;
         let look_of = |turn: i64| self.looks[turn.rem_euclid(count) as usize];
-        let leaving = (into_turn < TURN_SECS).then(|| Leaving { look: look_of(turn - 1), progress: (into_turn / TURN_SECS) as f32 });
+        let leaving = (into_turn < TURN_SECS).then(|| {
+            let progress = (into_turn / TURN_SECS) as f32;
+            match self.wheeled.filter(|w| w.turn == turn) {
+                Some(w) => Leaving { look: w.from, progress, back: w.back },
+                None => Leaving { look: look_of(turn - 1), progress, back: false },
+            }
+        });
         Showing { look: look_of(turn), leaving }
+    }
+
+    /// O turno de `now` (o bloco de 7 s), contando o que a roda do mouse adiantou ou atrasou.
+    fn turn(&self, now: f64) -> i64 {
+        ((now + self.shift) / ROTATE_EVERY).floor() as i64
     }
 
     /// Alternando e perto de uma troca (ou no meio dela)? Aí a ilha pede quadros, começando um
@@ -392,7 +467,7 @@ impl Rest {
         if self.looks.len() <= 1 || self.idle {
             return false;
         }
-        let into_turn = now.rem_euclid(ROTATE_EVERY);
+        let into_turn = (now + self.shift).rem_euclid(ROTATE_EVERY);
         into_turn < TURN_SECS + 0.05 || into_turn > ROTATE_EVERY - 0.3
     }
 
@@ -770,22 +845,41 @@ impl Rest {
         match form {
             IslandForm::Compact => {
                 art(c, &wx.icon, x + 26.0, cy, 26.0);
-                let label = wx.line.clone().unwrap_or_else(|| wx.desc.clone());
-                iu::compact_text(c, x + 46.0, r, &label, &format!("{}°", wx.temp), FG);
+                let temp = format!("{}°", wx.temp);
+                let options = match (&wx.line, &wx.line_short) {
+                    (Some(line), Some(short)) => [line.as_str(), short.as_str()],
+                    _ => [wx.desc.as_str(), wx.desc_short.as_str()],
+                };
+                let label = iu::fitting(c, &options, Face::Regular, 12.0, iu::compact_room(c, x + 46.0, r, &temp));
+                iu::compact_text(c, x + 46.0, r, label, &temp, FG);
             }
             IslandForm::Medium => {
                 art(c, &wx.icon, x + 39.0, cy, 46.0);
-                let sub = wx.line.clone().unwrap_or(minmax);
-                iu::two_lines(c, x + 74.0, cy, w - 74.0 - 22.0, &format!("{}° · {}", wx.temp, wx.desc), &sub, MUTED);
+                let room = w - 74.0 - 22.0;
+                let (long, short) = (format!("{}° · {}", wx.temp, wx.desc), format!("{}° · {}", wx.temp, wx.desc_short));
+                let title = iu::fitting(c, &[&long, &short], Face::Semibold, 13.5, room);
+                let sub = match (&wx.line, &wx.line_short) {
+                    (Some(line), Some(short)) => iu::fitting(c, &[line, short], Face::Regular, 11.5, room).to_string(),
+                    _ => minmax,
+                };
+                iu::two_lines(c, x + 74.0, cy, room, title, &sub, MUTED);
             }
             _ => {
                 iu::header(c, r, "TEMPO", self.period_color(now), &self.date_short(now), MUTED);
                 art(c, &wx.icon, x + 46.0, y + 74.0, 50.0);
                 c.text(x + 82.0, y + 66.0, &format!("{}°", wx.temp), Face::Semibold, 30.0, FG, Anchor::LM, None);
-                c.text(x + 82.0, y + 92.0, &wx.desc, Face::Regular, 12.5, MUTED, Anchor::LM, Some(w - 200.0));
                 c.text(x + w - 22.0, y + 66.0, &minmax, Face::Regular, 12.0, MUTED, Anchor::RM, None);
-                if let Some(line) = &wx.line {
-                    c.text(x + w - 22.0, y + 88.0, line, Face::Regular, 12.0, MUTED, Anchor::RM, Some(w / 2.0));
+                // a descrição (embaixo da temperatura) e a linha das próximas horas (à direita)
+                // ficam na mesma altura: dividem o espaço entre a temperatura e a borda
+                let (left, right) = (x + 82.0, x + w - 22.0);
+                let lines = [wx.line.as_deref().unwrap_or(""), wx.line_short.as_deref().unwrap_or("")];
+                let (desc, line) = weather_row(c, [&wx.desc, &wx.desc_short], lines, right - left);
+                let line_w = if line.is_empty() { 0.0 } else { c.text_width(line, Face::Regular, 12.0) };
+                let gap = if line.is_empty() { 0.0 } else { ROW_GAP };
+                let (desc_max, line_max) = share_row(c.text_width(desc, Face::Regular, 12.5), line_w, right - left - gap);
+                c.text(left, y + 92.0, desc, Face::Regular, 12.5, MUTED, Anchor::LM, Some(desc_max));
+                if !line.is_empty() {
+                    c.text(right, y + 88.0, line, Face::Regular, 12.0, MUTED, Anchor::RM, Some(line_max));
                 }
                 // as próximas horas
                 let n = wx.hours.len().min(6);
@@ -1003,9 +1097,12 @@ fn weather_of(cache: &Value, clock: &Clock, now: f64) -> Option<Weather> {
         temp,
         icon: w.str_of("icon").unwrap_or("sun").to_string(),
         desc: w.str_of("desc").unwrap_or("").to_string(),
+        // guardado por uma versão antiga do Tempo, sem as curtas: as inteiras
+        desc_short: w.str_of("desc_short").or(w.str_of("desc")).unwrap_or("").to_string(),
         max: w.i64_of("max"),
         min: w.i64_of("min"),
         line: w.str_of("rain_line").map(String::from),
+        line_short: w.str_of("rain_line_short").or(w.str_of("rain_line")).map(String::from),
         hours,
     })
 }
@@ -1193,9 +1290,10 @@ impl Kind for Rest {
                 let showing = self.showing(now);
                 match showing.leaving {
                     Some(leaving) => {
-                        // o de saída sobe e apaga; o novo vem de baixo e acende
+                        // o de saída sobe e apaga; o novo vem de baixo e acende (para trás, ao
+                        // contrário)
                         let eased = ease_in_out(leaving.progress);
-                        let lift = 10.0;
+                        let lift = if leaving.back { -10.0 } else { 10.0 };
                         c.push_opacity(1.0 - eased);
                         self.draw_look(c, leaving.look, form, (x, y - lift * eased, w, h), None, now);
                         c.pop_clip();
@@ -1229,6 +1327,35 @@ impl Kind for Rest {
         }
     }
 
+    /// A roda do mouse na pílula: o próximo escolhido (passo negativo, rolando para baixo) ou o
+    /// anterior, já, com a mesma animação da troca; a alternância segue dali. Aberta, troca o
+    /// que ela está segurando.
+    fn wheel(&mut self, _x: f32, _y: f32, steps: f32, _mode: Mode, _ctx: &mut Ctx) {
+        let count = self.looks.len() as i64;
+        if self.focus_mode.is_some() || count <= 1 || steps == 0.0 {
+            return;
+        }
+        let now = self.clock.now();
+        let forward = steps < 0.0;
+        let current = self.look_for(IslandForm::Large, now);
+        let at = self.looks.iter().position(|l| *l == current).unwrap_or(0) as i64;
+        let want = (at + if forward { 1 } else { -1 }).rem_euclid(count);
+        // o turno mais perto, no sentido da roda, em que é a vez de `want`
+        let turn = self.turn(now);
+        let ahead = if forward { (want - turn).rem_euclid(count) } else { -(turn - want).rem_euclid(count) };
+        let target = turn + ahead;
+        // o relógio passa a cair bem no começo desse turno (a troca anima dali)
+        self.shift = target as f64 * ROTATE_EVERY - now;
+        self.wheeled = Some(Wheeled { turn: target, from: current, back: !forward });
+        if self.held_while_open.get().is_some() {
+            self.held_while_open.set(Some(self.looks[want as usize]));
+        }
+    }
+
+    fn uses_wheel(&self, _x: f32, _y: f32, _mode: Mode) -> bool {
+        self.focus_mode.is_none() && self.looks.len() > 1
+    }
+
     fn island_fps(&self, form: IslandForm) -> u32 {
         let now = self.clock.now();
         if self.focus_mode.is_some() {
@@ -1248,8 +1375,8 @@ impl Kind for Rest {
         let now = self.clock.now();
         let minute = (now / 60.0).floor() as i64;
         let rotating = self.looks.len() > 1 && !self.idle && self.focus_mode.is_none();
-        let turn = if rotating { (now / ROTATE_EVERY).floor() as i64 } else { 0 };
-        Some(alert_hash(&format!("{}|{minute}|{turn}", self.data_version)))
+        let turn = if rotating { self.turn(now) } else { 0 };
+        Some(alert_hash(&format!("{}|{minute}|{turn}|{}", self.data_version, self.shift.to_bits())))
     }
 }
 
@@ -1311,6 +1438,103 @@ mod tests {
         r.idle = true;
         assert!(r.showing(r.clock.now()).leaving.is_none());
         assert_eq!(r.showing(r.clock.now()).look, Look::Clock);
+    }
+
+    /// Na ilha, o tempo nunca fica cortado com "…": em cada forma cabe ao menos a versão curta
+    /// de cada condição e de cada aviso das próximas horas, com a temperatura mais larga.
+    #[test]
+    fn island_weather_texts_are_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        let (descs, lines) = crate::widgets::tempo::all_island_texts();
+        let width = |text: &str, face: Face, size: f32| c.text_width(text, face, size);
+        // aberta: a descrição e a linha dividem a mesma altura
+        let large = iu::size(IslandForm::Large);
+        let room = large.w - 82.0 - 22.0;
+        for (desc, desc_short) in &descs {
+            for (line, line_short) in lines.iter().map(|(l, s)| (l.as_str(), s.as_str())).chain([("", "")]) {
+                let (d, l) = weather_row(&c, [desc, desc_short], [line, line_short], room);
+                let gap = if l.is_empty() { 0.0 } else { ROW_GAP };
+                assert!(width(d, Face::Regular, 12.5) + gap + width(l, Face::Regular, 12.0) <= room, "{d:?} + {l:?}");
+            }
+        }
+        // fechada: o aviso (ou a condição) ao lado da temperatura
+        let compact = iu::size(IslandForm::Compact);
+        let room = iu::compact_room(&c, 46.0, (0.0, 0.0, compact.w, compact.h), "-18°");
+        for (long, short) in lines.iter().chain(descs.iter()) {
+            let label = iu::fitting(&c, &[long, short], Face::Regular, 12.0, room);
+            assert!(width(label, Face::Regular, 12.0) <= room, "{label:?}");
+        }
+        // média: "-18° · condição" em cima, o aviso embaixo
+        let medium = iu::size(IslandForm::Medium);
+        let room = medium.w - 74.0 - 22.0;
+        for (_, short) in &descs {
+            assert!(width(&format!("-18° · {short}"), Face::Semibold, 13.5) <= room, "{short:?}");
+        }
+        for (_, short) in &lines {
+            assert!(width(short, Face::Regular, 11.5) <= room, "{short:?}");
+        }
+    }
+
+    #[test]
+    fn weather_texts_share_the_row_without_overlapping() {
+        // cabem: cada um com o que precisa
+        assert_eq!(share_row(100.0, 120.0, 260.0), (100.0, 120.0));
+        // o curto fica inteiro e o comprido fica com o resto
+        assert_eq!(share_row(60.0, 300.0, 260.0), (60.0, 200.0));
+        assert_eq!(share_row(300.0, 60.0, 260.0), (200.0, 60.0));
+        // os dois compridos: metade para cada
+        assert_eq!(share_row(200.0, 200.0, 260.0), (130.0, 130.0));
+        for (left, right) in [(10.0, 500.0), (150.0, 150.0), (129.0, 400.0), (400.0, 131.0)] {
+            let (a, b) = share_row(left, right, 260.0);
+            assert!(a + b <= 260.0 && a <= left && b <= right, "{left} {right}: {a} {b}");
+        }
+    }
+
+    #[test]
+    fn wheel_switches_now_both_ways() {
+        let mut r = Rest::sample(Some(Look::Clock), false);
+        r.looks = vec![Look::Clock, Look::Weather, Look::Quotes];
+        let base = (r.clock.now() / ROTATE_EVERY).floor() * ROTATE_EVERY;
+        r.at(base + 3.0);
+        let first = r.showing(r.clock.now()).look;
+        let at = r.looks.iter().position(|l| *l == first).unwrap();
+        let (mut cfg, mut cache, mut out) = (json!({}), json!({}), Vec::new());
+        let mut ctx = Ctx { cfg: &mut cfg, cache: &mut cache, key: KEY, out: &mut out };
+        // para baixo: o próximo, já, com o de antes saindo para cima
+        r.wheel(0.0, 0.0, -1.0, Mode::M, &mut ctx);
+        let next = r.showing(r.clock.now());
+        assert_eq!(next.look, r.looks[(at + 1) % 3]);
+        let leaving = next.leaving.expect("a troca anima");
+        assert_eq!((leaving.look, leaving.back), (first, false));
+        assert!(r.island_fps(IslandForm::Compact) > 0);
+        // a alternância segue dali: o mesmo por mais 7 s, depois o seguinte
+        r.at(base + 3.0 + ROTATE_EVERY - 0.5);
+        assert_eq!(r.showing(r.clock.now()).look, r.looks[(at + 1) % 3]);
+        r.at(base + 3.0 + ROTATE_EVERY + 0.1);
+        assert_eq!(r.showing(r.clock.now()).look, r.looks[(at + 2) % 3]);
+        // para cima: o anterior, com o de agora descendo
+        r.wheel(0.0, 0.0, 1.0, Mode::M, &mut ctx);
+        let back = r.showing(r.clock.now());
+        assert_eq!(back.look, r.looks[(at + 1) % 3]);
+        let leaving = back.leaving.expect("a troca anima");
+        assert_eq!((leaving.look, leaving.back), (r.looks[(at + 2) % 3], true));
+        // aberta, troca o que ela segura
+        r.held_while_open.set(Some(Look::Clock));
+        r.wheel(0.0, 0.0, -1.0, Mode::M, &mut ctx);
+        assert_eq!(r.look_for(IslandForm::Large, r.clock.now()), Look::Weather);
+        // no modo foco, ou com um só, a roda não faz nada
+        let shift = r.shift;
+        r.focus_mode = Some(String::new());
+        r.wheel(0.0, 0.0, -1.0, Mode::M, &mut ctx);
+        assert_eq!(r.shift, shift);
+        r.focus_mode = None;
+        r.looks = vec![Look::Clock];
+        r.wheel(0.0, 0.0, -1.0, Mode::M, &mut ctx);
+        assert_eq!(r.shift, shift);
+        assert!(!r.uses_wheel(0.0, 0.0, Mode::M));
     }
 
     #[test]

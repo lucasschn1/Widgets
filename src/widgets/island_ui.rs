@@ -106,6 +106,20 @@ pub fn two_lines(c: &mut Canvas, x: f32, cy: f32, max_w: f32, title: &str, sub: 
     c.text(x, cy + 3.0, sub, Face::Regular, 11.5, sub_color, Anchor::LA, Some(max_w));
 }
 
+/// O primeiro de `options` (do mais completo ao mais curto) que cabe inteiro em `max_w`, para a
+/// ilha nunca mostrar um texto cortado com "…"; nenhum cabendo, o último (o mais curto).
+pub fn fitting<'a>(c: &Canvas, options: &[&'a str], face: Face, size: f32, max_w: f32) -> &'a str {
+    options.iter().copied().find(|text| c.text_width(text, face, size) <= max_w).or(options.last().copied()).unwrap_or("")
+}
+
+/// Quanto sobra para o nome na forma fechada (`compact_text`), com `value` forte à direita e o
+/// nome começando em `x`.
+pub fn compact_room(c: &Canvas, x: f32, r: Rect4, value: &str) -> f32 {
+    let (left, _, w, _) = r;
+    let vw = if value.is_empty() { 0.0 } else { c.text_width(value, Face::Semibold, 14.5) };
+    left + w - 16.0 - vw - 10.0 - x
+}
+
 /// Texto da forma fechada (o nome, apagado) e o valor forte à direita.
 pub fn compact_text(c: &mut Canvas, x: f32, r: Rect4, label: &str, value: &str, value_color: Rgba) {
     let (left, top, w, h) = r;

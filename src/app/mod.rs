@@ -2299,7 +2299,7 @@ mod tests {
             (M_EDIT, "edit".into()), (M_FOCUS_END, "focus_end".into()), (M_SETTINGS, "settings".into()), (M_TIPS, "tips".into()),
             (M_GALLERY, "gallery".into()), (M_SAVE_LAYOUT, "save_layout".into()), (M_UNSTACK, "unstack".into()),
             (M_ISLAND_BACK, "island_back".into()), (M_ISLAND_OPEN, "island_open".into()), (M_ISLAND_CENTER, "island_center".into()),
-            (M_ISLAND_DOCK, "island_dock".into()), (M_ISLAND_HIDE, "island_hide".into()), (M_PERCH_BACK, "perch_back".into()), (M_PERCH_NAMES, "perch_names".into()),
+            (M_ISLAND_DOCK, "island_dock".into()), (M_ISLAND_HIDE, "island_hide".into()), (M_ISLAND_FOLLOW, "island_follow".into()), (M_PERCH_BACK, "perch_back".into()), (M_PERCH_NAMES, "perch_names".into()),
         ];
         for (_, m) in FOCUS_MINUTES {
             ids.push((M_FOCUS + m, format!("focus {m}")));
@@ -2308,6 +2308,7 @@ mod tests {
             ids.push((M_ISLAND_REST + k, format!("rest {k}")));
         }
         ids.push((M_ISLAND_REST_DOT, "rest dot".into()));
+        ids.push((M_ISLAND_FEED + crate::widgets::outside::apps::MUTE, "feed mute".into()));
         for k in 0..crate::widgets::KEYS.len() as u32 {
             ids.push((M_WIDGET + k, format!("widget {k}")));
         }

@@ -188,6 +188,7 @@ impl App {
             startup: startup::enabled(),
             update_status: self.update_status.clone(),
             update_version: self.update_version.clone(),
+            notify_access: crate::platform::notifications::access(),
         };
         panel.win.anims.running = false;
         let (w, h) = (panel.win.w, panel.win.h);
@@ -442,6 +443,10 @@ impl App {
             Action::ApplyLayout(name) => self.apply_layout(&name),
             Action::DeleteLayout(name) => self.delete_layout(&name),
             Action::Restore(page) => self.restore_page(page),
+            Action::MuteApp(app_id) => {
+                widgets::outside::apps::toggle_muted(&mut self.sh.cfg, &app_id);
+                self.sh.save();
+            }
             Action::TestNotify => self.tray.notify("Tudo certo", "As notificações dos widgets estão funcionando."),
             Action::Welcome => self.open_welcome(),
             Action::OpenData => win::open_target(&config::data_dir().display().to_string()),
@@ -479,6 +484,17 @@ impl App {
                 let on = widgets::claude::show_names(&self.sh.cfg);
                 self.widget_or_cfg("claude", |section| set_flag(section, "balao_nomes", !on));
             }
+            settings::FOLLOW_SWITCH => {
+                let on = self.sh.cfg["midia"].bool_of("ilha_segue_tela").unwrap_or(false);
+                self.sh.cfg.obj_mut("midia").insert("ilha_segue_tela".into(), json!(!on));
+                self.sh.save();
+            }
+            settings::TEXT_SWITCH => {
+                use widgets::outside::apps;
+                let on = apps::shows_text(&self.sh.cfg);
+                self.sh.cfg.obj_mut(apps::KEY).insert(apps::TEXT_FIELD.into(), json!(!on));
+                self.sh.save();
+            }
             "welcome_startup" => {
                 if let PanelKind::Welcome(state) = &mut self.panels[i].kind {
                     state.startup = !state.startup;
@@ -499,6 +515,11 @@ impl App {
                 self.island_sync_at = Instant::now();
                 if key == widgets::outside::REST {
                     self.rest_changed();
+                }
+                // ligando as notificações dos apps pela primeira vez: o Windows pergunta
+                use crate::platform::notifications::{self, Access};
+                if key == widgets::outside::apps::KEY && widgets::on_island(&self.sh.cfg, key) && notifications::access() == Access::Unasked {
+                    notifications::request_access_async();
                 }
             }
             "modo_foco" => {
@@ -530,6 +551,9 @@ impl App {
         match (key, number) {
             ("app", 1) => self.install_update(),
             ("app", 2) => self.check_updates(true),
+            ("app", settings::ASK_NOTIFY_ACCESS) => crate::platform::notifications::request_access_async(),
+            ("app", settings::OPEN_NOTIFY_PRIVACY) => win::open_target("ms-settings:privacy-notifications"),
+            ("app", settings::OPEN_NOTIFY_SETTINGS) => win::open_target("ms-settings:notifications"),
             _ => {
                 if let Some(j) = self.find(key) {
                     self.run_action(j, Act::Kind(number));

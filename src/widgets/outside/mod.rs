@@ -5,6 +5,7 @@
 //! dela, e somem sozinhas quando a hora passa (ou quando a pessoa aperta OK). O céu usa a cidade
 //! do widget Tempo. Cada uma liga e desliga em Configurações → Geral → "O mundo lá fora".
 
+pub mod apps;
 mod greeting;
 mod quote;
 pub mod rest;
@@ -70,6 +71,7 @@ pub fn create_all(cache: &Value) -> Vec<Box<dyn Kind>> {
         Box::new(Station::new(cache)),
         Box::new(Quote::new(cache)),
         Box::new(Workday::new()),
+        Box::new(apps::AppNotices::new()),
         Box::new(Rest::new()),
     ]
 }
@@ -218,6 +220,12 @@ pub fn samples() -> Vec<(String, Box<dyn Kind>, Value)> {
         ("repouso gota".into(), Box::new(Rest::sample(None, false)), cfg.clone()),
         ("repouso parado".into(), Box::new(Rest::sample(Some(rest::Look::Clock), true)), cfg.clone()),
         ("modo foco".into(), Box::new(Rest::sample_focus()), cfg.clone()),
+        ("notificação de app".into(), Box::new(apps::AppNotices::sample(&[("WhatsApp", "Maria", "Chego em 10 min, pode ir pedindo um café para mim por favor"), ("Teams", "Reunião", "Começa às 15h")])), {
+            let mut cfg = cfg.clone();
+            cfg[apps::KEY] = serde_json::json!({"na_ilha": true});
+            cfg
+        }),
+        ("repouso tempo longo".into(), Box::new(Rest::sample_long_weather()), cfg.clone()),
     ]
     .into_iter()
     .chain(rest::Look::ALL.into_iter().map(|look| (format!("repouso {}", look.code()), Box::new(Rest::sample(Some(look), false)) as Box<dyn Kind>, cfg.clone())))
