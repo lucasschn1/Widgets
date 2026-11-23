@@ -11,10 +11,45 @@ use crate::data::shared::Shared;
 use crate::ui::theme::*;
 use crate::widgets::{self, pomodoro, Mode};
 
-pub const W: f32 = 900.0;
-pub const H: f32 = 640.0;
+/// O tamanho da janela: alta o bastante para o menu lateral caber inteiro, sem rolagem (a
+/// escala diminui sozinha numa tela pequena, ver `panel::fit_scale`).
+pub const W: f32 = 960.0;
+pub const H: f32 = 720.0;
+/// Onde termina a ilha do menu (a página começa aqui, com o respiro `GUTTER` antes do conteúdo).
 pub const SIDEBAR: f32 = 240.0;
-pub const TOP: f32 = 78.0;
+/// O respiro entre a ilha e o conteúdo, igual ao da borda direita da janela.
+const GUTTER: f32 = 32.0;
+/// Onde a página rolável começa: na mesma altura da lista do menu, para as duas andarem juntas
+/// na grade.
+pub const TOP: f32 = NAV_TOP;
+/// O centro do cabeçalho: o ícone do app na ilha e o da página ficam nesta altura.
+const HEADER_CY: f32 = NAV_MARGIN + 31.0;
+/// Altura do degradê que avisa que a página continua embaixo (no lugar da barra de rolagem).
+const PAGE_FADE: f32 = 36.0;
+
+/// A ilha do menu lateral: a distância até a borda da janela, o raio dos cantos e o fundo preto
+/// (o mesmo da ilha dinâmica na barra de tarefas).
+const NAV_MARGIN: f32 = 12.0;
+const NAV_RADIUS: f32 = 22.0;
+const NAV_BG: Rgba = Rgba::rgb(0, 0, 0);
+/// Onde a lista do menu começa e termina dentro da ilha (acima dela fica o nome do app, fixo).
+const NAV_TOP: f32 = 80.0;
+/// (o fim só é usado no teste que garante que o menu inteiro cabe acima dele)
+#[cfg(test)]
+const NAV_BOTTOM: f32 = H - NAV_MARGIN - 10.0;
+/// Altura de um item do menu, a distância de um item ao próximo e a de um título de grupo.
+const NAV_ITEM: f32 = 36.0;
+const NAV_STEP: f32 = 38.0;
+const NAV_GROUP: f32 = 30.0;
+/// As colunas do menu (a partir da borda da ilha): o fundo dos itens, os ícones e os textos.
+/// O ícone do app no alto fica na mesma coluna dos ícones, e o nome dele na dos textos.
+const NAV_PILL_X: f32 = 8.0;
+const NAV_TILE_X: f32 = 16.0;
+const NAV_TILE: f32 = 24.0;
+const NAV_TEXT_X: f32 = 50.0;
+const NAV_ICON: f32 = 30.0;
+/// Quanto um "dente" da roda do mouse rola (a página e o menu).
+const WHEEL_STEP: f32 = 64.0;
 pub use crate::platform::updates::VERSION;
 use crate::platform::notifications::Access;
 use crate::widgets::outside::apps;
@@ -87,11 +122,12 @@ impl SettingsState {
         }
     }
 
+    /// Rola a página; devolve se ela andou.
     pub fn scroll(&mut self, steps: f32) -> bool {
         let view = H - TOP;
         let top = (self.content_h - view).max(0.0);
         let cur = self.scrolls.get(self.page).copied().unwrap_or(0.0);
-        let new = (cur - steps * 64.0).clamp(0.0, top);
+        let new = (cur - steps * WHEEL_STEP).clamp(0.0, top);
         if new != cur {
             self.scrolls.insert(self.page, new);
             self.city.clear();
@@ -129,12 +165,44 @@ fn nav_items() -> Vec<(&'static str, String, &'static str)> {
         items.push((key, widgets::title(key).into(), widgets::icon_name(key)));
     }
     items.extend([
-        ("-", String::new(), ""),
+        ("-", "MAIS".into(), ""),
         ("avisos", "Notificações".into(), "avisos"),
         ("dicas", "Dicas".into(), "atalhos"),
         ("sobre", "Sobre".into(), "sobre"),
     ]);
     items
+}
+
+/// Um item do menu lateral no lugar: o y dentro da lista (sem a rolagem) e o que ele é. Os
+/// títulos de grupo ("SEUS WIDGETS") têm `page` = "-".
+struct NavSpot {
+    y: f32,
+    page: &'static str,
+    label: String,
+    icon: &'static str,
+}
+
+/// Onde fica cada item do menu lateral, na ordem.
+fn nav_spots() -> Vec<NavSpot> {
+    // o primeiro item começa na mesma altura que o título da primeira seção da página
+    let mut y = 4.0;
+    let mut spots = Vec::new();
+    for (page, label, icon) in nav_items() {
+        let step = match (page, label.is_empty()) {
+            ("-", true) => 17.0,
+            ("-", false) => NAV_GROUP,
+            _ => NAV_STEP,
+        };
+        spots.push(NavSpot { y, page, label, icon });
+        y += step;
+    }
+    spots
+}
+
+/// A altura da lista do menu inteira (até o fim do último item, com um respiro).
+#[cfg(test)]
+fn nav_height() -> f32 {
+    nav_spots().last().map_or(0.0, |spot| spot.y + NAV_ITEM + 4.0)
 }
 
 /// A cor do quadradinho de cada página (a barra lateral e o título), como nos Ajustes do Mac.
@@ -256,12 +324,17 @@ impl Control {
 
 pub struct Row(pub String, pub Option<String>, pub Control);
 
+/// O título de uma seção, em versalete como os grupos do menu ("SEUS WIDGETS"), alinhado com o
+/// texto das linhas do cartão logo abaixo. Devolve o y do cartão.
 fn section(ui: &mut Ui, x: f32, y: f32, title: &str) -> f32 {
-    ui.text(x + 4.0, y + 2.0, title, 12.5, Rgba(255, 255, 255, 178), Face::Semibold, Anchor::LA, None);
+    ui.text(x + ROW_TEXT_X, y, &title.to_uppercase(), 10.5, WHITE.with_a(128), Face::Semibold, Anchor::LA, None);
     #[cfg(test)]
-    tests::placed(x, y, y + 20.0);
-    y + 28.0
+    tests::placed(x, y, y + 16.0);
+    y + 24.0
 }
+
+/// Onde o texto das linhas começa dentro de um cartão (o título da seção acompanha).
+const ROW_TEXT_X: f32 = 18.0;
 
 /// Cartão com linhas (título, descrição, controle). Devolve o y logo abaixo.
 fn rows(ui: &mut Ui, x: f32, y: f32, w: f32, rows: Vec<Row>) -> f32 {
@@ -289,11 +362,11 @@ fn rows(ui: &mut Ui, x: f32, y: f32, w: f32, rows: Vec<Row>) -> f32 {
         }
         control.draw(ui, x + w - 18.0, top + h / 2.0, row);
         if ls.is_empty() {
-            ui.text(x + 18.0, top + h / 2.0, title, 13.0, FG, Face::Regular, Anchor::LM, Some(text_w));
+            ui.text(x + ROW_TEXT_X, top + h / 2.0, title, 13.0, FG, Face::Regular, Anchor::LM, Some(text_w));
         } else {
-            ui.text(x + 18.0, top + 15.0, title, 13.0, FG, Face::Regular, Anchor::LA, Some(text_w));
+            ui.text(x + ROW_TEXT_X, top + 15.0, title, 13.0, FG, Face::Regular, Anchor::LA, Some(text_w));
             for (j, line) in ls.iter().enumerate() {
-                ui.text(x + 18.0, top + 36.0 + 17.0 * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(text_w));
+                ui.text(x + ROW_TEXT_X, top + 36.0 + 17.0 * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(text_w));
             }
         }
         top += h;
@@ -327,86 +400,109 @@ pub fn draw(st: &mut SettingsState, ui: &mut Ui, v: &View) {
     draw_page(st, ui, v);
 }
 
-/// A barra lateral: o app no alto e a lista das páginas (o fundo do escolhido desliza até ele).
+/// O menu lateral: uma ilha preta flutuando sobre o fundo, com o app no alto e a lista das
+/// páginas embaixo (inteira, sem rolagem: a janela tem a altura para isso).
 fn draw_sidebar(st: &SettingsState, ui: &mut Ui, v: &View) {
-    ui.fill(0.0, 0.0, SIDEBAR, H, 0.0, WHITE.with_a(7));
-    ui.fill(SIDEBAR, 0.0, SIDEBAR + 1.0, H, 0.0, WHITE.with_a(16));
-    let icon = crate::ui::tray::icon_image((30.0 * ui.s()).round() as u32);
-    ui.image(&icon, 22.0, 22.0);
-    ui.text(62.0, 22.0, "Widgets", 15.0, FG, Face::Semibold, Anchor::LA, None);
-    ui.text(62.0, 41.0, "Configurações", 11.0, MUTED, Face::Regular, Anchor::LA, None);
-    // primeiro onde fica cada item, para o fundo do escolhido deslizar por baixo deles
-    let mut y = 82.0;
-    let mut spots = Vec::new();
-    for (page, label, icon_name) in nav_items() {
-        spots.push((y, page, label.clone(), icon_name));
-        y += match (page, label.is_empty()) {
-            ("-", true) => 17.0,
-            ("-", false) => 30.0,
-            _ => 38.0,
-        };
+    let island = (NAV_MARGIN, NAV_MARGIN, SIDEBAR, H - NAV_MARGIN);
+    draw_nav_island(ui, island);
+    let (x0, _, x1, _) = island;
+    // o ícone do app na mesma coluna dos ícones das páginas, e o nome centrado com ele
+    let icon = crate::ui::tray::icon_image((NAV_ICON * ui.s()).round() as u32);
+    ui.image(&icon, x0 + NAV_TILE_X - 3.0, HEADER_CY - NAV_ICON / 2.0);
+    let text_x = x0 + NAV_TEXT_X;
+    ui.text(text_x, HEADER_CY - 1.0, "Widgets", 15.0, FG, Face::Semibold, Anchor::LS, None);
+    ui.text(text_x, HEADER_CY + 2.0, "Configurações", 11.0, MUTED, Face::Regular, Anchor::LA, None);
+    draw_nav_list(st, ui, v, x0, x1);
+}
+
+/// O fundo da ilha do menu: uma sombra macia embaixo, o preto e a borda que brilha mais em cima.
+fn draw_nav_island(ui: &mut Ui, (x0, y0, x1, y1): (f32, f32, f32, f32)) {
+    for (spread, alpha) in [(8.0, 10), (4.0, 18), (1.5, 34)] {
+        ui.fill(x0 - spread, y0 - spread + 4.0, x1 + spread, y1 + spread + 4.0, NAV_RADIUS + spread, Rgba(0, 0, 0, alpha));
     }
-    if let Some(&(sy, ..)) = spots.iter().find(|s| s.1 == st.page) {
-        let iy = ui.anim("nav-indicator", sy, 220);
-        ui.fill(12.0, iy, SIDEBAR - 12.0, iy + 36.0, 8.0, ACCENT.with_a(56));
-        ui.rect(12.0, iy, SIDEBAR - 12.0, iy + 36.0, 8.0, None, Some(ACCENT.with_a(70)), 1.0);
+    ui.fill(x0, y0, x1, y1, NAV_RADIUS, NAV_BG);
+    let line = 1.0 / ui.s();
+    let (ox, oy) = (ui.ox, ui.oy);
+    ui.c.gradient_stroke_round_rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy, NAV_RADIUS, WHITE.with_a(34), WHITE.with_a(12), line);
+}
+
+/// A lista das páginas, a partir de `NAV_TOP` (o fundo do escolhido desliza até ele).
+fn draw_nav_list(st: &SettingsState, ui: &mut Ui, v: &View, x0: f32, x1: f32) {
+    let old_oy = ui.oy;
+    ui.oy = old_oy + NAV_TOP;
+    let (pill_x0, pill_x1) = (x0 + NAV_PILL_X, x1 - NAV_PILL_X);
+    let spots = nav_spots();
+    if let Some(spot) = spots.iter().find(|spot| spot.page == st.page) {
+        let iy = ui.anim("nav-indicator", spot.y, 220);
+        ui.fill(pill_x0, iy, pill_x1, iy + NAV_ITEM, 10.0, ACCENT.with_a(64));
+        ui.rect(pill_x0, iy, pill_x1, iy + NAV_ITEM, 10.0, None, Some(ACCENT.with_a(96)), 1.0);
     }
-    for (y, page, label, icon_name) in spots {
+    for NavSpot { y, page, label, icon } in spots {
         if page == "-" {
             if label.is_empty() {
-                ui.fill(20.0, y + 8.0, SIDEBAR - 20.0, y + 9.0, 0.0, WHITE.with_a(16));
+                ui.fill(x0 + 18.0, y + 8.0, x1 - 18.0, y + 9.0, 0.0, WHITE.with_a(16));
             } else {
-                ui.text(26.0, y + 12.0, &label, 9.5, FAINT, Face::Semibold, Anchor::LA, None);
+                ui.text(x0 + NAV_TILE_X, y + 13.0, &label, 9.5, FAINT, Face::Semibold, Anchor::LA, None);
             }
             continue;
         }
         let id = format!("nav:{page}");
         let active = page == st.page;
         if !active && ui.hot(&id) {
-            ui.fill(12.0, y, SIDEBAR - 12.0, y + 36.0, 8.0, WHITE.with_a(11));
+            ui.fill(pill_x0, y, pill_x1, y + NAV_ITEM, 10.0, WHITE.with_a(16));
         }
         let hidden = widgets::KEYS.contains(&page) && !v.visible.contains(&page);
-        ui.tile(22.0, y + 6.0, 24.0, page_color(page), icon_name, hidden);
+        ui.tile(x0 + NAV_TILE_X, y + (NAV_ITEM - NAV_TILE) / 2.0, NAV_TILE, page_color(page), icon, hidden);
         let color = if hidden { FAINT } else { FG };
-        ui.text(58.0, y + 18.0, &label, 12.5, color, if active { Face::Semibold } else { Face::Regular }, Anchor::LM, Some(SIDEBAR - 80.0));
+        let face = if active { Face::Semibold } else { Face::Regular };
+        let tag_w = if hidden { ui.text_width("oculto", 9.5, Face::Semibold) + 12.0 } else { 0.0 };
+        ui.text(x0 + NAV_TEXT_X, y + NAV_ITEM / 2.0, &label, 12.5, color, face, Anchor::LM, Some(x1 - x0 - NAV_TEXT_X - 20.0 - tag_w));
         if hidden {
-            ui.text(SIDEBAR - 24.0, y + 18.0, "oculto", 10.0, FAINT, Face::Regular, Anchor::RM, None);
+            // a etiqueta "oculto": o widget existe, mas não está na área de trabalho
+            let (tag_x1, cy) = (x1 - 16.0, y + NAV_ITEM / 2.0);
+            ui.fill(tag_x1 - tag_w, cy - 8.0, tag_x1, cy + 8.0, 8.0, WHITE.with_a(18));
+            ui.text(tag_x1 - tag_w / 2.0, cy, "oculto", 9.5, FAINT, Face::Semibold, Anchor::MM, None);
         }
-        ui.region(&id, 12.0, y, SIDEBAR - 12.0, y + 36.0, Action::Go(page), Cursor::Hand);
+        ui.region(&id, pill_x0, y, pill_x1, y + NAV_ITEM, Action::Go(page), Cursor::Hand);
     }
+    ui.oy = old_oy;
 }
 
-/// O título da página, com o ícone dela e a frase de baixo.
+/// O título da página, com o ícone dela e a frase de baixo, centrados na altura do nome do app
+/// na ilha do menu.
 fn draw_page_title(st: &SettingsState, ui: &mut Ui) {
     let (title, subtitle) = page_title(st.page);
+    let x = SIDEBAR + GUTTER;
     // no Sobre, o ícone do app já está logo abaixo
     let with_tile = st.page != "sobre";
+    let tile = 40.0;
     if with_tile {
-        ui.tile(SIDEBAR + 32.0, 20.0, 40.0, page_color(st.page), page_icon(st.page), false);
+        ui.tile(x, HEADER_CY - tile / 2.0, tile, page_color(st.page), page_icon(st.page), false);
     }
-    let tx = if with_tile { SIDEBAR + 86.0 } else { SIDEBAR + 32.0 };
+    let tx = if with_tile { x + tile + 14.0 } else { x };
     match subtitle {
         Some(sub) => {
-            ui.text(tx, 18.0, &title, 21.0, FG, Face::Semibold, Anchor::LA, None);
-            ui.text(tx, 46.0, &sub, 11.5, MUTED, Face::Regular, Anchor::LA, Some(W - tx - 32.0));
+            ui.text(tx, HEADER_CY - 1.0, &title, 21.0, FG, Face::Semibold, Anchor::LS, None);
+            ui.text(tx, HEADER_CY + 3.0, &sub, 11.5, MUTED, Face::Regular, Anchor::LA, Some(W - tx - GUTTER));
         }
         None => {
-            ui.text(tx, 40.0, &title, 21.0, FG, Face::Semibold, Anchor::LM, None);
+            ui.text(tx, HEADER_CY, &title, 21.0, FG, Face::Semibold, Anchor::LM, None);
         }
     }
 }
 
-/// A página escolhida, rolável (com a barra de rolagem fininha quando não cabe).
+/// A página escolhida, rolável com a roda do mouse. Sem barra de rolagem: um degradê embaixo
+/// avisa que ela continua, e uma linha fina no alto, que ela já foi rolada.
 fn draw_page(st: &mut SettingsState, ui: &mut Ui, v: &View) {
     let view_h = H - TOP;
     let scroll = st.scrolls.get(st.page).copied().unwrap_or(0.0);
-    let left = SIDEBAR + 1.0;
+    let left = SIDEBAR;
     ui.c.push_rect_clip(left, TOP, W, H);
     let (old_ox, old_oy, old_clip) = (ui.ox, ui.oy, ui.clip);
     ui.ox = left;
     ui.oy = TOP - scroll;
     ui.clip = (left, TOP, W, H);
-    let (x, w) = (32.0, W - SIDEBAR - 64.0);
+    let (x, w) = (GUTTER, W - SIDEBAR - 2.0 * GUTTER);
     let height = match st.page {
         "geral" => page_geral(ui, x, w, v),
         "ilha" => page_ilha(ui, x, w, v),
@@ -426,15 +522,16 @@ fn draw_page(st: &mut SettingsState, ui: &mut Ui, v: &View) {
     if scroll > top {
         st.scrolls.insert(st.page, top);
     }
-    if st.content_h > view_h {
-        // barra de rolagem fininha
-        let track = view_h - 16.0;
-        let thumb = (track * view_h / st.content_h).max(30.0);
-        let thumb_y = TOP + 8.0 + (track - thumb) * scroll.min(top) / top.max(1.0);
-        ui.fill(W - 8.0, thumb_y, W - 5.0, thumb_y + thumb, 1.5, WHITE.with_a(60));
+    let scroll = scroll.min(top);
+    if scroll < top {
+        // o fundo da janela (o papel de parede já escurecido até quase `BASE`) cobrindo a ponta
+        // do que continua embaixo
+        let from = H - PAGE_FADE;
+        let (clear, base) = (crate::ui::panel::BASE.with_a(0), crate::ui::panel::BASE.with_a(230));
+        ui.c.gradient_round_rect(left, from, W, H, 0.0, &[(0.0, clear), (1.0, base)], from, H);
     }
     if scroll > 0.0 {
-        ui.fill(left, TOP, W, TOP + 1.0, 0.0, WHITE.with_a(20));
+        ui.fill(left + GUTTER, TOP, W - GUTTER, TOP + 1.0, 0.0, WHITE.with_a(20));
     }
 }
 
@@ -1150,6 +1247,58 @@ mod tests {
         let rows = widgets::KEYS.len().div_ceil(2) as f32;
         assert!(content_h >= 56.0 + rows * (262.0 + 16.0), "altura {content_h}");
         assert!(max_scroll > 0.0, "a página precisa rolar até o último cartão");
+    }
+
+    /// O menu lateral não cabia na janela e não rolava: os últimos itens (Notificações, Dicas,
+    /// Sobre) ficavam fora de alcance. Agora a janela tem a altura do menu inteiro; um widget
+    /// novo que o faça passar daqui pede uma janela mais alta.
+    #[test]
+    fn sidebar_fits_without_scrolling() {
+        com();
+        let room = NAV_BOTTOM - NAV_TOP;
+        assert!(nav_height() <= room, "o menu ({}) não cabe na ilha ({room}): aumente H", nav_height());
+        let regions = sidebar_regions("sobre");
+        let pages: Vec<&str> = nav_items().into_iter().map(|(page, _, _)| page).filter(|p| *p != "-").collect();
+        for page in pages {
+            let id = format!("nav:{page}");
+            let (_, rect) = regions.iter().find(|(region, _)| *region == id).unwrap_or_else(|| panic!("{id} não é clicável"));
+            assert!(rect.1 >= NAV_TOP - 0.5 && rect.3 <= NAV_BOTTOM + 0.5, "{id} fora da ilha: {rect:?}");
+        }
+    }
+
+    /// O cabeçalho da página fica na altura do nome do app na ilha, e a página começa na altura
+    /// da lista do menu.
+    #[test]
+    fn page_lines_up_with_the_sidebar() {
+        assert_eq!(TOP, NAV_TOP);
+        assert!(HEADER_CY > NAV_MARGIN && HEADER_CY < NAV_TOP);
+        let first = nav_spots().into_iter().next().unwrap();
+        // o primeiro item e o título da primeira seção (y = 4 em todas as páginas) começam juntos
+        assert_eq!(first.y, 4.0);
+    }
+
+    /// As áreas clicáveis (id, retângulo) da janela das Configurações aberta em `page_name`.
+    fn sidebar_regions(page_name: &'static str) -> Vec<(String, (f32, f32, f32, f32))> {
+        let cfg = serde_json::json!({"tempo": {}, "sistema": {}, "midia": {}, "github": {}, "pomodoro": {}, "app": {}});
+        let sh = Shared::new(cfg, serde_json::json!({}), 1.0);
+        let render = |_: &'static str, _: Mode, _: f32| None;
+        let view = View {
+            sh: &sh,
+            visible: widgets::KEYS.to_vec(),
+            modes: HashMap::new(),
+            origin: (0, 0),
+            render: &render,
+            startup: false,
+            update_status: String::new(),
+            update_version: None,
+            notify_access: Access::Allowed,
+        };
+        let mut st = SettingsState::new(page_name);
+        let mut c = crate::gfx::Canvas::new(W as u32, H as u32, 1.0);
+        let mut anims = Anims::default();
+        let mut ui = Ui { c: &mut c, regions: Vec::new(), entries: Vec::new(), hover: None, pressed: None, focus: None, anims: &mut anims, animations: false, ox: 0.0, oy: 0.0, clip: (0.0, 0.0, W, H) };
+        draw(&mut st, &mut ui, &view);
+        ui.regions.into_iter().map(|region| (region.id, region.rect)).collect()
     }
 
     thread_local! {

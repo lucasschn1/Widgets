@@ -496,13 +496,15 @@ impl Ui<'_> {
     pub fn wrap(&self, text: &str, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
         self.c.wrap(text, Face::Regular, size, max_w, max_lines)
     }
-    /// Cartão das configurações: uma sombra curta embaixo, o fundo e a borda que brilha mais em
-    /// cima (como vidro pegando luz).
+    /// Cartão das configurações: uma sombra curta embaixo, o fundo um pouco mais claro em cima e
+    /// a borda que brilha mais em cima (como vidro pegando luz).
     pub fn card(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let (ox, oy) = (self.ox, self.oy);
-        let r = 12.0;
-        self.c.fill_round_rect(x0 + ox, y0 + oy + 2.0, x1 + ox, y1 + oy + 3.0, r, Rgba(0, 0, 0, 34));
-        self.c.fill_round_rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy, r, SURFACE);
+        let r = 14.0;
+        self.c.fill_round_rect(x0 + ox, y0 + oy + 2.0, x1 + ox, y1 + oy + 4.0, r, Rgba(0, 0, 0, 40));
+        let (top, bottom) = (y0 + oy, y1 + oy);
+        let stops = [(0.0, SURFACE.with_a(SURFACE.3 + 5)), (1.0, SURFACE.with_a(SURFACE.3 - 3))];
+        self.c.gradient_round_rect(x0 + ox, top, x1 + ox, bottom, r, &stops, top, bottom);
         let w = 1.0 / self.s();
         self.c.gradient_stroke_round_rect(x0 + ox, y0 + oy, x1 + ox, y1 + oy, r, WHITE.with_a(30), WHITE.with_a(10), w);
     }
