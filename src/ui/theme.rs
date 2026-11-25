@@ -204,6 +204,11 @@ pub fn icon(name: &str) -> &'static str {
         "caneta" => "\u{edc6}",
         "notebook" => "\u{e7f8}",
         "caixa" => "\u{e7f5}",
+        "brilho" => "\u{e706}",
+        "fonte" => "\u{e8d2}",
+        "foto" => "\u{e91b}",
+        "pessoa" => "\u{e77b}",
+        "link" => "\u{e71b}",
         _ => "\u{e946}",
     }
 }

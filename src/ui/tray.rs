@@ -5,31 +5,56 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::gfx::drawing;
 use crate::platform::events::WM_TRAY;
 use crate::gfx::{Canvas, Fill, Image};
 use crate::ui::theme::{Rgba, WHITE};
-use crate::widgets::system;
 
 pub const TIP: &str = "Widgets da área de trabalho";
 pub const NIN_BALLOONUSERCLICK: u32 = 0x405;
 
-/// Ícone do app: os anéis do widget Sistema (CPU, memória e disco, desenhados pela mesma função
-/// do widget) sobre um quadrado preto, num quadro de 16 × 16 ampliado para `px`.
+// o ícone do app, num quadro de 16 × 16 (ampliado para cada tamanho)
+/// A placa arredondada (como os ícones do macOS): o raio dos cantos e o degradê escuro dela.
+const PLATE_RADIUS: f32 = 3.6;
+const PLATE_TOP: Rgba = Rgba::rgb(42, 40, 64);
+const PLATE_BOTTOM: Rgba = Rgba::rgb(18, 17, 25);
+/// As três cores do verde do ícone: a clara do começo do anel, a do meio e a mais clara da ponta.
+const GREEN_LIGHT: Rgba = Rgba::rgb(52, 211, 153);
+const GREEN: Rgba = Rgba::rgb(16, 163, 127);
+const GREEN_PALE: Rgba = Rgba::rgb(167, 243, 208);
+/// O anel: o raio da linha do meio, a grossura e quanto dele está cheio.
+const RING_RADIUS: f32 = 4.8;
+const RING_WIDTH: f32 = 2.4;
+const RING_FILL: f32 = 0.74;
+/// Em quantos pedaços o anel é desenhado para o degradê correr por ele.
+const RING_STEPS: usize = 48;
+/// O vidro no meio do anel.
+const GLASS_RADIUS: f32 = 2.72;
+
+/// Ícone do app: um anel só, grosso, num degradê verde, com um vidro no meio, sobre uma placa
+/// escura arredondada com a luz verde vindo do alto (como os ícones do macOS). Simples o bastante
+/// para continuar claro em 16 px, na bandeja. Desenhado num quadro de 16 × 16 ampliado para `px`.
 pub fn icon_image(px: u32) -> Image {
     let s = px as f32 / 16.0;
     let mut c = Canvas::new(px, px, s);
-    let r = 3.6;
-    c.fill_round_rect_with(0.0, 0.0, 16.0, 16.0, r, Fill::VGrad(0.0, 16.0, Rgba::rgb(30, 30, 36), Rgba::rgb(6, 6, 9)));
-    // um reflexo leve no alto e um fio claro na borda, como o vidro dos widgets
-    c.fill_round_rect_with(0.0, 0.0, 16.0, 16.0, r, Fill::VGrad(0.0, 8.0, WHITE.alpha(0.07), WHITE.alpha(0.0)));
+    let r = PLATE_RADIUS;
+    c.fill_round_rect_with(0.0, 0.0, 16.0, 16.0, r, Fill::VGrad(0.0, 16.0, PLATE_TOP, PLATE_BOTTOM));
+    // a luz verde vindo do canto de cima à esquerda
+    c.push_round_clip(0.0, 0.0, 16.0, 16.0, r);
+    c.fill_radial(4.0, 0.0, 17.6, 17.6, &[(0.0, GREEN_LIGHT.alpha(0.55)), (0.6, GREEN.alpha(0.15)), (1.0, GREEN.alpha(0.0))]);
+    c.pop_clip();
     c.stroke_round_rect(0.0, 0.0, 16.0, 16.0, r, WHITE.alpha(0.14), (1.0 / s).max(0.06));
-    // três anéis por dentro do outro, cada um um pouco cheio, com a ponta brilhante
-    let (width, gap) = (1.52, 0.29);
-    for (i, frac) in [0.72, 0.62, 0.84].into_iter().enumerate() {
-        let diameter = 11.52 - 2.0 * (width + gap) * i as f32;
-        drawing::ring(&mut c, 8.0, 8.0, diameter, width, frac, system::color(i));
+    // o anel: o trilho apagado e a parte cheia em degradê, começando no alto
+    c.stroke_circle(8.0, 8.0, RING_RADIUS, GREEN.alpha(0.25), RING_WIDTH);
+    let sweep = 360.0 * RING_FILL;
+    for step in 0..RING_STEPS {
+        let (from, to) = (step as f32 / RING_STEPS as f32, (step + 1) as f32 / RING_STEPS as f32);
+        let color = if from < 0.5 { GREEN_LIGHT.mix(GREEN, from * 2.0) } else { GREEN.mix(GREEN_PALE, from * 2.0 - 1.0) };
+        c.arc(8.0, 8.0, RING_RADIUS, -90.0 + sweep * from, -90.0 + sweep * to, color, RING_WIDTH);
     }
+    // o vidro no meio: claro e translúcido, com a borda e o brilho no alto
+    c.fill_circle(8.0, 8.0, GLASS_RADIUS, GREEN_PALE.alpha(0.12));
+    c.fill_circle_with(8.0, 8.0, GLASS_RADIUS, Fill::VGrad(8.0 - GLASS_RADIUS, 8.0 + GLASS_RADIUS * 0.1, WHITE.alpha(0.32), WHITE.alpha(0.0)));
+    c.stroke_circle(8.0, 8.0, GLASS_RADIUS - 0.08, WHITE.alpha(0.45), 0.16);
     c.finish()
 }
 
@@ -174,22 +199,29 @@ mod tests {
         println!("{}", path.display());
     }
 
+    /// O ícone: a placa arredondada (cantos transparentes), o anel verde no alto (onde ele começa)
+    /// e o vidro claro no meio; também em 16 px, o tamanho da bandeja.
     #[test]
-    fn icon_has_the_system_rings() {
+    fn icon_has_the_green_ring() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let img = icon_image(64);
-        assert_eq!((img.w, img.h), (64, 64));
-        // os cantos ficam transparentes (quadrado arredondado) e o meio do anel de fora tem a cor da CPU
-        assert_eq!(img.px[3], 0, "canto transparente");
-        let at = |x: u32, y: u32| {
-            let i = ((y * 64 + x) * 4) as usize;
-            (img.px[i + 2], img.px[i + 1], img.px[i])
-        };
-        // alto do anel de fora (o arco começa no alto, em -90°)
-        let (r, g, b) = at(32, 32 - 21);
-        assert!(r > 200 && g < 120 && b < 150, "vermelho da CPU no alto: {:?}", (r, g, b));
+        for px in [64u32, 16] {
+            let img = icon_image(px);
+            assert_eq!((img.w, img.h), (px, px));
+            assert_eq!(img.px[3], 0, "{px}: canto transparente");
+            let at = |x: f32, y: f32| {
+                let i = (((y * px as f32 / 16.0) as u32 * px + (x * px as f32 / 16.0) as u32) * 4) as usize;
+                (img.px[i + 2], img.px[i + 1], img.px[i])
+            };
+            // o alto do anel (o arco começa no alto, em -90°): verde
+            let (r, g, b) = at(8.0, 8.0 - RING_RADIUS);
+            assert!(g > 150 && g > r + 60 && g > b, "{px}: verde no alto do anel: {:?}", (r, g, b));
+            // o meio: o vidro, mais claro que a placa em volta do anel
+            let glass = at(8.0, 8.0);
+            let plate = at(1.5, 14.5);
+            assert!(glass.0 as u32 + glass.1 as u32 + glass.2 as u32 > plate.0 as u32 + plate.1 as u32 + plate.2 as u32, "{px}: o vidro do meio não aparece");
+        }
     }
 }
 

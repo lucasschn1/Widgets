@@ -410,8 +410,9 @@ pilha**.
 
 ## Configurações
 
-Tudo muda na hora, sem botão de salvar: o quanto o vidro desfoca e escurece (com uma prévia ao
-vivo), o tema claro, quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
+Tudo muda na hora, sem botão de salvar, e a busca no alto do menu acha qualquer opção ("chuva",
+"bateria"). As opções fora do padrão ficam marcadas, com Desfazer. Dá para mudar o quanto o vidro
+desfoca e escurece (com uma prévia ao vivo), o tema claro, quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
 Na primeira vez, umas boas-vindas rápidas ajudam a escolher os widgets e a cidade do clima.
 
 <table>

@@ -379,6 +379,9 @@ fn readme() {
     }
     let cfg = empty_cfg();
 
+    // ---------- o ícone do app (o mesmo desenho do .ico e da bandeja) ----------
+    save(&crate::ui::tray::icon_image(128), &docs().join("icone.png"));
+
     // ---------- capa: os seis widgets no pequeno, se mexendo ----------
     {
         let dir = frames_dir("capa");
