@@ -117,7 +117,12 @@ fn pump_messages(msg: &mut MSG, ms: u32) -> bool {
 }
 
 fn main() {
-    if answered_command_line() || already_running() {
+    if answered_command_line() {
+        return;
+    }
+    // aberto pela versão anterior, que acabou de se trocar por esta: espera ela fechar
+    updates::after_update();
+    if already_running() {
         return;
     }
     unsafe {

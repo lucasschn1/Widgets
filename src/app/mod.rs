@@ -127,8 +127,8 @@ pub struct App {
     next_update: Instant,
     /// busca em andamento: a resposta e se foi pedida pelo botão
     update_rx: Option<(std::sync::mpsc::Receiver<updates::Found>, bool)>,
-    /// o install.ps1 rodando (se ele terminar e o app continuar aberto, a atualização não foi)
-    installer: Option<std::process::Child>,
+    /// a versão nova sendo baixada e conferida (numa thread; pronta, troca e o app fecha)
+    installer: Option<std::sync::mpsc::Receiver<updates::Prepared>>,
     /// opção mexida por um slider, para aplicar no vidro daqui a pouco (sem pesar a cada pixel)
     pending_setting: Option<(Instant, &'static str)>,
     /// abrir as boas-vindas (primeira vez)
@@ -2220,17 +2220,28 @@ impl App {
         self.installer = updates::install();
     }
 
-    /// O install.ps1 terminou e este app continua aberto: a atualização não aconteceu (deu
-    /// certo, ele teria fechado este app). Diz o porquê.
+    /// A versão nova chegou e foi conferida: troca os arquivos e fecha este app (a nova abre
+    /// sozinha). Não deu: diz o porquê (sem o Widgets.exe solto no Release, abre a página dele).
     fn poll_installer(&mut self) {
-        let Some(child) = &mut self.installer else { return };
-        let code = match child.try_wait() {
-            Ok(None) => return, // ainda rodando
-            Ok(Some(status)) => status.code(),
-            Err(_) => None,
+        let Some(rx) = &self.installer else { return };
+        let prepared = match rx.try_recv() {
+            Ok(prepared) => prepared,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return, // ainda baixando
+            Err(_) => Err(updates::Failure::Network),
         };
         self.installer = None;
-        let (title, detail) = updates::failure_message(code);
+        let failure = match prepared.and_then(|()| updates::switch_to_new()) {
+            Ok(()) => {
+                self.sh.save();
+                self.exit();
+                return;
+            }
+            Err(failure) => failure,
+        };
+        if failure == updates::Failure::NoExe {
+            updates::open_releases();
+        }
+        let (title, detail) = updates::failure_message(failure);
         self.update_status = title.to_string();
         self.toast(title, Some(detail), "close", WARNING, None);
         self.panels_changed();
