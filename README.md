@@ -116,8 +116,8 @@ irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
 
 <br>
 
-Esses avisos aparecem porque as versões ainda saem **sem assinatura digital** (o pedido está em
-andamento; veja a [política de assinatura](#code-signing-policy)). O Windows e os navegadores
+Esses avisos aparecem porque as versões saem **sem assinatura digital** (veja
+[Assinatura digital](#assinatura-digital)). O Windows e os navegadores
 desconfiam de todo programa novo, sem assinatura, que pouca gente baixou. O aviso não quer dizer
 que encontraram algo no arquivo. Se quiser conferir antes, veja
 [Por que dá para confiar](#por-que-dá-para-confiar).
@@ -586,25 +586,18 @@ Geral.
 
 </details>
 
-## Code signing policy
+## Assinatura digital
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/).
+As versões saem **sem** assinatura digital. O pedido de um certificado gratuito para projetos de
+código aberto (o da SignPath Foundation) ainda não foi aprovado: o projeto é novo e pouco
+conhecido. Ele será feito de novo quando o Widgets tiver mais gente usando. Até lá, o Windows
+mostra o aviso de [programa pouco baixado](#o-aviso-do-windows).
 
-- **Committers and reviewers:** [lucasschn1](https://github.com/lucasschn1)
-- **Approvers:** [lucasschn1](https://github.com/lucasschn1)
-
-> **Situação:** o pedido de assinatura à SignPath Foundation ainda está em andamento. Até ele ser
-> aprovado, as versões saem **sem** assinatura digital (veja
-> [O Windows disse que "protegeu o computador"](#o-aviso-do-windows)).
-
-Em português: cada versão é compilada pelo
+Sem assinatura, o que garante a origem do arquivo é o caminho dele: cada versão é compilada pelo
 [GitHub Actions](https://github.com/lucasschn1/Widgets/actions/workflows/release.yml) a partir do
-código público da tag, depois de passar nos testes. O `Widgets.exe` e o instalador só são
-assinados depois que um aprovador confere e aprova o pedido de assinatura daquela versão. Só é
-assinado o que é compilado deste repositório. Sobre os dados, veja [Privacidade](#privacidade):
-o app não envia nenhuma informação para outros sistemas em rede, a não ser nos casos descritos lá
-ou quando você pede.
+código público da tag, depois de passar nos testes, e o Release traz o SHA-256 de cada arquivo.
+Sobre os dados, veja [Privacidade](#privacidade): o app não envia nenhuma informação para outros
+sistemas em rede, a não ser nos casos descritos lá ou quando você pede.
 
 ---
 
