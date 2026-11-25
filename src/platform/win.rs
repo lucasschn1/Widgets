@@ -362,6 +362,19 @@ pub fn set_hit_area(hwnd: HWND, area: Option<Rect>) {
 
 // ---------- registro e sistema ----------
 
+/// Troca o texto de um valor em HKEY_CURRENT_USER, só se ele já existe (nunca cria chave nem
+/// valor: ex., a versão na entrada de "Aplicativos instalados", que só existe se o app foi
+/// instalado pelo install.ps1 ou pelo instalador).
+pub fn update_registry_text(path: &str, name: &str, value: &str) {
+    if registry(path, name).is_empty() {
+        return;
+    }
+    let (wpath, wname, wvalue) = (wide(path), wide(name), wide(value));
+    unsafe {
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, PCWSTR(wpath.as_ptr()), PCWSTR(wname.as_ptr()), REG_SZ.0, Some(wvalue.as_ptr() as _), (wvalue.len() * 2) as u32);
+    }
+}
+
 /// Valor de texto (ou número, convertido) em HKEY_CURRENT_USER; "" se não existir.
 pub fn registry(path: &str, name: &str) -> String {
     let (wpath, wname) = (wide(path), wide(name));

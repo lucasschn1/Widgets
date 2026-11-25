@@ -158,9 +158,12 @@ jobs:
         with:
           name: Widgets ${{ steps.version.outputs.version }}
           generate_release_notes: true
+          # o Widgets.exe solto é o que o botão "Atualizar" do app baixa (e confere pelo SHA-256
+          # que o GitHub publica de cada arquivo); o .zip e o instalador são para instalar do zero
           files: |
             dist/Widgets-win64.zip
             dist/Widgets-Setup.exe
+            dist/Widgets/Widgets.exe
           body: |
             ## Instalar
 
@@ -173,3 +176,8 @@ jobs:
 
             Na primeira vez, o Windows pode mostrar "O Windows protegeu o computador" (o app não tem
             assinatura digital paga): clique em **Mais informações → Executar assim mesmo**.
+
+            Quem já tem os widgets atualiza pelo próprio app (o botão **Atualizar** baixa o
+            `Widgets.exe` abaixo).
+
+            [Code signing policy](https://github.com/${{ github.repository }}#code-signing-policy)

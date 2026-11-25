@@ -512,7 +512,7 @@ widget mostra, e só quando o widget está ligado:
 | Estação Espacial | [CelesTrak](https://celestrak.org) | Nada: baixa a órbita da ISS a cada 12 horas; as passagens são calculadas no seu PC |
 | Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
 | Sistema, Pomodoro, Bateria, pôr do sol, lua, modo foco | Ninguém | |
-| Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** |
+| Atualizações | api.github.com e github.com | Nada além do pedido da versão mais recente, a cada 6 horas (e, quando você clica em **Atualizar**, o download do `Widgets.exe` novo). Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** |
 
 Fora disso, o app não envia nenhuma informação para outros sistemas em rede, a não ser quando
 você pede (abrir um link, por exemplo). O instalador e o `install.ps1` mostram este resumo antes
