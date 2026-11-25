@@ -86,7 +86,7 @@ pub const TIPS: [(&str, &str); 5] = [
     ("Menu", "Clique direito num widget ou no ícone da bandeja: layouts, modo foco, edição e mais."),
 ];
 
-pub const APPEARANCE_KEYS: [&str; 6] = ["desfoque", "escurecimento", "texto", "esmaecer", "opacidade_ociosa", "animacoes"];
+pub const APPEARANCE_KEYS: [&str; 7] = ["desfoque", "escurecimento", crate::data::shared::WALL_COLOR, "texto", "esmaecer", "opacidade_ociosa", "animacoes"];
 pub const BEHAVIOR_KEYS: [&str; 4] = ["atalhos_clique", "dicas", "economia_bateria", "placa_de_video"];
 
 /// Faixas das durações do Pomodoro: (fase, rótulo, mínimo, máximo, passo).
@@ -101,7 +101,7 @@ pub struct SettingsState {
     pub thumbs: HashMap<&'static str, (bool, Option<Image>)>,
     /// a prévia do alto da página do widget: (widget, visível, imagem)
     hero: Option<(&'static str, bool, Option<Image>)>,
-    preview: Option<((i32, i32, u32, u32, i64, i64, u64), Image)>,
+    preview: Option<((i32, i32, u32, u32, i64, i64, u64, bool), Image)>,
     pub city: Suggest,
 }
 
@@ -748,6 +748,8 @@ fn page_aparencia(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View)
             Control::Slider("desfoque", blur.round(), 8.0, 40.0, 1.0, format!("{} px", blur.round()))),
         Row("Escurecimento".into(), Some("Deixa o texto legível mesmo em papéis de parede claros".into()),
             Control::Slider("escurecimento", (tint * 100.0).round(), 15.0, 70.0, 1.0, format!("{}%", (tint * 100.0).round()))),
+        Row("Cor do papel de parede".into(), Some("As cores dos widgets seguem a do papel de parede (a ilha e o Clawd ficam como são)".into()),
+            setting_switch(v, crate::data::shared::WALL_COLOR)),
     ]);
     let following = config::setting_f64(cfg, "texto") <= 0.0;
     let esmaecer = config::setting_bool(cfg, "esmaecer");
@@ -783,7 +785,7 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
     let sx = v.origin.0 + ((ui.ox + x) * s).round() as i32;
     let sy = v.origin.1 + ((ui.oy + y) * s).round() as i32;
     let (pw, ph) = ((w * s).round() as u32, (h * s).round() as u32);
-    let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version);
+    let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version, v.sh.wall_color);
     if st.preview.as_ref().map(|p| p.0) != Some(key) {
         let order = ["tempo", "sistema", "pomodoro", "midia", "github"];
         let mut shown: Vec<&'static str> = order.into_iter().filter(|k| v.visible.contains(k)).take(2).collect();

@@ -3,8 +3,12 @@
 use serde_json::Value;
 
 use crate::card::backdrop::Backdrop;
+use crate::gfx::wallcolor::WallColor;
 use crate::data::config::{self, Get};
 use crate::platform::win;
+
+/// A opção "Cor do papel de parede" (Aparência), em cfg["app"].
+pub const WALL_COLOR: &str = "cor_do_papel_de_parede";
 
 /// O que o App e todos os cartões dividem.
 pub struct Shared {
@@ -15,6 +19,8 @@ pub struct Shared {
     pub animations: bool,
     pub idle_opacity: f32,
     pub tint: f64,
+    /// os widgets na cor do papel de parede (Aparência → "Cor do papel de parede")
+    pub wall_color: bool,
     /// widgets mostrados na frente das janelas
     pub peeking: bool,
     /// modo edição: fechar, redimensionar e arrastar à vontade
@@ -38,6 +44,7 @@ impl Shared {
             animations: true,
             idle_opacity: 1.0,
             tint: 0.4,
+            wall_color: false,
             peeking: false,
             editing: false,
             paused: Vec::new(),
@@ -75,6 +82,19 @@ impl Shared {
         self.idle_opacity =
             if config::setting_bool(&self.cfg, "esmaecer") { config::setting_f64(&self.cfg, "opacidade_ociosa") as f32 } else { 1.0 };
         self.tint = config::setting_f64(&self.cfg, "escurecimento");
+        self.wall_color = config::setting_bool(&self.cfg, WALL_COLOR);
+    }
+
+    /// A cor do papel de parede para um widget nesse retângulo da tela (a do monitor dele), ou
+    /// None com a opção desligada.
+    pub fn wall_color_at(&self, rect: win::Rect) -> Option<WallColor> {
+        self.wall_color.then(|| self.backdrop.wall_color_at((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2))
+    }
+
+    /// A cor do papel de parede para um widget desenhado fora da área de trabalho (as miniaturas e
+    /// a prévia das configurações): a do monitor principal.
+    pub fn wall_color_main(&self) -> Option<WallColor> {
+        self.wall_color.then(|| self.backdrop.wall_color_at(0, 0))
     }
 
     /// Grava as opções.

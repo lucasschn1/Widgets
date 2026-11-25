@@ -1726,7 +1726,11 @@ impl App {
             }
             // (trocar de monitor é com o `check_screens`)
             if changed && c.content.is_some() && !c.animating() {
-                c.present(&self.sh, false);
+                if self.sh.wall_color {
+                    c.refresh(&self.sh); // as cores seguem o papel de parede novo
+                } else {
+                    c.present(&self.sh, false);
+                }
             }
         }
     }

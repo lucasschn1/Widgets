@@ -88,6 +88,8 @@ pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
     let layout = Layout::of(mode);
     let mut c = Canvas::new((layout.w * s).round() as u32, (layout.h * s).round() as u32, s);
     c.text_scale = sh.text_scale;
+    c.wall_color = sh.wall_color_main();
+    c.alert_hues = kind.alert_hues();
     let env = Env { cfg: &sh.cfg, key: kind.key() };
     kind.draw(&mut c, mode, &env);
     c.finish()
@@ -492,10 +494,18 @@ impl Card {
             let (w, h) = self.card_size_of(mode);
             let mut c = Canvas::new(w as u32, h as u32, self.s);
             c.text_scale = sh.text_scale;
+            self.use_wall_color(&mut c, sh);
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw(&mut c, mode, &env);
             c.finish()
         })
+    }
+
+    /// A tela `c` desenha este widget na cor do papel de parede do monitor dele (com a opção
+    /// ligada), deixando as cores de alerta dele como são.
+    fn use_wall_color(&self, c: &mut Canvas, sh: &Shared) {
+        c.wall_color = sh.wall_color_at(self.card_rect());
+        c.alert_hues = self.kind.alert_hues();
     }
 
     /// Redesenha o cartão com os dados atuais e mostra na tela.
@@ -635,7 +645,10 @@ impl Card {
         let dy = dy + look.lift;
         c.image_kept(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
+            // a camada animada também na cor do papel de parede (os botões do cartão, por cima, não)
+            self.use_wall_color(c, sh);
             meter::time(self.kind.key(), Step::Overlay, || self.kind.overlay(c, self.mode, MARGIN + dx, MARGIN + dy));
+            c.wall_color = None;
         }
         meter::time(self.kind.key(), Step::Decorate, || self.decorate(c, sh));
         c.reset_transform();
@@ -940,6 +953,7 @@ impl Card {
             // o widget desenha o caminho de um tamanho ao outro
             let mut c = Canvas::new(w, h, self.s);
             c.text_scale = sh.text_scale;
+            self.use_wall_color(&mut c, sh);
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw_between(&mut c, anim.from, self.mode, progress, &env);
             c.finish()
@@ -947,6 +961,7 @@ impl Card {
             // as peças que existem nos dois tamanhos andam de um lugar para o outro
             let mut c = Canvas::new(w, h, self.s);
             c.text_scale = sh.text_scale;
+            self.use_wall_color(&mut c, sh);
             crate::card::morph::draw(&mut c, &recs.0, &recs.1, progress);
             c.finish()
         } else {

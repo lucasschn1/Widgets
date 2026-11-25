@@ -91,6 +91,9 @@ const GROW_MS: f32 = 900.0;
 const TURN_MS: f32 = 450.0;
 /// O arco acima de 90%.
 const RED: Rgba = crate::ui::theme::RED;
+/// Com a cor do papel de parede, os matizes que não mudam (graus no OKLab): o vermelho do limite
+/// (uns 27°) e o dos avisos (uns 34°); o laranja do Claude (uns 59°) muda.
+const ALERT_HUES: (f32, f32) = (15.0, 45.0);
 
 // ---------- fontes: a Outfit, embutida no app ----------
 /// a porcentagem
@@ -1575,6 +1578,10 @@ fn day_and_time(epoch: f64, now: f64) -> String {
 }
 
 impl Kind for Claude {
+    /// O vermelho de perto do limite e dos avisos (o laranja do Claude segue o papel de parede).
+    fn alert_hues(&self) -> Option<(f32, f32)> {
+        Some(ALERT_HUES)
+    }
     fn key(&self) -> &'static str {
         "claude"
     }
@@ -2444,6 +2451,50 @@ mod tests {
         let mut w = Claude::sample();
         assert!(Kind::menu(&w, &env).iter().any(|m| matches!(m, MenuItem::Cmd(t, PERCH_TOGGLE) if t.contains("barra de tarefas"))));
         assert!(matches!(act(&mut w, PERCH_TOGGLE)[..], [Request::Perch(true)]));
+    }
+
+    /// Com a cor do papel de parede (azul, aqui), o laranja dos anéis vira azul, mas o Clawd fica
+    /// com as cores dele, igual pixel a pixel.
+    #[test]
+    fn the_wallpaper_color_tints_the_rings_but_not_the_crab() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let blue = crate::gfx::wallcolor::WallColor::of_pixels(&[40, 90, 220].repeat(64));
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        let s = 1.25;
+        let w = Claude::sample_busy();
+        for mode in Mode::ALL {
+            let l = super::super::Layout::of(mode);
+            let paint = |wall| {
+                let mut canvas = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
+                canvas.wall_color = wall;
+                w.draw(&mut canvas, mode, &env);
+                canvas.finish()
+            };
+            let (plain, tinted) = (paint(None), paint(Some(blue)));
+            // o Clawd (a caixa dele): o mesmo desenho
+            let (cx, cy, unit) = w.crab_spot(mode);
+            let (x0, y0) = (((cx - 7.0 * unit) * s).max(0.0) as u32, ((cy - 4.0 * unit) * s).max(0.0) as u32);
+            let (x1, y1) = ((((cx + 7.0 * unit) * s) as u32).min(plain.w), (((cy + 4.0 * unit) * s) as u32).min(plain.h));
+            let inside = |x: u32, y: u32| (x0..x1).contains(&x) && (y0..y1).contains(&y);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * plain.w + x) * 4) as usize;
+                    assert_eq!(plain.px[i..i + 4], tinted.px[i..i + 4], "{mode:?}: o Clawd mudou de cor em ({x}, {y})");
+                }
+            }
+            // fora dele, o laranja dos anéis (BGRA) some
+            let orange = |img: &crate::gfx::Image| {
+                (0..img.h).flat_map(|y| (0..img.w).map(move |x| (x, y))).filter(|&(x, y)| !inside(x, y)).filter(|&(x, y)| {
+                    let p = &img.px[((y * img.w + x) * 4) as usize..][..4];
+                    p[2] > 220 && (120..165).contains(&p[1]) && p[0] < 70
+                }).count()
+            };
+            assert!(orange(&plain) > 100, "{mode:?}: sem o laranja dos anéis ({})", orange(&plain));
+            assert_eq!(orange(&tinted), 0, "{mode:?}: o laranja ficou");
+        }
     }
 
     #[test]

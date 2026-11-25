@@ -2354,14 +2354,17 @@ pub fn origin(s: f32, cx: f32, cy: f32, unit: f32) -> (f32, f32, f32) {
 }
 
 /// Desenha o Clawd com o centro da grade em (cx, cy), num lugar de `unit` pontos. Devolve a
-/// largura da grade.
+/// largura da grade. Ele fica sempre com as cores dele, mesmo com a cor do papel de parede
+/// ligada nos widgets (é um personagem, não um enfeite do cartão).
 pub fn draw(c: &mut Canvas, cx: f32, cy: f32, unit: f32, pose: &Pose) -> f32 {
-    let (x0, y0, u) = origin(c.s, cx, cy, unit);
-    for (x, y, cw, ch, col) in cells(pose) {
-        let (ax, ay) = (x0 + x as f32 * u, y0 + y as f32 * u);
-        c.fill_round_rect(ax, ay, ax + cw as f32 * u, ay + ch as f32 * u, 0.0, col);
-    }
-    COLS * u
+    c.own_colors(|c| {
+        let (x0, y0, u) = origin(c.s, cx, cy, unit);
+        for (x, y, cw, ch, col) in cells(pose) {
+            let (ax, ay) = (x0 + x as f32 * u, y0 + y as f32 * u);
+            c.fill_round_rect(ax, ay, ax + cw as f32 * u, ay + ch as f32 * u, 0.0, col);
+        }
+        COLS * u
+    })
 }
 
 /// Segundos de digitação por vez, para o Claude Code dando `per_min` passos por minuto

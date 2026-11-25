@@ -722,7 +722,7 @@ impl App {
             let blur = config::setting_f64(&self.sh.cfg, "desfoque");
             self.sh.backdrop.check(blur);
         }
-        let redraw = matches!(name, "texto" | "*" | "animacoes");
+        let redraw = matches!(name, "texto" | "*" | "animacoes" | crate::data::shared::WALL_COLOR);
         for card in &mut self.cards {
             if redraw {
                 card.refresh(&self.sh);

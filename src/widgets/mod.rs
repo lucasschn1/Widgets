@@ -498,6 +498,12 @@ pub trait Kind {
     fn skeleton(&self, _mode: Mode) -> Vec<Hot> {
         Vec::new()
     }
+    /// Com a cor do papel de parede ligada: a faixa de matiz (graus no OKLab, de-até) das cores
+    /// que são alerta neste widget e por isso não mudam (o vermelho da bateria fraca). None: tudo
+    /// segue o papel de parede (o vermelho da Pomodoro é a cor dela, não um alerta).
+    fn alert_hues(&self) -> Option<(f32, f32)> {
+        None
+    }
     /// Texto vindo de uma pergunta ou das configurações (ex.: "city", "user"); `extra` é a
     /// cidade escolhida na lista de sugestões.
     fn input(&mut self, _field: &str, _value: &str, _extra: Option<&Value>, _ctx: &mut Ctx) {}

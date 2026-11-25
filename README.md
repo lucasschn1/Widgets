@@ -714,6 +714,7 @@ src/
     imgops.rs         desfoque e recortes feitos à mão
     output.rs, gpu/   como o quadro chega à tela (pela CPU ou pela placa de vídeo)
     meter.rs          o medidor de desempenho (WIDGETS_PERF=1)
+    wallcolor.rs      os widgets na cor do papel de parede
   platform/           a conversa com o Windows
     win.rs            o resto da API do Windows (monitores, barra de tarefas, relógio...)
     events.rs         janelas do Windows e a fila de eventos

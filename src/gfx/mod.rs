@@ -5,13 +5,14 @@
 //! As coordenadas são "lógicas" (96 dpi); a canvas multiplica pela escala `s` do monitor.
 //!
 //! Na pasta: `drawing` (formas e ícones reaproveitados), `imgops` (desfoque e recortes à mão),
-//! `output` e `gpu` (como o quadro chega à tela: pela CPU ou pela placa de vídeo) e `meter` (o
-//! medidor de desempenho do app aberto).
+//! `output` e `gpu` (como o quadro chega à tela: pela CPU ou pela placa de vídeo), `meter` (o
+//! medidor de desempenho do app aberto) e `wallcolor` (os widgets na cor do papel de parede).
 
 pub mod drawing;
 pub mod imgops;
 pub mod output;
 pub mod meter;
+pub mod wallcolor;
 pub mod gpu;
 
 use std::cell::RefCell;
@@ -562,6 +563,12 @@ pub struct Canvas {
     rec: Option<Recorder>,
     /// o dispositivo da placa de vídeo em que esta tela desenha (0: tela em memória)
     domain: u64,
+    /// a cor do papel de parede (Aparência → "Cor do papel de parede"): o matiz de cada cor
+    /// pintada vira o dela; None: as cores de sempre
+    pub wall_color: Option<wallcolor::WallColor>,
+    /// com a cor do papel de parede: as cores de alerta do widget (`Kind::alert_hues`, matizes em
+    /// graus no OKLab), que ficam como são
+    pub alert_hues: Option<(f32, f32)>,
 }
 
 /// Pixels BGRA com alfa pré-multiplicado, a 96 dpi (as coordenadas da tela já estão em pixels).
@@ -659,7 +666,7 @@ impl Canvas {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None, domain: 0 }
+            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None, domain: 0, wall_color: None, alert_hues: None }
         })
     }
 
@@ -675,7 +682,7 @@ impl Canvas {
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
         }
-        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None, domain }
+        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None, domain, wall_color: None, alert_hues: None }
     }
 
     /// Termina o desenho numa tela da placa de vídeo (`on_target`).
@@ -686,9 +693,23 @@ impl Canvas {
         unsafe { self.rt.EndDraw(None, None) }
     }
 
+    /// A cor como o Direct2D a recebe, já no matiz do papel de parede quando a tela o usa.
+    fn color(&self, rgba: Rgba) -> D2D1_COLOR_F {
+        d2d_color(self.wall_color.map_or(rgba, |wall| wall.apply_except(rgba, self.alert_hues)))
+    }
+
+    /// Desenha `draw` com as cores de sempre, mesmo com a cor do papel de parede ligada (o Clawd
+    /// não muda de cor).
+    pub fn own_colors<T>(&mut self, draw: impl FnOnce(&mut Canvas) -> T) -> T {
+        let saved = self.wall_color.take();
+        let result = draw(self);
+        self.wall_color = saved;
+        result
+    }
+
     /// Um pincel de uma cor.
     fn brush(&self, color: Rgba) -> ID2D1SolidColorBrush {
-        unsafe { self.rt.CreateSolidColorBrush(&d2d_color(color), None).expect("brush") }
+        unsafe { self.rt.CreateSolidColorBrush(&self.color(color), None).expect("brush") }
     }
 
     /// Um pincel de uma cor ou de um degradê vertical.
@@ -696,7 +717,7 @@ impl Canvas {
         match fill {
             Fill::Solid(color) => self.brush(color).cast().unwrap(),
             Fill::VGrad(y0, y1, top, bottom) => unsafe {
-                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: d2d_color(top) }, D2D1_GRADIENT_STOP { position: 1.0, color: d2d_color(bottom) }];
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: self.color(top) }, D2D1_GRADIENT_STOP { position: 1.0, color: self.color(bottom) }];
                 let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
                 let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(0.0, y0 * self.s), endPoint: v2(0.0, y1 * self.s) };
                 self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient").cast().unwrap()
@@ -923,7 +944,7 @@ impl Canvas {
         }
         let s = self.s;
         unsafe {
-            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: d2d_color(stop) }).collect();
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: self.color(stop) }).collect();
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(0.0, gy0 * s), endPoint: v2(0.0, gy1 * s) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
@@ -938,7 +959,7 @@ impl Canvas {
         }
         let s = self.s;
         unsafe {
-            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: d2d_color(stop) }).collect();
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: self.color(stop) }).collect();
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(gx0 * s, 0.0), endPoint: v2(gx1 * s, 0.0) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");
@@ -958,7 +979,7 @@ impl Canvas {
         let hw = width / 2.0;
         unsafe {
             let brush = |center: Rgba| {
-                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: d2d_color(center) }, D2D1_GRADIENT_STOP { position: 1.0, color: d2d_color(center.with_a(0)) }];
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: self.color(center) }, D2D1_GRADIENT_STOP { position: 1.0, color: self.color(center.with_a(0)) }];
                 let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
                 let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(cx * s, cy * s), gradientOriginOffset: v2(0.0, 0.0), radiusX: radius * s, radiusY: radius * s };
                 self.rt.CreateRadialGradientBrush(&props, None, &coll).expect("radial")
@@ -982,7 +1003,7 @@ impl Canvas {
         }
         let s = self.s;
         unsafe {
-            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: d2d_color(stop) }).collect();
+            let stops: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|&(position, stop)| D2D1_GRADIENT_STOP { position, color: self.color(stop) }).collect();
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(cx * s, cy * s), gradientOriginOffset: v2(0.0, 0.0), radiusX: rx * s, radiusY: ry * s };
             let brush = self.rt.CreateRadialGradientBrush(&props, None, &coll).expect("radial");
@@ -1022,7 +1043,7 @@ impl Canvas {
         let s = self.s;
         let hw = width / 2.0;
         unsafe {
-            let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: d2d_color(top) }, D2D1_GRADIENT_STOP { position: 1.0, color: d2d_color(bottom) }];
+            let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: self.color(top) }, D2D1_GRADIENT_STOP { position: 1.0, color: self.color(bottom) }];
             let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).expect("stops");
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(0.0, y0 * s), endPoint: v2(0.0, y1 * s) };
             let brush = self.rt.CreateLinearGradientBrush(&props, None, &coll).expect("gradient");

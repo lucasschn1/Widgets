@@ -29,6 +29,9 @@ use crate::platform::win;
 
 // ---------- cores e fontes ----------
 const OK: Rgba = crate::ui::theme::GREEN;
+/// Com a cor do papel de parede, os matizes que não mudam (graus no OKLab): do vermelho da
+/// bateria fraca (uns 27°) ao âmbar da média (uns 84°); o verde (uns 153°) muda.
+const ALERT_HUES: (f32, f32) = (10.0, 100.0);
 const MID: Rgba = crate::ui::theme::AMBER;
 const LOW: Rgba = crate::ui::theme::RED;
 /// o trilho dos anéis e das barras (9%), o dos anéis do pequeno (10%) e o do anel vazio (8%)
@@ -1549,6 +1552,10 @@ fn sample_history(now: f64, end: f32) -> Vec<(f64, f32, bool)> {
 }
 
 impl Kind for Battery {
+    /// Os vermelhos e âmbares da carga baixa (o verde de sempre segue o papel de parede).
+    fn alert_hues(&self) -> Option<(f32, f32)> {
+        Some(ALERT_HUES)
+    }
     /// Na ilha quando o notebook (fora da tomada) ou um aparelho conectado fica abaixo de 20%;
     /// por alguns segundos, quando um aparelho conecta ou o notebook entra ou sai da tomada.
     fn island_item(&self, _env: &Env) -> Option<IslandItem> {

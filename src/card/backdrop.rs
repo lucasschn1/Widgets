@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use crate::gfx::{self, Canvas, Image};
+use crate::gfx::wallcolor::WallColor;
 use crate::gfx::imgops::{blur, round_u8, Rgb};
 use crate::ui::theme::*;
 use crate::platform::win;
@@ -55,11 +56,24 @@ pub struct Backdrop {
     image: Rgb,
     sharp: Rgb,
     gray: Vec<u8>,
+    /// a cor que domina o papel de parede de cada monitor (Aparência → "Cor do papel de parede")
+    wall_colors: Vec<(win::Rect, WallColor)>,
 }
 
 impl Backdrop {
     pub fn new(blur_px: f64, s: f32) -> Backdrop {
-        let mut backdrop = Backdrop { sig: None, version: 0, origin: (0, 0), s, screens: Vec::new(), walls: win::Wallpapers::new(), image: Rgb::filled(1, 1, (0, 0, 0)), sharp: Rgb::filled(1, 1, (0, 0, 0)), gray: vec![0] };
+        let mut backdrop = Backdrop {
+            sig: None,
+            version: 0,
+            origin: (0, 0),
+            s,
+            screens: Vec::new(),
+            walls: win::Wallpapers::new(),
+            image: Rgb::filled(1, 1, (0, 0, 0)),
+            sharp: Rgb::filled(1, 1, (0, 0, 0)),
+            gray: vec![0],
+            wall_colors: Vec::new(),
+        };
         backdrop.check(blur_px);
         backdrop
     }
@@ -98,7 +112,10 @@ impl Backdrop {
         blur(&mut canvas.px, w, h, 3, blur_px as f32 * s / DOWN);
         let image = canvas.extend_edges(PAD);
         let gray = image.gray();
-        Backdrop { sig: None, version: 1, origin: (0, 0), s, screens: vec![((0, 0, pw as i32, ph as i32), s)], walls: win::Wallpapers::new(), image, sharp, gray }
+        let screens = vec![((0, 0, pw as i32, ph as i32), s)];
+        let mut backdrop = Backdrop { sig: None, version: 1, origin: (0, 0), s, screens, walls: win::Wallpapers::new(), image, sharp, gray, wall_colors: Vec::new() };
+        backdrop.find_wall_colors();
+        backdrop
     }
 
     /// Refaz o fundo se o papel de parede, os monitores ou o desfoque mudaram; diz se refez.
@@ -176,6 +193,31 @@ impl Backdrop {
         }
         self.image = canvas.extend_edges(PAD);
         self.gray = self.image.gray();
+        self.find_wall_colors();
+    }
+
+    /// A cor que domina o papel de parede de cada monitor (na imagem nítida, já montada).
+    fn find_wall_colors(&mut self) {
+        self.wall_colors = self
+            .screens
+            .iter()
+            .map(|&(area, _)| {
+                let (bx, by, bw, bh) = self.bbox(area.0, area.1, (area.2 - area.0).max(1) as u32, (area.3 - area.1).max(1) as u32);
+                let piece = self.sharp.crop(bx.round() as u32, by.round() as u32, (bw.round() as u32).max(1), (bh.round() as u32).max(1));
+                (area, WallColor::of_pixels(&piece.px))
+            })
+            .collect();
+    }
+
+    /// A cor do papel de parede do monitor onde está o ponto (x, y) da tela (fora de todos: a do
+    /// primeiro).
+    pub fn wall_color_at(&self, x: i32, y: i32) -> WallColor {
+        let inside = |area: &win::Rect| x >= area.0 && x < area.2 && y >= area.1 && y < area.3;
+        self.wall_colors
+            .iter()
+            .find(|(area, _)| inside(area))
+            .or(self.wall_colors.first())
+            .map_or(WallColor { hue: 0.0, chroma: 0.0 }, |&(_, color)| color)
     }
 
     /// Desenha o papel de parede numa área da tela, como o Windows faz em cada modo.
