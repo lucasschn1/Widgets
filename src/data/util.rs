@@ -13,11 +13,6 @@ pub fn long_date(date: &LocalTime) -> String {
     format!("{}, {} de {}", WEEKDAYS_LONG[date.weekday as usize], date.day, MONTHS_LONG[date.month as usize - 1])
 }
 
-/// "sáb, 31 de out"
-pub fn short_date(date: &LocalTime) -> String {
-    format!("{}, {} de {}", WEEKDAYS[date.weekday as usize], date.day, MONTHS[date.month as usize - 1])
-}
-
 /// "agora", "há 5 min", "há 3 h", "ontem", "há 4 dias", "12 out".
 pub fn time_ago(epoch: f64) -> String {
     let seconds = win::now() - epoch;

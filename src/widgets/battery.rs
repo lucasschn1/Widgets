@@ -53,7 +53,8 @@ const PANEL_LINE: Rgba = Rgba(255, 255, 255, 13);
 const STATUS: Rgba = Rgba(255, 255, 255, 184);
 const CHARGE_TEXT: Rgba = Rgba::rgb(125, 219, 160);
 const LOW_TEXT: Rgba = Rgba::rgb(255, 154, 144);
-const NUM: Face = Face::Custom("Outfit", 300);
+/// os números grandes (os mesmos dos outros widgets)
+const NUM: Face = super::HERO;
 const TEXT: Face = Face::Custom("Outfit", 400);
 const MEDIUM: Face = Face::Custom("Outfit", 500);
 const BOLD: Face = Face::Custom("Outfit", 600);
@@ -61,6 +62,11 @@ const BOLD: Face = Face::Custom("Outfit", 600);
 const DIGIT_H: f32 = 0.70;
 /// o "%" em relação ao número
 const PCT: f32 = 0.37;
+/// o tamanho da porcentagem no anel do médio e no do grande (o "100%" diminui para caber)
+const PERCENT_M: f32 = 31.0;
+const PERCENT_G: f32 = 42.0;
+/// o espaço entre a porcentagem e o "%"
+const SIGN_GAP: f32 = 1.5;
 
 /// O degradê do arco de cada cor: do tom mais fundo (no começo, embaixo à esquerda) ao mais claro.
 fn gradient_of(c: Rgba) -> (Rgba, Rgba) {
@@ -114,6 +120,8 @@ const RING_M: Ring = Ring { cx: 66.0, cy: 58.0, r: 40.0, w: 8.0 };
 const RING_G: Ring = Ring { cx: 80.0, cy: 126.0, r: 52.0, w: 10.0 };
 /// a margem de dentro do cartão médio e do grande
 const INSET: f32 = 18.0;
+/// no grande, a linha embaixo do rótulo (quanto falta ou de onde vem a energia)
+const TOP_LINE_Y: f32 = 30.0;
 /// o pequeno: a grade 2 × 2 começa em `CELL_X` (nos dois eixos), com lugares de `CELL`; cada anel
 /// tem raio `MINI_R` e traço `MINI_W`
 const CELL_X: f32 = 14.0;
@@ -752,8 +760,8 @@ impl Battery {
     }
 
     /// A porcentagem grande, com os dígitos que mudaram rolando (o de antes sobe e some, o novo
-    /// vem de baixo), e o "%" menor e um pouco acima depois dela; os dígitos centrados em
-    /// (x, cy). O tamanho diminui até tudo caber em `max_w` (o "100%", de três dígitos, não
+    /// vem de baixo), e o "%" menor e um pouco acima depois dela, com o centro óptico em x
+    /// (`super::optical_start`) e os dígitos no meio na altura de cy. O tamanho diminui até tudo caber em `max_w` (o "100%", de três dígitos, não
     /// encosta no anel).
     fn draw_percent(&self, c: &mut Canvas, x: f32, cy: f32, size: f32, max_w: f32) {
         if self.power.is_none() {
@@ -762,12 +770,11 @@ impl Battery {
         let text = self.percent_text();
         let size = fit_size(c, &text, size, max_w);
         let nw = c.text_width(&text, NUM, size);
-        // o número e o "%" juntos no centro (só o número no centro deixava tudo para a direita)
-        let x0 = x - (nw + 1.5 + c.text_width("%", NUM, size * PCT)) / 2.0;
+        let x0 = super::optical_start(x, nw, SIGN_GAP + c.text_width("%", NUM, size * PCT));
         let base = cy + DIGIT_H * size / 2.0;
         let (before, t) = self.rolled(|r| &r.percent);
         draw_rolling(c, x0, base, &text, before, t, NUM, size, FG, Anchor::LS, None);
-        c.text(x0 + nw + 1.5, base - 0.1 * size, "%", NUM, size * PCT, FG.alpha(0.7), Anchor::LS, None);
+        c.text(x0 + nw + SIGN_GAP, base - 0.1 * size, "%", NUM, size * PCT, FG.alpha(0.7), Anchor::LS, None);
     }
 
     /// Um texto de antes da última mudança (`pick` escolhe qual) e quanto do rolar já foi
@@ -833,8 +840,10 @@ impl Battery {
         let level = d.level.filter(|_| shows);
         let low = d.connected && d.level.is_some_and(|l| l < LOW_AT);
         let icon_col = if low { LOW } else { ICON };
+        // (desconectado escrito: um traço sozinho parecia um erro)
         let value = match (d.connected, d.level) {
             (true, Some(l)) => format!("{l}%"),
+            (false, _) => "desconectado".into(),
             _ => "—".into(),
         };
         c.push_opacity(alpha);
@@ -853,9 +862,16 @@ impl Battery {
                 (x + 26.0, top, top + 18.0, 12.0, x + w - 50.0)
             }
         };
-        let vw = c.text(x + w, name_y, &value, BOLD, size, if low { LOW } else { FG }, Anchor::RA, None);
+        let vw = if d.connected {
+            c.text(x + w, name_y, &value, BOLD, size, if low { LOW } else { FG }, Anchor::RA, None)
+        } else if c.text_width(&d.name, TEXT, size) + 8.0 + c.text_width(&value, TEXT, size - 1.0) <= x + w - nx {
+            c.text(x + w, name_y + 1.0, &value, TEXT, size - 1.0, SUB, Anchor::RA, None)
+        } else {
+            0.0 // sem espaço (no médio): a linha apagada já diz, e o nome fica inteiro
+        };
         let name_end = if matches!(style, Row::Tile(_)) { x + w - vw - 8.0 } else { x + w - 50.0 };
-        c.text(nx, name_y, &d.name, TEXT, size, FG, Anchor::LA, Some(name_end - nx));
+        let name = short_name(c, &d.name, size, name_end - nx);
+        c.text(nx, name_y, &name, TEXT, size, FG, Anchor::LA, Some(name_end - nx));
         c.fill_round_rect(nx, bar_y, bar_end, bar_y + 3.0, 1.5, TRACK);
         if let Some(l) = level {
             let frac = (l as f32).max(3.0) / 100.0 * fill;
@@ -1005,10 +1021,17 @@ impl Battery {
         }
     }
 
-    /// A linha embaixo do título do grande: "acaba às 17:40", "cheia às 18:10" (sem bateria, o
-    /// que está conectado).
+    /// A linha embaixo do título do grande: desde quando o notebook está fora da tomada ou nela
+    /// ("tirado da tomada às 14:10", "na tomada desde 13:05"). Quando acaba ou enche já está
+    /// embaixo do anel; repetir aqui ("acaba às 17:40" e "3 h 20 restantes") dizia a mesma coisa
+    /// duas vezes. Sem o histórico para saber: quando acaba ou enche (sem bateria, o que está
+    /// conectado).
     fn top_line(&self) -> String {
         let Some(p) = &self.power else { return self.header_line() };
+        if let Some(since) = self.since_plug_change(p.plugged) {
+            let at = win::clock_at(since);
+            return if p.plugged { format!("na tomada desde {at}") } else { format!("tirado da tomada às {at}") };
+        }
         if !p.plugged {
             return self.secs_left().map_or("na bateria".into(), |s| format!("acaba às {}", win::clock_at(self.now() + s)));
         }
@@ -1018,6 +1041,18 @@ impl Battery {
             _ if p.percent >= 99.0 => "na tomada".into(),
             _ => "sem carregar".into(),
         }
+    }
+
+    /// Quando o notebook entrou na tomada (`plugged`) ou saiu dela, pelo histórico: o começo da
+    /// última sequência de amostras nesse estado. None: o histórico não sabe (está vazio, mudou
+    /// agora há pouco ou ficou assim o tempo todo).
+    fn since_plug_change(&self, plugged: bool) -> Option<f64> {
+        let last = self.hist.last()?;
+        if last.2 != plugged {
+            return None;
+        }
+        let changed = self.hist.iter().rposition(|sample| sample.2 != plugged)?;
+        Some(self.hist[changed + 1].0)
     }
 
     /// Uma pílula de altura `h` centrada em `cx` (ou terminando em `right`), com o texto (e, se
@@ -1064,7 +1099,7 @@ impl Battery {
         }
         // o anel só com o número; o tempo numa pílula embaixo (com o raio, carregando)
         self.draw_ring(c, RING_M);
-        self.draw_percent(c, RING_M.cx, RING_M.cy, 31.0, inner_width(RING_M));
+        self.draw_percent(c, RING_M.cx, RING_M.cy, PERCENT_M, inner_width(RING_M));
         let (before, t) = self.rolled(|r| &r.status);
         self.draw_pill(c, Some(RING_M.cx), 0.0, 122.0, 24.0, &self.status_line(), before, t, false);
         c.fill_round_rect(134.0, 22.0, 135.0, 132.0, 0.0, RULE);
@@ -1076,10 +1111,11 @@ impl Battery {
     }
 
     fn draw_large(&self, c: &mut Canvas) {
-        c.text(INSET, 18.0, if self.power.is_some() { "Bateria" } else { "Dispositivos" }, BOLD, 15.0, FG, Anchor::LA, None);
+        // o rótulo no mesmo lugar e na mesma letra dos outros widgets, na cor da bateria
+        super::draw_label(c, INSET, super::LABEL_Y, if self.power.is_some() { "BATERIA" } else { "DISPOSITIVOS" }, OK);
         let (before, t) = self.rolled(|r| &r.header);
         let Some(p) = self.power.clone() else {
-            draw_rolling(c, INSET, 40.0, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * INSET));
+            draw_rolling(c, INSET, TOP_LINE_Y, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * INSET));
             if self.devices.is_empty() {
                 self.draw_no_devices(c, WIDE / 2.0, 200.0, WIDE - 2.0 * INSET);
             } else {
@@ -1089,10 +1125,10 @@ impl Battery {
         };
         // o estado numa pílula à direita do título; embaixo, quando acaba ou enche
         let chip_w = self.draw_pill(c, None, WIDE - INSET, 27.0, 22.0, self.chip_text(), None, 1.0, true);
-        draw_rolling(c, INSET, 40.0, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * INSET - chip_w));
+        draw_rolling(c, INSET, TOP_LINE_Y, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * INSET - chip_w));
         // o anel: o número no centro e o ícone na abertura de baixo
         self.draw_ring(c, RING_G);
-        self.draw_percent(c, RING_G.cx, 124.0, 42.0, inner_width(RING_G));
+        self.draw_percent(c, RING_G.cx, RING_G.cy, PERCENT_G, inner_width(RING_G));
         let (ox, oy) = g_opening(RING_G);
         match self.badge() {
             Some((d, scale, alpha)) => vector::icon(c, d, ox, oy, 16.0 * scale, OK.alpha(alpha), if d == vector::CHECK { 2.6 } else { 0.0 }),
@@ -1438,12 +1474,23 @@ fn inner_width(ring: Ring) -> f32 {
     2.0 * (ring.r - ring.w / 2.0) * 0.68
 }
 
+/// O nome de um aparelho que cabe em `max_w`: sem o código do modelo no fim quando não cabe
+/// ("Mouse MX Master 3S" vira "Mouse MX Master"), em vez de cortado no meio ("Mouse MX Mast…").
+/// Só tira palavras com números, e deixa pelo menos duas ("Fone WH-1000XM5" fica e é cortado).
+fn short_name(c: &Canvas, name: &str, size: f32, max_w: f32) -> String {
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    while c.text_width(&words.join(" "), TEXT, size) > max_w && words.len() > 2 && words.last().is_some_and(|w| w.chars().any(|ch| ch.is_ascii_digit())) {
+        words.pop();
+    }
+    words.join(" ")
+}
+
 /// O tamanho da porcentagem (`text` e o "%" menor) para caber em `max_w`, até `size`.
 fn fit_size(c: &Canvas, text: &str, size: f32, max_w: f32) -> f32 {
     // (a largura do texto não diminui na mesma proporção da fonte: algumas rodadas até caber)
     let mut fitted = size;
     for _ in 0..6 {
-        let width = c.text_width(text, NUM, fitted) + 1.5 + c.text_width("%", NUM, fitted * PCT);
+        let width = c.text_width(text, NUM, fitted) + SIGN_GAP + c.text_width("%", NUM, fitted * PCT);
         if width <= max_w {
             break;
         }
@@ -2324,18 +2371,71 @@ mod tests {
         assert_eq!(Battery::new(&cache).hist.len(), 2);
     }
 
+    /// A porcentagem fica no meio do anel, medida na tinta das letras: na horizontal, no centro
+    /// óptico (o número com o "%" um quarto do "%" à direita do centro) e, na vertical, os
+    /// algarismos no meio (o grande desenhava 2 pt acima).
+    #[test]
+    fn the_percent_sits_in_the_middle_of_the_ring() {
+        com();
+        let env_cfg = json!({"bateria": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "bateria" };
+        let s = 1.25;
+        for (name, b) in [("73%", Battery::sample()), ("carregando", Battery::sample_charging()), ("100%", Battery::sample_full(60_000))] {
+            for (mode, ring) in [(Mode::M, RING_M), (Mode::G, RING_G)] {
+                let l = super::super::Layout::of(mode);
+                let mut c = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
+                b.draw(&mut c, mode, &env);
+                let size = fit_size(&c, &b.percent_text(), if mode == Mode::M { PERCENT_M } else { PERCENT_G }, inner_width(ring));
+                let sign = SIGN_GAP + c.text_width("%", NUM, size * PCT);
+                let optical = (1.0 - super::super::PERCENT_SIGN_WEIGHT) * sign / 2.0;
+                let bands = crate::testes::ink_bands(&c.finish(), s, (ring.cx, ring.cy), ring.r - ring.w / 2.0 - 1.0, ring.cy + 0.6 * ring.r);
+                let number = bands[0];
+                let (dx, dy) = ((number[0] + number[2]) / 2.0 - ring.cx - optical, (number[1] + number[3]) / 2.0 - ring.cy);
+                // (um pixel a 125% é 0,8 pt, e os algarismos têm um respiro diferente de cada lado)
+                assert!(dx.abs() <= 1.5 && dy.abs() <= 1.0, "{name} {mode:?}: o número está {dx:+.1}, {dy:+.1} pt fora do meio");
+            }
+        }
+    }
+
+    /// O nome que não cabe perde o código do modelo do fim (e não é cortado no meio); o que cabe,
+    /// ou que ficaria com uma palavra só, fica como está.
+    #[test]
+    fn long_device_names_lose_the_model_code() {
+        com();
+        let c = Canvas::new(10, 10, 1.0);
+        let wide = c.text_width("Mouse MX Master 3S", TEXT, 11.5) + 1.0;
+        assert_eq!(short_name(&c, "Mouse MX Master 3S", 11.5, wide), "Mouse MX Master 3S");
+        let fits = c.text_width("Mouse MX Master", TEXT, 11.5) + 1.0;
+        assert_eq!(short_name(&c, "Mouse MX Master 3S", 11.5, fits), "Mouse MX Master");
+        assert_eq!(short_name(&c, "Fone WH-1000XM5", 11.5, 30.0), "Fone WH-1000XM5");
+        assert_eq!(short_name(&c, "Controle Xbox Series", 11.5, 30.0), "Controle Xbox Series");
+    }
+
+    /// A linha do alto do grande diz desde quando o notebook está fora da tomada (quando acaba
+    /// já está embaixo do anel); sem histórico, quando acaba.
+    #[test]
+    fn the_top_line_says_since_when() {
+        let mut b = Battery::sample();
+        let since = b.since_plug_change(false).expect("o exemplo saiu da tomada no fim da tarde");
+        assert!(since < b.now() && since > b.now() - DAY);
+        assert_eq!(b.top_line(), format!("tirado da tomada às {}", win::clock_at(since)));
+        assert!(b.since_plug_change(true).is_none(), "na tomada, mas o histórico diz que não");
+        b.hist.clear();
+        assert!(b.top_line().starts_with("acaba às "), "{}", b.top_line());
+    }
+
     #[test]
     fn a_full_charge_shrinks_to_fit_inside_the_ring() {
         com();
         let c = Canvas::new(10, 10, 1.0);
-        for (g, size) in [(RING_M, 31.0), (RING_G, 42.0)] {
+        for (g, size) in [(RING_M, PERCENT_M), (RING_G, PERCENT_G)] {
             let max = inner_width(g);
             // dois dígitos: o tamanho de sempre; o "100%": menor, e cabendo com o respiro
             let two = fit_size(&c, "73", size, max);
             let three = fit_size(&c, "100", size, max);
             assert_eq!(two, size, "{g:?}: o 73% diminuiu");
             assert!(three < size, "{g:?}: o 100% não diminuiu");
-            let w = c.text_width("100", NUM, three) + 1.5 + c.text_width("%", NUM, three * PCT);
+            let w = c.text_width("100", NUM, three) + SIGN_GAP + c.text_width("%", NUM, three * PCT);
             assert!(w <= max + 0.01 && w < 2.0 * (g.r - g.w / 2.0) - 20.0, "{g:?}: {w} de {max}");
         }
     }

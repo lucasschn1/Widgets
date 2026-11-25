@@ -170,6 +170,37 @@ fn draw(kind: &dyn Kind, mode: Mode, cfg: &Value) -> Image {
     c.finish()
 }
 
+/// As faixas de tinta de um desenho dentro do círculo de raio `inner` em volta de (cx, cy), só
+/// acima de `max_y` (tudo em pontos, numa imagem na escala `s`): cada faixa é um trecho de
+/// linhas seguidas com algum pixel forte, como (x0, y0, x1, y1), de cima para baixo. No meio de
+/// um anel, a primeira faixa é o número e a de baixo, o nome. Serve para medir se o que está
+/// escrito fica no meio do anel (a letra de verdade, e não a caixa que a fonte diz que ela ocupa).
+pub(crate) fn ink_bands(img: &Image, s: f32, (cx, cy): (f32, f32), inner: f32, max_y: f32) -> Vec<[f32; 4]> {
+    const STRONG: u8 = 110;
+    let mut bands: Vec<[f32; 4]> = vec![];
+    let mut inside_band = false;
+    for y in ((cy - inner) * s) as u32..(max_y * s) as u32 {
+        let mut row: Option<(u32, u32)> = None;
+        for x in ((cx - inner) * s) as u32..((cx + inner) * s) as u32 {
+            let inside = (x as f32 / s - cx).hypot(y as f32 / s - cy) <= inner;
+            if inside && img.px[((y * img.w + x) * 4 + 3) as usize] >= STRONG {
+                row = Some(row.map_or((x, x), |(left, right)| (left.min(x), right.max(x))));
+            }
+        }
+        let Some((left, right)) = row else {
+            inside_band = false;
+            continue;
+        };
+        let (x0, x1, y0, y1) = (left as f32 / s, (right + 1) as f32 / s, y as f32 / s, (y + 1) as f32 / s);
+        match bands.last_mut() {
+            Some(band) if inside_band => *band = [band[0].min(x0), band[1], band[2].max(x1), y1],
+            _ => bands.push([x0, y0, x1, y1]),
+        }
+        inside_band = true;
+    }
+    bands
+}
+
 /// Quanto da imagem tem alguma tinta (0 a 1).
 fn ink(img: &Image) -> f32 {
     let painted = img.px.chunks_exact(4).filter(|p| p[3] > 8).count();

@@ -22,6 +22,26 @@ impl Rgba {
         let channel = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * t).round() as u8;
         Rgba(channel(self.0, other.0), channel(self.1, other.1), channel(self.2, other.2), channel(self.3, other.3))
     }
+    /// Esta cor (com a transparência dela) pintada por cima de `back`: a cor opaca que se vê.
+    pub fn over(self, back: Rgba) -> Rgba {
+        let a = self.3 as f32 / 255.0;
+        let channel = |front: u8, behind: u8| (front as f32 * a + behind as f32 * (1.0 - a)).round() as u8;
+        Rgba::rgb(channel(self.0, back.0), channel(self.1, back.1), channel(self.2, back.2))
+    }
+    /// A luminância relativa (0 a 1), como a WCAG define: quanto a cor (opaca) parece clara.
+    pub fn luminance(self) -> f32 {
+        let channel = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.040_45 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(self.0) + 0.7152 * channel(self.1) + 0.0722 * channel(self.2)
+    }
+}
+
+/// O contraste entre duas cores opacas, de 1 (iguais) a 21 (preto e branco), como a WCAG define.
+pub fn contrast(a: Rgba, b: Rgba) -> f32 {
+    let (la, lb) = (a.luminance(), b.luminance());
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 pub const WHITE: Rgba = Rgba(255, 255, 255, 255);

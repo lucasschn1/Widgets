@@ -51,6 +51,24 @@ pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::ui::
     c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, color, crate::gfx::Anchor::LA, None);
 }
 
+/// Os números grandes de todos os widgets (a temperatura, o tempo do Pomodoro, a porcentagem do
+/// Uso do Claude e da bateria): a mesma letra fina em todos, para que, lado a lado na área de
+/// trabalho, pareçam da mesma família. É a fonte de títulos do Windows 11 (no 10, a Segoe UI).
+pub const HERO: crate::gfx::Face = crate::gfx::Face::Light;
+
+/// Quanto o "%" conta ao centralizar uma porcentagem no meio de um anel (Uso do Claude e
+/// bateria). Com 0, só os algarismos ficam no centro, e o "%" pendurado parece empurrar tudo para
+/// a direita; com 1, o número e o "%" ficam juntos no centro, e os algarismos, que pesam muito
+/// mais aos olhos, parecem ir para a esquerda. No meio-termo o conjunto parece centrado (o
+/// "centro óptico").
+pub const PERCENT_SIGN_WEIGHT: f32 = 0.5;
+
+/// Onde começam os algarismos de uma porcentagem com o centro óptico em `x`: `digits` é a
+/// largura do número e `sign`, a do "%" com o espaço antes dele.
+pub fn optical_start(x: f32, digits: f32, sign: f32) -> f32 {
+    x - digits / 2.0 - PERCENT_SIGN_WEIGHT * sign / 2.0
+}
+
 /// cantos de cada tamanho
 pub const SMALL_RADIUS: f32 = 24.0;
 pub const MEDIUM_RADIUS: f32 = 26.0;
@@ -382,8 +400,9 @@ pub trait Kind {
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);
     /// O bichinho que pode sair do widget para a barra de tarefas (o Clawd): onde ele fica no
-    /// cartão neste tamanho (centro, em pontos). None: o widget não tem.
-    fn perch_from(&self, _mode: Mode) -> Option<(f32, f32)> {
+    /// cartão neste tamanho: o centro, em pontos, e o tamanho dos quadradinhos dele (o `unit` de
+    /// `clawd::draw`, para o pulo sair e chegar do mesmo tamanho). None: o widget não tem.
+    fn perch_from(&self, _mode: Mode) -> Option<(f32, f32, f32)> {
         None
     }
     /// Ele foi para a barra de tarefas (true) ou voltou para o widget.

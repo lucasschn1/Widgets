@@ -608,7 +608,10 @@ const C_ART: f32 = 64.0;
 const C_ART_RADIUS: f32 = 12.0;
 const C_ART_XY: (f32, f32) = (14.0, 14.0);
 const C_TEXT_W: f32 = SMALL - 28.0;
-const C_PLAY_D: f32 = 36.0;
+const C_PLAY_D: f32 = 34.0;
+/// o avançar do pequeno (ao lado do tocar) e o espaço entre a capa e o tocar
+const C_NEXT: f32 = 13.0;
+const C_CTRL_GAP: f32 = 7.0;
 const C_BAR_Y: f32 = 138.0;
 const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
@@ -838,6 +841,7 @@ impl Media {
             can_toggle: true,
             can_prev: true,
             can_next: true,
+            volume: Some(0.62),
             ..Default::default()
         };
         let later = Instant::now() + Duration::from_secs(3600);
@@ -984,8 +988,11 @@ impl Media {
         let toggle = Ctl::Toggle(m.playing);
         match mode {
             Mode::P => {
-                let (x, y) = (SMALL - 14.0 - C_PLAY_D / 2.0, 14.0 + C_PLAY_D / 2.0);
-                vec![(toggle, x, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, x, y + 40.0, 13.0, m.can_next, false)]
+                // tocar e avançar lado a lado, na altura do meio da capa (empilhados no canto, o
+                // grande em cima do pequeno, ficavam tortos em relação a ela)
+                let y = C_ART_XY.1 + C_ART / 2.0;
+                let play_x = C_ART_XY.0 + C_ART + C_CTRL_GAP + C_PLAY_D / 2.0;
+                vec![(toggle, play_x, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, SMALL - 14.0 - C_NEXT / 2.0, y, C_NEXT, m.can_next, false)]
             }
             Mode::M => {
                 let (cx, y) = (M_TEXT_X + M_TEXT_W / 2.0, M_CTRL_Y);
@@ -1300,10 +1307,10 @@ impl Media {
                 c.fill_round_rect(x0, G_VOL_Y - 2.5, x0 + 5.0f32.max((x1 - x0) * v), G_VOL_Y + 2.5, 2.5, Rgba::rgb(235, 235, 240));
             }
             None => {
-                // sem o volume do app: a mesma linha, apagada (a roda do mouse continua mudando)
+                // sem o volume do app (o Windows não achou a sessão de áudio dele): um trilho
+                // vazio parecia quebrado; diz o que a roda do mouse faz aqui
                 icon(c, 24.0, G_VOL_Y, "\u{e992}", 14.0, FAINT);
-                icon(c, W - 24.0, G_VOL_Y, "\u{e995}", 14.0, FAINT);
-                c.fill_round_rect(x0, G_VOL_Y - 2.5, x1, G_VOL_Y + 2.5, 2.5, WHITE.alpha(0.12));
+                c.text(W / 2.0, G_VOL_Y, "Roda do mouse: volume do Windows", Face::Regular, 11.0, FAINT, Anchor::MM, Some(x1 - x0));
             }
         }
         for (action, (x0, y0, x1, y1)) in self.toggles() {
@@ -1454,7 +1461,7 @@ impl Media {
     fn draw_medium_playing(&self, c: &mut Canvas, track: &Snapshot, has_bg: bool) {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         self.draw_art_or_note(c, Mode::M, 28.0);
-        super::draw_label(c, x, 16.0, source_label(track.kind), source_color(track.kind));
+        super::draw_label(c, x, super::LABEL_Y, source_label(track.kind), source_color(track.kind));
         self.draw_title(c, track, Mode::M, has_bg);
         c.text(x, 50.0, &track.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
     }
@@ -1464,7 +1471,7 @@ impl Media {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         let (title, sub) = self.idle_message();
         let kind = self.pref();
-        super::draw_label(c, x, 16.0, source_label(&kind), source_color(&kind));
+        super::draw_label(c, x, super::LABEL_Y, source_label(&kind), source_color(&kind));
         c.text(x, 30.0, &title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
         for (i, line) in c.wrap_balanced(&sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
             c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
@@ -1859,6 +1866,20 @@ impl Kind for Media {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No pequeno, tocar e avançar ficam lado a lado, na altura do meio da capa, à direita dela
+    /// e dentro do cartão, sem um encostar no outro.
+    #[test]
+    fn small_controls_sit_side_by_side_next_to_the_art() {
+        let m = Media::sample();
+        let controls = m.controls(Mode::P);
+        let [(_, play_x, play_y, play_d, _, true), (Ctl::Next, next_x, next_y, next_size, _, false)] = controls[..] else { panic!("{:?}", controls.len()) };
+        let art_mid = C_ART_XY.1 + C_ART / 2.0;
+        assert_eq!((play_y, next_y), (art_mid, art_mid));
+        assert!(play_x - play_d / 2.0 > C_ART_XY.0 + C_ART, "o tocar encosta na capa");
+        assert!(next_x - next_size / 2.0 > play_x + play_d / 2.0, "o avançar encosta no tocar");
+        assert!(next_x + next_size / 2.0 <= SMALL - 10.0, "o avançar sai do cartão");
+    }
 
     /// O fundo de cada tamanho fica guardado: a troca de tamanho desenha os dois sem desfocar a
     /// capa de novo, e o último usado é o que some aos poucos quando a música muda.

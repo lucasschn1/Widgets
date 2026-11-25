@@ -1432,7 +1432,7 @@ impl Tempo {
         let pad = if big { G_PAD } else { M_PAD };
         let (city_y, temp_y, temp_size) = if big { (18.0, 30.0, 54.0) } else { (16.0, 29.0, 40.0) };
         c.text(pad, city_y, &short_city(&self.city(env)), Face::Semibold, if big { 14.0 } else { 13.0 }, FG, Anchor::LA, Some(170.0));
-        self.temp_roll.draw(c, pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), Face::Light, temp_size, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), super::HERO, temp_size, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = if big { 26.0 } else { 22.0 };
@@ -1455,7 +1455,7 @@ impl Tempo {
     fn top_desc_w(&self, c: &Canvas, big: bool) -> f32 {
         let pad = if big { G_PAD } else { M_PAD };
         let temp_size = if big { 54.0 } else { 40.0 };
-        let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), Face::Light, temp_size);
+        let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), super::HERO, temp_size);
         W - pad - temp_end - 14.0
     }
 
@@ -1545,7 +1545,7 @@ impl Tempo {
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
         let (x, w) = (16.0, SMALL - 32.0);
         c.text(x, 16.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 28.0));
-        self.temp_roll.draw(c, x - 3.0, 29.0, &self.temp_text(), Face::Light, 44.0, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, x - 3.0, 29.0, &self.temp_text(), super::HERO, 44.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = 22.0;

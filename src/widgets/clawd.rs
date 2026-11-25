@@ -2328,12 +2328,13 @@ pub fn gaze(cx: f32, cy: f32, x: f32, y: f32) -> (i32, i32) {
 
 /// O Clawd pulando de um lugar para outro (o widget mudando de tamanho, a ida para a barra de
 /// tarefas): agachado antes de subir e ao pousar, de olhos apertados; no ar, com as patas
-/// encolhidas e as garras para cima.
-pub fn jump_pose(crouch: bool) -> Pose {
+/// encolhidas e as garras para cima. No Natal (`xmas`), pula de gorro de Papai Noel, que ele
+/// está usando antes e depois do pulo (a fantasia de Sherlock, não: ela sai para pular).
+pub fn jump_pose(crouch: bool, xmas: bool) -> Pose {
     if crouch {
-        Pose { dy: 1, legs: Legs::Tuck, eyes: Eyes::Squeeze, ..stand() }
+        Pose { dy: 1, legs: Legs::Tuck, eyes: Eyes::Squeeze, xmas, ..stand() }
     } else {
-        Pose { legs: Legs::Tuck, eyes: Eyes::Open(0, -1), claws: [Claw::Up; 2], ..stand() }
+        Pose { legs: Legs::Tuck, eyes: Eyes::Open(0, -1), claws: [Claw::Up; 2], xmas, ..stand() }
     }
 }
 

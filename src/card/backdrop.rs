@@ -279,7 +279,7 @@ impl Backdrop {
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
         // contraste automático: quanto mais claro o fundo, mais o vidro escurece
         let light = self.lightness(bx, by, bw, bh);
-        let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
+        let amount = tint_amount(tint, light);
         let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
         let src = &self.image;
         let (fx, fy) = (bw / w as f32, bh / h as f32);
@@ -325,7 +325,7 @@ impl Backdrop {
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
         let mut base = self.image.sample(bx, by, bw, bh, w, h);
         let light = self.lightness(bx, by, bw, bh);
-        let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
+        let amount = tint_amount(tint, light);
         let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
         for pixel in base.px.chunks_exact_mut(3) {
             for (channel, tint) in pixel.iter_mut().zip(tint_rgb) {
@@ -344,6 +344,37 @@ struct Column {
     left: usize,
     right: usize,
     weight: f32,
+}
+
+/// O contraste mínimo do texto secundário (o `MUTED`, das notas e legendas) sobre o vidro: 4,5:1,
+/// o da WCAG para texto pequeno.
+const MIN_TEXT_CONTRAST: f32 = 4.5;
+/// O máximo que o vidro escurece (mais que isso, vira um cartão preto).
+const MAX_TINT: f32 = 0.85;
+/// O mínimo (mesmo num papel de parede escuro, o vidro escurece um pouco).
+const MIN_TINT: f32 = 0.12;
+/// De quanto em quanto o escurecimento sobe até o texto ficar legível.
+const TINT_STEP: f32 = 0.01;
+
+/// Quanto o vidro escurece (0 a 1) sobre um papel de parede de claridade `light` (0 a 1), com o
+/// escurecimento escolhido `tint`: quanto mais claro o fundo, mais escurece; e nunca menos que o
+/// necessário para o texto secundário ficar legível (`MIN_TEXT_CONTRAST`), mesmo com o
+/// escurecimento no mínimo das configurações (lá, um papel de parede médio-claro deixava o texto
+/// em 3,5:1).
+pub fn tint_amount(tint: f64, light: f32) -> f32 {
+    let mut amount = (tint as f32 + (light - 0.3) * 0.8).clamp(MIN_TINT, MAX_TINT);
+    while amount < MAX_TINT && muted_contrast(light, amount) < MIN_TEXT_CONTRAST {
+        amount = (amount + TINT_STEP).min(MAX_TINT);
+    }
+    amount
+}
+
+/// O contraste do texto secundário sobre o vidro escurecido `amount` (0 a 1) em cima de um papel
+/// de parede cinza de claridade `light` (0 a 1).
+fn muted_contrast(light: f32, amount: f32) -> f32 {
+    let wall = (light.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let glass = Rgba::rgb(wall, wall, wall).mix(Rgba::rgb(TINT.0, TINT.1, TINT.2), amount);
+    contrast(MUTED.over(glass), glass)
 }
 
 /// Vidro pronto: base (já escurecida), reflexo no topo, borda clara, conteúdo e cantos redondos.
@@ -495,7 +526,7 @@ impl Backdrop {
         let mut base = piece.sample(bx - ox, by - oy, bw, bh, w, h);
         let gray = base.gray();
         let light = gray.iter().map(|&level| level as u64).sum::<u64>() as f32 / gray.len().max(1) as f32 / 255.0;
-        let amount = (tint as f32 + (light - 0.3) * 0.8).clamp(0.12, 0.85);
+        let amount = tint_amount(tint, light);
         let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
         for pixel in base.px.chunks_exact_mut(3) {
             for (channel, tint_channel) in pixel.iter_mut().zip(tint_rgb) {
@@ -510,6 +541,23 @@ impl Backdrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O texto secundário fica legível (4,5:1) sobre o vidro em qualquer papel de parede, do
+    /// preto ao branco, com o escurecimento no padrão e no mínimo das configurações; e no padrão,
+    /// onde já ficava legível, o escurecimento é o mesmo de antes.
+    #[test]
+    fn secondary_text_is_always_legible() {
+        for tint in [TINT_AMOUNT, 0.15, 0.35] {
+            for step in 0..=100 {
+                let light = step as f32 / 100.0;
+                let amount = tint_amount(tint, light);
+                assert!(muted_contrast(light, amount) >= MIN_TEXT_CONTRAST, "escurecimento {tint}, claridade {light}: {:.2}", muted_contrast(light, amount));
+                if tint == TINT_AMOUNT {
+                    assert_eq!(amount, (tint as f32 + (light - 0.3) * 0.8).clamp(MIN_TINT, MAX_TINT), "o padrão mudou em {light}");
+                }
+            }
+        }
+    }
 
     /// O vidro montado por peças sai igual ao feito de uma vez (`finish_glass`), com o conteúdo de
     /// todos os widgets em todos os tamanhos: no máximo um tom de diferença em algum canal (o
