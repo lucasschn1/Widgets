@@ -600,13 +600,13 @@ impl Kind for Pomodoro {
             // a coluna da direita: o rótulo, o que está acontecendo e o total do dia (o tempo no
             // anel é o único número grande)
             let col_w = W - PAD - M_COL_X;
-            super::draw_label(c, M_COL_X, super::LABEL_Y, "POMODORO", focus);
+            super::draw_label(c, M_COL_X, super::LABEL_Y, "Pomodoro");
             c.text(M_COL_X, M_HEAD_Y, &self.headline(), Face::Semibold, 15.0, FG, Anchor::LA, Some(col_w));
             c.text(M_COL_X, M_SUB_Y, &day_total(&stats), Face::Regular, 11.0, MUTED, Anchor::LA, Some(col_w));
             return;
         }
 
-        super::draw_label(c, PAD, super::LABEL_Y, "POMODORO", focus);
+        super::draw_label(c, PAD, super::LABEL_Y, "Pomodoro");
         c.text(W - PAD, super::LABEL_Y, &util::long_date(&local), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
         c.text(PAD, G_HEAD_Y, &self.headline(), Face::Semibold, 20.0, FG, Anchor::LA, Some(W / 2.0 - PAD));
         let done = stats.pomodoros;

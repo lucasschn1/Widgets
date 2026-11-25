@@ -178,7 +178,37 @@ fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, thickness
 }
 
 /// espaço entre o nome e a porcentagem no título do pequeno virado
-const BACK_P_GAP: f32 = 5.0;
+const BACK_P_GAP: f32 = 4.0;
+/// onde o título do pequeno virado começa (depois da bolinha da cor) e o respiro até a área do ✕
+/// (que é maior que o desenho dele)
+const BACK_P_TITLE_X: f32 = 26.0;
+const BACK_P_CLOSE_GAP: f32 = 2.0;
+
+/// Nas linhas do médio e do grande: o espaço entre o nome e a quantidade em uso, e as letras que a
+/// quantidade pode ter (a primeira que deixa o nome inteiro).
+const METRIC_NAME_GAP: f32 = 6.0;
+const AMOUNT_SIZES: [f32; 2] = [11.0, 10.0];
+
+/// A quantidade em uso só com a parte usada ("10,9/16 GB" vira "10,9 GB"); None se ela já é curta
+/// (a CPU, "2,84 GHz").
+fn short_amount(amount: &str) -> Option<String> {
+    let (used, rest) = amount.split_once('/')?;
+    let unit = rest.split_whitespace().last()?;
+    Some(format!("{used} {unit}"))
+}
+
+/// A quantidade em uso ao lado do nome ("Memória") em `room` pontos e a letra dela: a inteira
+/// ("10,9/16 GB") na maior letra que deixa o nome inteiro, senão a curta ("10,9 GB"), ou None
+/// (sem a quantidade) se nada deixa.
+fn amount_for(c: &Canvas, name: &str, amount: &str, room: f32) -> Option<(String, f32)> {
+    let name_w = c.text_width(name, Face::Regular, 12.0);
+    let fits = |text: &str, size: f32| name_w + METRIC_NAME_GAP + c.text_width(text, Face::Regular, size) <= room;
+    let mut options: Vec<(String, f32)> = AMOUNT_SIZES.iter().map(|&size| (amount.to_string(), size)).collect();
+    if let Some(short) = short_amount(amount) {
+        options.extend(AMOUNT_SIZES.iter().map(|&size| (short.clone(), size)));
+    }
+    options.into_iter().find(|(text, size)| fits(text, *size))
+}
 
 /// Letra do título do pequeno virado ("Memória 68%"): 12,5, ou menor até caber em `room`.
 fn back_p_title_size(c: &Canvas, name: &str, pct: &str, room: f32) -> f32 {
@@ -641,11 +671,11 @@ impl System {
     /// direita; no médio, no alto da coluna das medidas (os anéis ocupam a altura toda).
     fn draw_header(&self, c: &mut Canvas, mode: Mode) {
         if mode == Mode::M {
-            super::draw_label(c, Self::metric_rect(mode, 0).0, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+            super::draw_label(c, Self::metric_rect(mode, 0).0, super::LABEL_Y, "Sistema");
             return;
         }
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        super::draw_label(c, PAD, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+        super::draw_label(c, PAD, super::LABEL_Y, "Sistema");
         c.text(W - PAD, super::LABEL_Y, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 
@@ -667,9 +697,12 @@ impl System {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
                 let pw = draw_counting(c, x1 - 6.0, y + 7.0, pct, "%", Face::Semibold, 13.5, text, Anchor::RM);
-                // quanto está em uso agora, antes da porcentagem
-                let aw = c.text(x1 - 6.0 - pw - 7.0, y + 7.5, &self.amounts[i], Face::Regular, 11.0, MUTED, Anchor::RM, None);
-                let name_w = (x1 - 6.0 - pw - 7.0 - aw - 6.0) - (x0 + 13.0);
+                // quanto está em uso agora, antes da porcentagem (menor, só a parte usada, ou
+                // nenhum, se o nome não couber inteiro: "Mem…" não diz o que é)
+                let amount_x = x1 - 6.0 - pw - 7.0;
+                let amount = amount_for(c, NAMES[i], &self.amounts[i], amount_x - (x0 + 13.0));
+                let aw = amount.map_or(0.0, |(text, size)| c.text(amount_x, y + 7.5, &text, Face::Regular, size, MUTED, Anchor::RM, None) + METRIC_NAME_GAP);
+                let name_w = amount_x - aw - (x0 + 13.0);
                 c.text(x0 + 13.0, y + 7.0, NAMES[i], Face::Regular, 12.0, MUTED, Anchor::LM, Some(name_w.max(10.0)));
                 let (bx0, bx1, by) = (x0, x1 - 6.0, y + 19.0);
                 match self.history.get(i).filter(|history| history.len() >= 2) {
@@ -758,10 +791,10 @@ impl System {
         c.fill_circle(17.0, 22.0, 4.0, color(which));
         // o nome inteiro ("Memória", como no médio e no grande) e a porcentagem antes do ✕ (a letra
         // diminui um pouco se não couber)
-        let room = Self::close_rect(Mode::P).0 - 4.0 - 26.0;
+        let room = Self::close_rect(Mode::P).0 - BACK_P_CLOSE_GAP - BACK_P_TITLE_X;
         let size = back_p_title_size(c, NAMES[which], &pct, room);
-        let nw = c.text(26.0, 22.0, NAMES[which], Face::Semibold, size, FG, Anchor::LM, None);
-        c.text(26.0 + nw + BACK_P_GAP, 22.0, &pct, Face::Semibold, size, color(which), Anchor::LM, None);
+        let nw = c.text(BACK_P_TITLE_X, 22.0, NAMES[which], Face::Semibold, size, FG, Anchor::LM, None);
+        c.text(BACK_P_TITLE_X + nw + BACK_P_GAP, 22.0, &pct, Face::Semibold, size, color(which), Anchor::LM, None);
         self.draw_close(c, Mode::P);
         let rows = self.rows(which);
         if rows.is_empty() {
@@ -991,6 +1024,32 @@ mod tests {
         }
     }
 
+    /// No médio e no grande, o nome do recurso ("Memória") nunca é cortado: com a quantidade em
+    /// uso mais longa e a porcentagem de três algarismos, ela fica menor, só com a parte usada
+    /// (ou sai), mas o nome fica inteiro; no caso comum, a quantidade aparece junto.
+    #[test]
+    fn metric_names_are_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let probe = Canvas::new(1, 1, 1.0);
+        assert_eq!(short_amount("10,9/16 GB").as_deref(), Some("10,9 GB"));
+        assert_eq!(short_amount("2,84 GHz"), None);
+        let room_with = |mode: Mode, i: usize, pct: &str| {
+            let (x0, _, x1, _) = System::metric_rect(mode, i);
+            x1 - 6.0 - probe.text_width(pct, Face::Semibold, 13.5) - 7.0 - (x0 + 13.0)
+        };
+        for mode in [Mode::M, Mode::G] {
+            for i in 0..3 {
+                let room = room_with(mode, i, "100%");
+                let used = amount_for(&probe, NAMES[i], "258,4/476,9 GB", room).map_or(0.0, |(text, size)| probe.text_width(&text, Face::Regular, size) + METRIC_NAME_GAP);
+                assert!(probe.text_width(NAMES[i], Face::Regular, 12.0) <= room - used, "{mode:?}: {} cortado", NAMES[i]);
+                // o caso comum: dois algarismos e a quantidade de sempre
+                assert!(amount_for(&probe, NAMES[i], "10,9/16 GB", room_with(mode, i, "68%")).is_some(), "{mode:?}: {} sem a quantidade comum", NAMES[i]);
+            }
+        }
+    }
+
     /// "Memória" em todos os tamanhos (o pequeno dizia "RAM"): o nome inteiro cabe na coluna do
     /// pequeno e, virado, o título com 100% cabe antes do ✕; no médio, o rótulo e as três linhas
     /// cabem na altura dos anéis.
@@ -1004,9 +1063,10 @@ mod tests {
         for i in 0..3 {
             let (x0, _, x1, _) = System::metric_rect(Mode::P, i);
             assert!(probe.text_width(NAMES[i], Face::Regular, 10.0) <= x1 - x0 - 2.0, "{} não cabe no pequeno", NAMES[i]);
-            let room = System::close_rect(Mode::P).0 - 4.0 - 26.0;
+            let room = System::close_rect(Mode::P).0 - BACK_P_CLOSE_GAP - BACK_P_TITLE_X;
             let size = back_p_title_size(&probe, NAMES[i], "100%", room);
-            assert!(size >= 11.0, "{}: letra {size} no pequeno virado", NAMES[i]);
+            let need = |size: f32| probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size);
+            assert!(size >= 11.0, "{}: letra {size} no pequeno virado (a 11, {:.1} de {room:.1})", NAMES[i], need(11.0));
             assert!(probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size) <= room);
         }
         // médio: a primeira linha começa embaixo do rótulo e a última barra termina com os anéis

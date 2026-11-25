@@ -211,7 +211,7 @@ fn step_widgets(state: &mut WelcomeState, ui: &mut Ui, x: f32, w: f32, view: &Vi
             let thumb = (view.render)(key, Mode::M, s * zoom).map(|(content, radius)| {
                 let sx = view.origin.0 + ((ui.ox + tx + (tile_w - medium.w * zoom) / 2.0) * s).round() as i32;
                 let sy = view.origin.1 + ((ui.oy + ty + 10.0 + (stage_h - medium.h * zoom) / 2.0) * s).round() as i32;
-                view.sh.backdrop.glass(&content, radius, sx, sy, view.sh.tint)
+                view.sh.backdrop.glass(&content, radius, sx, sy, view.sh.tint, view.sh.glass_look(crate::widgets::own_background(key)))
             });
             state.thumbs.insert(key, thumb);
         }

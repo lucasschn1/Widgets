@@ -667,7 +667,6 @@ impl App {
             "desfoque" => ("desfoque", json!(value.round() as i64)),
             "escurecimento" => ("escurecimento", json!(value.round() / 100.0)),
             "texto" => ("texto", json!(value.round() / 100.0)),
-            "opacidade_ociosa" => ("opacidade_ociosa", json!(value.round() / 100.0)),
             "dur:foco" | "dur:pausa" | "dur:longa" => {
                 let phase = &id[4..];
                 let minutes = value.round() as u32;
@@ -722,7 +721,9 @@ impl App {
             let blur = config::setting_f64(&self.sh.cfg, "desfoque");
             self.sh.backdrop.check(blur);
         }
-        let redraw = matches!(name, "texto" | "*" | "animacoes" | crate::data::shared::WALL_COLOR);
+        // (o vidro líquido e o apagar mudam só o vidro, que o `present` refaz; as cores do tema
+        // claro estão no conteúdo)
+        let redraw = matches!(name, "texto" | "*" | "animacoes" | crate::data::shared::WALL_COLOR | crate::data::shared::LIGHT_THEME);
         for card in &mut self.cards {
             if redraw {
                 card.refresh(&self.sh);

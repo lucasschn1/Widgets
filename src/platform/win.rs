@@ -196,6 +196,11 @@ pub fn foreground_screen() -> Option<Rect> {
     }
 }
 
+/// O Windows está no tema claro (Personalização → Cores → "Modo do aplicativo": Claro)?
+pub fn light_theme() -> bool {
+    registry(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme") == "1"
+}
+
 /// Área de trabalho do monitor onde está o mouse (onde a pessoa está olhando).
 pub fn area_at_pointer() -> Rect {
     let (x, y) = pointer();

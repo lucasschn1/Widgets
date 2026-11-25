@@ -280,14 +280,25 @@ fn widgets_that_draw_their_size_change_draw_every_frame() {
     assert!(morphing > 0, "nenhum widget desenha a troca de tamanho");
 }
 
-/// Os rótulos dos cabeçalhos ("GITHUB", "SISTEMA", "POMODORO", "SPOTIFY"...) têm todos a mesma
-/// letra, em cor (nunca cinza); os do alto do cartão ficam todos na mesma altura (lado a lado,
-/// alinhados).
+/// O widget dono de um título: sem caixa alta, "Spotify" também é o nome de um app na lista de
+/// processos do Sistema, e lá não é título.
+fn label_owner(text: &str) -> &'static str {
+    match text {
+        "GitHub" => "github",
+        "Sistema" => "sistema",
+        "Pomodoro" => "pomodoro",
+        _ => "midia",
+    }
+}
+
+/// Os títulos dos cabeçalhos ("GitHub", "Sistema", "Pomodoro", "Spotify"...) têm todos a mesma
+/// letra, na cor do texto (como no macOS); os do alto do cartão ficam todos na mesma altura (lado
+/// a lado, alinhados).
 #[test]
 fn header_labels_look_the_same_everywhere() {
     use crate::gfx::{Face, Op};
     com();
-    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let labels = ["GitHub", "Sistema", "Pomodoro", "Spotify", "YouTube", "Mídia"];
     let mut top_base: Option<f32> = None;
     let mut seen = std::collections::HashSet::new();
     for (name, kind, cfg) in cases() {
@@ -296,21 +307,21 @@ fn header_labels_look_the_same_everywhere() {
             let _ = draw(kind.as_ref(), mode, &cfg);
             for rec in crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops {
                 let Op::Text { base, text, face, size, color, .. } = rec.op else { continue };
-                if !labels.contains(&text.as_str()) {
+                if !labels.contains(&text.as_str()) || label_owner(&text) != kind.key() {
                     continue;
                 }
                 seen.insert(text.clone());
                 assert!(face == Face::Semibold && size == widgets::LABEL_SIZE, "{name} {mode:?}: {text} em {face:?} {size}");
-                assert!(color.0.abs_diff(color.1).max(color.1.abs_diff(color.2)) > 20, "{name} {mode:?}: {text} sem cor");
+                assert_eq!(color, crate::ui::theme::FG, "{name} {mode:?}: {text} fora da cor do texto");
                 // os que ficam no alto do cartão (o da música fica junto do texto dela)
-                if base < 30.0 && !["SPOTIFY", "YOUTUBE", "MÍDIA"].contains(&text.as_str()) {
+                if base < 30.0 && !["Spotify", "YouTube", "Mídia"].contains(&text.as_str()) {
                     let first = *top_base.get_or_insert(base);
                     assert!((base - first).abs() < 0.01, "{name} {mode:?}: {text} em {base}, os outros em {first}");
                 }
             }
         }
     }
-    for label in ["GITHUB", "SISTEMA", "POMODORO"] {
+    for label in ["GitHub", "Sistema", "Pomodoro"] {
         assert!(seen.contains(label), "nenhum caso desenhou {label}");
     }
 }
@@ -321,7 +332,7 @@ fn header_labels_look_the_same_everywhere() {
 fn labels_on_medium_and_large_never_on_small() {
     use crate::gfx::Op;
     com();
-    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let labels = ["GitHub", "Sistema", "Pomodoro", "Spotify", "YouTube", "Mídia"];
     let mut checked = 0;
     for (name, kind, cfg) in cases() {
         // as vistas de dentro (o Sistema virado) e os avisos sem dados têm o próprio título
@@ -331,7 +342,7 @@ fn labels_on_medium_and_large_never_on_small() {
         let env = Env { cfg: &cfg, key: kind.key() };
         for &mode in kind.sizes() {
             let _ = draw(kind.as_ref(), mode, &cfg);
-            let has = crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops.iter().any(|rec| matches!(&rec.op, Op::Text { text, .. } if labels.contains(&text.as_str())));
+            let has = crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops.iter().any(|rec| matches!(&rec.op, Op::Text { text, .. } if labels.contains(&text.as_str()) && label_owner(text) == kind.key()));
             assert_eq!(has, mode != Mode::P, "{name} {mode:?}: rótulo {}", if has { "no pequeno" } else { "faltando" });
             checked += 1;
         }
@@ -695,11 +706,11 @@ fn zz_fingerprint() {
     let pic = pic.finish();
     let bd = crate::card::backdrop::Backdrop::from_picture(&pic, 20.0, S);
     let content = draw(all[0].1.as_ref(), Mode::M, &all[0].2);
-    out += &format!("vidro {:x}\n", hash(&bd.glass(&content, 22.0, 30, 20, 0.5)));
-    let base = bd.glass_base(content.w, content.h, 30, 20, 0.5);
+    out += &format!("vidro {:x}\n", hash(&bd.glass(&content, 22.0, 30, 20, 0.5, crate::card::backdrop::GlassLook::default())));
+    let base = bd.glass_base(content.w, content.h, 30, 20, 0.5, crate::card::backdrop::GlassLook::default());
     out += &format!("vidro base {:x}\n", hash(&base));
-    out += &format!("vidro fim {:x}\n", hash(&crate::card::backdrop::finish_glass(&base, &content, 22.0, S)));
-    out += &format!("vidro partes {:x}\n", hash(&crate::card::backdrop::GlassParts::new(&base, 22.0, S).compose(&content)));
+    out += &format!("vidro fim {:x}\n", hash(&crate::card::backdrop::finish_glass(&base, &content, 22.0, S, crate::card::backdrop::GlassLook::default())));
+    out += &format!("vidro partes {:x}\n", hash(&crate::card::backdrop::GlassParts::new(&base, 22.0, S, crate::card::backdrop::GlassLook::default()).compose(&content)));
     // o menu de vidro
     {
         use crate::widgets::MenuItem;

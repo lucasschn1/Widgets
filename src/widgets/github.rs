@@ -613,13 +613,13 @@ impl Kind for GitHub {
                 // (na mesma altura de quando os dados chegam: o rótulo não pula; o pequeno não
                 // tem rótulo)
                 if mode != Mode::P {
-                    super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                    super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 }
             } else if mode == Mode::G {
-                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
             } else if mode == Mode::P {
-                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 2.0 * PAD, 4).iter().enumerate() {
                     c.text(PAD, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
                 }
@@ -629,7 +629,7 @@ impl Kind for GitHub {
             return;
         };
         if mode != Mode::P {
-            super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+            super::draw_label(c, PAD, HEAD_Y, "GitHub");
         }
         Self::draw_total(c, data.total, mode);
         let days = self.by_day();

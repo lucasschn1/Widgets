@@ -57,7 +57,7 @@ const STATUS: Rgba = Rgba(255, 255, 255, 184);
 const CHARGE_TEXT: Rgba = Rgba::rgb(125, 219, 160);
 const LOW_TEXT: Rgba = Rgba::rgb(255, 154, 144);
 /// os números grandes (os mesmos dos outros widgets)
-const NUM: Face = super::HERO;
+const NUM: Face = super::PERCENT;
 const TEXT: Face = Face::Custom("Outfit", 400);
 const MEDIUM: Face = Face::Custom("Outfit", 500);
 const BOLD: Face = Face::Custom("Outfit", 600);
@@ -66,8 +66,8 @@ const DIGIT_H: f32 = 0.70;
 /// o "%" em relação ao número
 const PCT: f32 = 0.37;
 /// o tamanho da porcentagem no anel do médio e no do grande (o "100%" diminui para caber)
-const PERCENT_M: f32 = 31.0;
-const PERCENT_G: f32 = 42.0;
+const PERCENT_M: f32 = 30.0;
+const PERCENT_G: f32 = 40.0;
 /// o espaço entre a porcentagem e o "%"
 const SIGN_GAP: f32 = 1.5;
 
@@ -121,13 +121,13 @@ impl Ring {
 
 const RING_M: Ring = Ring { cx: 66.0, cy: 58.0, r: 40.0, w: 8.0 };
 const RING_G: Ring = Ring { cx: 80.0, cy: 126.0, r: 52.0, w: 10.0 };
-/// a margem de dentro do cartão médio e do grande
-const INSET: f32 = 18.0;
+/// a margem de dentro do cartão médio e do grande (a de todos os widgets)
+const INSET: f32 = super::CARD_PAD;
 /// no grande, a linha embaixo do rótulo (quanto falta ou de onde vem a energia)
 const TOP_LINE_Y: f32 = 30.0;
 /// o pequeno: a grade 2 × 2 começa em `CELL_X` (nos dois eixos), com lugares de `CELL`; cada anel
 /// tem raio `MINI_R` e traço `MINI_W`
-const CELL_X: f32 = 14.0;
+const CELL_X: f32 = super::CARD_PAD;
 const CELL: f32 = (SMALL - 2.0 * CELL_X) / 2.0;
 const MINI_R: f32 = 16.0;
 const MINI_W: f32 = 4.0;
@@ -1115,7 +1115,7 @@ impl Battery {
 
     fn draw_large(&self, c: &mut Canvas) {
         // o rótulo no mesmo lugar e na mesma letra dos outros widgets, na cor da bateria
-        super::draw_label(c, INSET, super::LABEL_Y, if self.power.is_some() { "BATERIA" } else { "DISPOSITIVOS" }, OK);
+        super::draw_label(c, INSET, super::LABEL_Y, if self.power.is_some() { "Bateria" } else { "Dispositivos" });
         let (before, t) = self.rolled(|r| &r.header);
         let Some(p) = self.power.clone() else {
             draw_rolling(c, INSET, TOP_LINE_Y, &self.top_line(), before, t, TEXT, 11.5, SUB, Anchor::LA, Some(WIDE - 2.0 * INSET));
@@ -2398,8 +2398,9 @@ mod tests {
                 let bands = crate::testes::ink_bands(&c.finish(), s, (ring.cx, ring.cy), ring.r - ring.w / 2.0 - 1.0, ring.cy + 0.6 * ring.r);
                 let number = bands[0];
                 let (dx, dy) = ((number[0] + number[2]) / 2.0 - ring.cx - optical, (number[1] + number[3]) / 2.0 - ring.cy);
-                // (um pixel a 125% é 0,8 pt, e os algarismos têm um respiro diferente de cada lado)
-                assert!(dx.abs() <= 1.5 && dy.abs() <= 1.0, "{name} {mode:?}: o número está {dx:+.1}, {dy:+.1} pt fora do meio");
+                // (um pixel a 125% é 0,8 pt, e os algarismos têm um respiro diferente de cada lado:
+                // o "1" da Nunito, mais à esquerda, empurra o "100%" uns 1,6 pt para a direita)
+                assert!(dx.abs() <= 2.0 && dy.abs() <= 1.0, "{name} {mode:?}: o número está {dx:+.1}, {dy:+.1} pt fora do meio");
             }
         }
     }

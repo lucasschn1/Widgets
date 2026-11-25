@@ -22,7 +22,7 @@ use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
 use windows_future::IAsyncOperation;
 
-use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, LARGE_H, MEDIUM_H, SMALL, WIDE};
+use super::{Ctx, Env, Hot, IslandInfo, Kind, Layout, MenuItem, Mode, Request, CARD_PAD, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::data::config::Get;
 use crate::gfx::drawing;
 use crate::gfx::{self, Anchor, Canvas, Face, Image, Kept};
@@ -47,20 +47,12 @@ const FUNNY: [(&str, &str); 10] = [
 const IDLE_FPS: u32 = 15;
 const IDLE_FRAMES: usize = 60; // 4 segundos em loop
 
+/// O título do widget: de onde vem o que está tocando.
 fn source_label(kind: &str) -> &'static str {
     match kind {
-        "spotify" => "SPOTIFY",
-        "youtube" => "YOUTUBE",
-        _ => "MÍDIA",
-    }
-}
-
-fn source_color(kind: &str) -> Rgba {
-    match kind {
-        "spotify" => Rgba::rgb(30, 215, 96),
-        "youtube" => Rgba::rgb(255, 72, 72),
-        // "MÍDIA": o azul do equalizador (o rótulo é sempre na cor de destaque, nunca cinza)
-        _ => Rgba::rgb(100, 170, 255),
+        "spotify" => "Spotify",
+        "youtube" => "YouTube",
+        _ => "Mídia",
     }
 }
 
@@ -591,9 +583,9 @@ const G_TOG_X: f32 = 34.0;
 const VOL_X: (f32, f32) = (44.0, W - 44.0);
 const ART: f32 = 76.0;
 const ART_RADIUS: f32 = 14.0;
-const ART_XY: (f32, f32) = (18.0, 18.0);
-const TEXT_X: f32 = 18.0;
-const TEXT_W: f32 = W - 36.0;
+const ART_XY: (f32, f32) = (CARD_PAD, CARD_PAD);
+const TEXT_X: f32 = CARD_PAD;
+const TEXT_W: f32 = W - 2.0 * CARD_PAD;
 const BAR_Y: f32 = 328.0;
 const CTRL_Y: f32 = 372.0;
 const PLAY_D: f32 = 44.0;
@@ -606,25 +598,25 @@ const IDLE_BOX: (f32, f32, f32, f32) = (36.0, G_ART.1 + (G_ART.3 + G_IDLE_GROW -
 // pequeno (quadrado): capa e tocar em cima, título e artista embaixo, barra fina no pé
 const C_ART: f32 = 64.0;
 const C_ART_RADIUS: f32 = 12.0;
-const C_ART_XY: (f32, f32) = (14.0, 14.0);
-const C_TEXT_W: f32 = SMALL - 28.0;
+const C_ART_XY: (f32, f32) = (CARD_PAD, CARD_PAD);
+const C_TEXT_W: f32 = SMALL - 2.0 * CARD_PAD;
 const C_PLAY_D: f32 = 34.0;
-/// o avançar do pequeno (ao lado do tocar) e o espaço entre a capa e o tocar
+/// o avançar do pequeno (embaixo do tocar) e o espaço entre os dois
 const C_NEXT: f32 = 13.0;
-const C_CTRL_GAP: f32 = 7.0;
+const C_CTRL_GAP: f32 = 10.0;
 const C_BAR_Y: f32 = 138.0;
-const C_IDLE_BOX: (f32, f32, f32, f32) = (14.0 + 12.0, 14.0 + 12.0, 40.0, 40.0); // equalizador no lugar da capa
+const C_IDLE_BOX: (f32, f32, f32, f32) = (CARD_PAD + 12.0, CARD_PAD + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
 // médio: a capa na altura toda à esquerda; à direita, fonte, título e artista, os controles e
 // a barra de progresso alinhada com o pé da capa
-const M_ART: f32 = MEDIUM_H - 28.0;
+const M_ART: f32 = MEDIUM_H - 2.0 * CARD_PAD;
 const M_ART_RADIUS: f32 = 14.0;
-const M_ART_XY: (f32, f32) = (14.0, 14.0);
+const M_ART_XY: (f32, f32) = (CARD_PAD, CARD_PAD);
 const M_TEXT_X: f32 = M_ART_XY.0 + M_ART + 16.0;
 const M_TEXT_W: f32 = W - M_TEXT_X - 16.0;
 const M_CTRL_Y: f32 = 96.0;
 const M_PLAY_D: f32 = 36.0;
-const M_BAR_Y: f32 = MEDIUM_H - 17.0;
+const M_BAR_Y: f32 = M_ART_XY.1 + M_ART - 3.0;
 const M_IDLE_D: f32 = 56.0;
 const M_IDLE_BOX: (f32, f32, f32, f32) = (M_ART_XY.0 + (M_ART - M_IDLE_D) / 2.0, M_ART_XY.1 + (M_ART - M_IDLE_D) / 2.0, M_IDLE_D, M_IDLE_D);
 
@@ -720,7 +712,7 @@ fn live_background(art: &Image, w: u32, h: u32) -> Image {
 }
 
 /// no pequeno, o texto começa nesta margem
-const SMALL_TEXT_X: f32 = 14.0;
+const SMALL_TEXT_X: f32 = CARD_PAD;
 
 // ações
 const TOGGLE: u32 = 1;
@@ -988,11 +980,13 @@ impl Media {
         let toggle = Ctl::Toggle(m.playing);
         match mode {
             Mode::P => {
-                // tocar e avançar lado a lado, na altura do meio da capa (empilhados no canto, o
-                // grande em cima do pequeno, ficavam tortos em relação a ela)
-                let y = C_ART_XY.1 + C_ART / 2.0;
-                let play_x = C_ART_XY.0 + C_ART + C_CTRL_GAP + C_PLAY_D / 2.0;
-                vec![(toggle, play_x, y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, SMALL - 14.0 - C_NEXT / 2.0, y, C_NEXT, m.can_next, false)]
+                // o avançar embaixo do tocar, os dois no meio do espaço à direita da capa e o par
+                // centrado na altura dela (no canto, colados no alto, ficavam tortos em relação à capa)
+                let x = (C_ART_XY.0 + C_ART + SMALL - CARD_PAD) / 2.0;
+                let pair_h = C_PLAY_D + C_CTRL_GAP + C_NEXT;
+                let top = C_ART_XY.1 + (C_ART - pair_h) / 2.0;
+                let (play_y, next_y) = (top + C_PLAY_D / 2.0, top + C_PLAY_D + C_CTRL_GAP + C_NEXT / 2.0);
+                vec![(toggle, x, play_y, C_PLAY_D, m.can_toggle, true), (Ctl::Next, x, next_y, C_NEXT, m.can_next, false)]
             }
             Mode::M => {
                 let (cx, y) = (M_TEXT_X + M_TEXT_W / 2.0, M_CTRL_Y);
@@ -1461,7 +1455,7 @@ impl Media {
     fn draw_medium_playing(&self, c: &mut Canvas, track: &Snapshot, has_bg: bool) {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         self.draw_art_or_note(c, Mode::M, 28.0);
-        super::draw_label(c, x, super::LABEL_Y, source_label(track.kind), source_color(track.kind));
+        super::draw_label(c, x, super::LABEL_Y, source_label(track.kind));
         self.draw_title(c, track, Mode::M, has_bg);
         c.text(x, 50.0, &track.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
     }
@@ -1471,7 +1465,7 @@ impl Media {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         let (title, sub) = self.idle_message();
         let kind = self.pref();
-        super::draw_label(c, x, super::LABEL_Y, source_label(&kind), source_color(&kind));
+        super::draw_label(c, x, super::LABEL_Y, source_label(&kind));
         c.text(x, 30.0, &title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
         for (i, line) in c.wrap_balanced(&sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
             c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
@@ -1485,7 +1479,7 @@ impl Media {
         let (x, w) = (TEXT_X, TEXT_W);
         let kind = track.map(|track| track.kind.to_string()).unwrap_or_else(|| self.pref());
         let y = if track.is_some() { G_TEXT_Y } else { G_TEXT_Y + G_IDLE_GROW };
-        super::draw_label(c, x, y, source_label(&kind), source_color(&kind));
+        super::draw_label(c, x, y, source_label(&kind));
         match track {
             Some(track) => {
                 self.draw_art_or_note(c, Mode::G, 44.0);
@@ -1867,18 +1861,20 @@ impl Kind for Media {
 mod tests {
     use super::*;
 
-    /// No pequeno, tocar e avançar ficam lado a lado, na altura do meio da capa, à direita dela
-    /// e dentro do cartão, sem um encostar no outro.
+    /// No pequeno, o avançar fica embaixo do tocar, os dois na mesma coluna à direita da capa,
+    /// com o par centrado na altura dela, dentro do cartão e sem um encostar no outro.
     #[test]
-    fn small_controls_sit_side_by_side_next_to_the_art() {
+    fn small_next_sits_under_play_beside_the_art() {
         let m = Media::sample();
         let controls = m.controls(Mode::P);
         let [(_, play_x, play_y, play_d, _, true), (Ctl::Next, next_x, next_y, next_size, _, false)] = controls[..] else { panic!("{:?}", controls.len()) };
+        assert_eq!(play_x, next_x, "na mesma coluna");
+        assert!(next_y - next_size / 2.0 > play_y + play_d / 2.0, "o avançar encosta no tocar");
+        let (top, bottom) = (play_y - play_d / 2.0, next_y + next_size / 2.0);
         let art_mid = C_ART_XY.1 + C_ART / 2.0;
-        assert_eq!((play_y, next_y), (art_mid, art_mid));
+        assert!(((top + bottom) / 2.0 - art_mid).abs() < 0.01, "o par não fica no meio da capa");
         assert!(play_x - play_d / 2.0 > C_ART_XY.0 + C_ART, "o tocar encosta na capa");
-        assert!(next_x - next_size / 2.0 > play_x + play_d / 2.0, "o avançar encosta no tocar");
-        assert!(next_x + next_size / 2.0 <= SMALL - 10.0, "o avançar sai do cartão");
+        assert!(play_x + play_d / 2.0 <= SMALL - CARD_PAD, "o tocar sai da margem");
     }
 
     /// O fundo de cada tamanho fica guardado: a troca de tamanho desenha os dois sem desfocar a

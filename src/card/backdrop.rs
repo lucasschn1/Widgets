@@ -293,21 +293,22 @@ impl Backdrop {
     }
 
     /// Cartão de vidro sob `content`, com o canto superior esquerdo em (x, y) na tela.
-    /// `tint` é o escurecimento base (sobe sozinho em papéis de parede claros).
-    pub fn glass(&self, content: &Image, radius: f32, x: i32, y: i32, tint: f64) -> Image {
-        let base = self.glass_base(content.w, content.h, x, y, tint);
-        self.glass_on(&base, content, radius, x, y)
+    /// `tint` é o escurecimento base (sobe sozinho em papéis de parede claros); `look`, se o vidro
+    /// é escuro ou claro, clássico ou líquido.
+    pub fn glass(&self, content: &Image, radius: f32, x: i32, y: i32, tint: f64, look: GlassLook) -> Image {
+        let base = self.glass_base(content.w, content.h, x, y, tint, look);
+        self.glass_on(&base, content, radius, x, y, look)
     }
 
     /// Como `glass`, sobre um fundo já pronto (`glass_base`, que o cartão guarda enquanto não sai
     /// do lugar).
-    pub fn glass_on(&self, base: &Image, content: &Image, radius: f32, x: i32, y: i32) -> Image {
-        finish_glass(base, content, radius, self.scale_for(x, y))
+    pub fn glass_on(&self, base: &Image, content: &Image, radius: f32, x: i32, y: i32, look: GlassLook) -> Image {
+        finish_glass(base, content, radius, self.scale_for(x, y), look)
     }
 
     /// As peças do vidro sobre este fundo (`GlassParts`), para montar com conteúdos novos.
-    pub fn glass_parts(&self, base: &Image, radius: f32, x: i32, y: i32) -> GlassParts {
-        GlassParts::new(base, radius, self.scale_for(x, y))
+    pub fn glass_parts(&self, base: &Image, radius: f32, x: i32, y: i32, look: GlassLook) -> GlassParts {
+        GlassParts::new(base, radius, self.scale_for(x, y), look)
     }
 
     /// O fundo do vidro (w × h pixels, canto em (x, y) na tela): o papel de parede desfocado,
@@ -316,13 +317,14 @@ impl Backdrop {
     /// É o recorte com interpolação (`Rgb::sample`), o escurecimento e o granulado (`grain`) numa
     /// passada só, com as mesmas contas na mesma ordem (o resultado é o mesmo, byte a byte: veja o
     /// teste), sem as imagens intermediárias e com o que é de cada coluna calculado uma vez.
-    pub fn glass_base(&self, w: u32, h: u32, x: i32, y: i32, tint: f64) -> Image {
+    pub fn glass_base(&self, w: u32, h: u32, x: i32, y: i32, tint: f64, look: GlassLook) -> Image {
         let (w, h) = (w.max(1), h.max(1));
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
-        // contraste automático: quanto mais claro o fundo, mais o vidro escurece
+        // contraste automático: quanto mais claro o fundo, mais o vidro escurece (no vidro claro,
+        // quanto mais escuro, mais clareia)
         let light = self.lightness(bx, by, bw, bh);
-        let amount = tint_amount(tint, light);
-        let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
+        let amount = look.amount(tint, light);
+        let tint_rgb = look.tint_rgb();
         let src = &self.image;
         let (fx, fy) = (bw / w as f32, bh / h as f32);
         // para cada coluna: os dois pixels vizinhos na imagem desfocada e o peso entre eles
@@ -367,7 +369,7 @@ impl Backdrop {
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
         let mut base = self.image.sample(bx, by, bw, bh, w, h);
         let light = self.lightness(bx, by, bw, bh);
-        let amount = tint_amount(tint, light);
+        let amount = GlassLook::default().amount(tint, light);
         let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
         for pixel in base.px.chunks_exact_mut(3) {
             for (channel, tint) in pixel.iter_mut().zip(tint_rgb) {
@@ -419,19 +421,145 @@ fn muted_contrast(light: f32, amount: f32) -> f32 {
     contrast(MUTED.over(glass), glass)
 }
 
-/// Vidro pronto: base (já escurecida), reflexo no topo, borda clara, conteúdo e cantos redondos.
-pub fn finish_glass(base: &Image, content: &Image, radius: f32, s: f32) -> Image {
+/// Como `tint_amount`, no vidro claro: quanto o vidro vai para o branco (`LIGHT_TINT`) sobre um
+/// papel de parede de claridade `light`; quanto mais escuro o fundo, mais clareia, e nunca menos
+/// que o necessário para o texto secundário (escuro, no tema claro) ficar legível.
+pub fn light_tint_amount(tint: f64, light: f32) -> f32 {
+    let mut amount = (tint as f32 + (0.7 - light) * 0.8).clamp(MIN_TINT, MAX_TINT);
+    while amount < MAX_TINT && light_muted_contrast(light, amount) < MIN_TEXT_CONTRAST {
+        amount = (amount + TINT_STEP).min(MAX_TINT);
+    }
+    amount
+}
+
+/// O contraste do texto secundário do tema claro sobre o vidro claro `amount` (0 a 1) em cima
+/// de um papel de parede cinza de claridade `light` (0 a 1).
+fn light_muted_contrast(light: f32, amount: f32) -> f32 {
+    let wall = (light.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let glass = Rgba::rgb(wall, wall, wall).mix(Rgba::rgb(LIGHT_TINT.0, LIGHT_TINT.1, LIGHT_TINT.2), amount);
+    contrast(crate::gfx::lighttheme::light_variant(MUTED).over(glass), glass)
+}
+
+/// Como o vidro aparece: escuro ou claro (o tema claro do Windows). O vidro é sempre o líquido,
+/// como o do macOS 26 (veja `refract` e `draw_edges`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct GlassLook {
+    pub light: bool,
+}
+
+impl GlassLook {
+    /// A cor para onde o papel de parede vai: o quase preto do vidro escuro ou o branco do claro.
+    fn tint_rgb(self) -> [f32; 3] {
+        let (r, g, b) = if self.light { LIGHT_TINT } else { TINT };
+        [r as f32, g as f32, b as f32]
+    }
+
+    /// Quanto o vidro vai para essa cor sobre um papel de parede de claridade `light`, com o
+    /// escurecimento escolhido `tint` (só uma parte dele: o vidro líquido deixa o papel de parede
+    /// aparecer mais, até o limite do contraste do texto).
+    pub fn amount(self, tint: f64, light: f32) -> f32 {
+        let tint = tint * LIQUID_TINT;
+        if self.light { light_tint_amount(tint, light) } else { tint_amount(tint, light) }
+    }
+
+    /// O que fica por baixo do conteúdo, por cima do fundo: o reflexo branco no topo (sumindo até
+    /// 60% da altura), o brilho vindo do canto de cima à esquerda, a base um pouco mais escura e
+    /// a luz presa na espessura do vidro (uma faixa clara logo dentro da borda, sumindo para o
+    /// meio), que dão a espessura dele. `line`: um pixel da borda.
+    fn draw_sheen(self, c: &mut Canvas, w: f32, h: f32, radius: f32, line: f32) {
+        c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, WHITE.alpha(SHEEN)), (0.6, WHITE.alpha(0.0)), (1.0, WHITE.alpha(0.0))], 0.0, h);
+        c.fill_radial(w * 0.12, 0.0, w * 0.9, h * 0.7, &[(0.0, WHITE.alpha(LIQUID_SHINE)), (1.0, WHITE.alpha(0.0))]);
+        let shade = Rgba(0, 0, 0, 0);
+        c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, shade), (0.72, shade), (1.0, shade.with_a((255.0 * LIQUID_DEPTH) as u8))], 0.0, h);
+        let rim = RIM_WIDTH * line;
+        for step in 0..RIM_STEPS {
+            let inset = line + rim * step as f32 / RIM_STEPS as f32;
+            let alpha = RIM_LIGHT * (1.0 - step as f32 / RIM_STEPS as f32);
+            c.gradient_stroke_round_rect(inset, inset, w - inset, h - inset, (radius - inset).max(0.0), WHITE.alpha(alpha), WHITE.alpha(alpha * 0.4), line);
+        }
+    }
+
+    /// A borda por cima de tudo: um fio claro, mais forte no alto; o fio de luz logo abaixo dele;
+    /// e os reflexos nas quinas (forte em cima à esquerda, de onde vem a luz, e mais fraco embaixo
+    /// à direita), como a luz correndo pela beirada de um vidro grosso.
+    fn draw_edges(self, c: &mut Canvas, w: f32, h: f32, radius: f32, line: f32) {
+        let (top, bottom) = EDGE_LIQUID;
+        c.gradient_stroke_round_rect(0.0, 0.0, w, h, radius, WHITE.alpha(top), WHITE.alpha(bottom), line);
+        c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(EDGE_GLOW), WHITE.alpha(0.0), line);
+        let reach = w.min(h);
+        c.glow_round_rect(0.0, 0.0, w, h, radius, radius * 0.6, radius * 0.6, reach * 0.75, WHITE.alpha(SPECULAR.0), line * 1.5, 0.0);
+        c.glow_round_rect(0.0, 0.0, w, h, radius, w - radius * 0.6, h - radius * 0.6, reach * 0.55, WHITE.alpha(SPECULAR.1), line * 1.5, 0.0);
+    }
+}
+
+/// A beirada do vidro líquido como uma lente: numa faixa junto da borda (de cantos de raio
+/// `radius`, tudo em pixels na escala `s`), cada pixel mostra o fundo de um pouco mais para
+/// dentro, mais quanto mais perto da borda, e o fundo parece se curvar ali; o vermelho e o azul
+/// se separam um tico do verde, a franja de cor de um vidro de verdade. O meio fica como está.
+pub fn refract(base: &Image, radius: f32, s: f32) -> Image {
+    let (band, push) = (REFRACT_BAND * s, REFRACT_PUSH * s);
+    let (w, h) = (base.w as f32, base.h as f32);
+    let radius = radius.min(w / 2.0).min(h / 2.0);
+    let (half_x, half_y) = (w / 2.0 - radius, h / 2.0 - radius);
+    let mut out = base.clone();
+    for py in 0..base.h {
+        let y = py as f32 + 0.5;
+        let near_top_or_bottom = y < band || y > h - band;
+        for px in 0..base.w {
+            let x = px as f32 + 0.5;
+            if !near_top_or_bottom && x >= band && x <= w - band {
+                continue; // longe da borda: o fundo de sempre
+            }
+            let (dx, dy) = (x - w / 2.0, y - h / 2.0);
+            let (qx, qy) = (dx.abs() - half_x, dy.abs() - half_y);
+            // a distância até a borda arredondada, por dentro, e a direção para fora
+            let (inside, nx, ny) = if qx > 0.0 && qy > 0.0 {
+                let len = qx.hypot(qy);
+                (radius - len, qx / len * dx.signum(), qy / len * dy.signum())
+            } else if qx > qy {
+                (radius - qx, dx.signum(), 0.0)
+            } else {
+                (radius - qy, 0.0, dy.signum())
+            };
+            if inside <= 0.0 || inside >= band {
+                continue;
+            }
+            let near = 1.0 - inside / band;
+            let pull = push * near * near;
+            let i = ((py * base.w + px) * 4) as usize;
+            // (BGRA: o azul é o canal 0, o vermelho o 2)
+            for (channel, spread) in [(0usize, 1.0 - REFRACT_SPREAD), (1, 1.0), (2, 1.0 + REFRACT_SPREAD)] {
+                let d = pull * spread;
+                out.px[i + channel] = sample_channel(base, x - nx * d - 0.5, y - ny * d - 0.5, channel);
+            }
+        }
+    }
+    out
+}
+
+/// Um canal de `img` no ponto (x, y) em pixels (entre os quatro vizinhos), preso às bordas.
+fn sample_channel(img: &Image, x: f32, y: f32, channel: usize) -> u8 {
+    let x = x.clamp(0.0, (img.w - 1) as f32);
+    let y = y.clamp(0.0, (img.h - 1) as f32);
+    let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+    let (x1, y1) = ((x0 + 1).min(img.w - 1), (y0 + 1).min(img.h - 1));
+    let (tx, ty) = (x - x0 as f32, y - y0 as f32);
+    let at = |px: u32, py: u32| img.px[((py * img.w + px) * 4) as usize + channel] as f32;
+    let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+    let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+    round_u8(top + (bottom - top) * ty)
+}
+
+/// Vidro pronto: base (já escurecida, com a lente na beirada), reflexo no topo, conteúdo, borda
+/// clara com os reflexos e cantos redondos.
+pub fn finish_glass(base: &Image, content: &Image, radius: f32, s: f32, look: GlassLook) -> Image {
     let (w, h) = (base.w as f32, base.h as f32);
     let mut c = Canvas::new(base.w, base.h, 1.0);
     c.push_round_clip(0.0, 0.0, w, h, radius);
-    c.image(base, 0.0, 0.0);
-    // reflexo branco no topo, sumindo até 60% da altura
-    c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, WHITE.alpha(SHEEN)), (0.6, WHITE.alpha(0.0)), (1.0, WHITE.alpha(0.0))], 0.0, h);
+    c.image(&refract(base, radius, s), 0.0, 0.0);
+    look.draw_sheen(&mut c, w, h, radius, s.round().max(1.0));
     c.image(content, 0.0, 0.0);
-    // borda fina e clara por cima de tudo, mais forte no alto, e um fio de luz logo abaixo dela
-    let line = s.round().max(1.0);
-    c.gradient_stroke_round_rect(0.0, 0.0, w, h, radius, WHITE.alpha(EDGE.0), WHITE.alpha(EDGE.1), line);
-    c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
+    look.draw_edges(&mut c, w, h, radius, s.round().max(1.0));
     c.pop_clip();
     c.finish()
 }
@@ -455,16 +583,14 @@ pub struct GlassParts {
 
 impl GlassParts {
     /// Desenha as peças sobre o fundo `base`, com cantos de raio `radius` (pixels) na escala `s`.
-    pub fn new(base: &Image, radius: f32, s: f32) -> GlassParts {
+    pub fn new(base: &Image, radius: f32, s: f32, look: GlassLook) -> GlassParts {
         let (w, h) = (base.w as f32, base.h as f32);
         let mut c = Canvas::new(base.w, base.h, 1.0);
-        c.image(base, 0.0, 0.0);
-        c.gradient_round_rect(0.0, 0.0, w, h, radius, &[(0.0, WHITE.alpha(SHEEN)), (0.6, WHITE.alpha(0.0)), (1.0, WHITE.alpha(0.0))], 0.0, h);
+        c.image(&refract(base, radius, s), 0.0, 0.0);
+        look.draw_sheen(&mut c, w, h, radius, s.round().max(1.0));
         let under = c.finish();
         let mut c = Canvas::new(base.w, base.h, 1.0);
-        let line = s.round().max(1.0);
-        c.gradient_stroke_round_rect(0.0, 0.0, w, h, radius, WHITE.alpha(EDGE.0), WHITE.alpha(EDGE.1), line);
-        c.gradient_stroke_round_rect(line, line, w - line, h - line, (radius - line).max(0.0), WHITE.alpha(0.10), WHITE.alpha(0.0), line);
+        look.draw_edges(&mut c, w, h, radius, s.round().max(1.0));
         let edges = c.finish();
         let edge_px = edges.px.chunks_exact(4).enumerate().filter(|(_, pixel)| pixel.iter().any(|&value| value != 0)).map(|(i, _)| i as u32).collect();
         let mut c = Canvas::new(base.w, base.h, 1.0);
@@ -553,7 +679,7 @@ fn load_wallpaper(path: &str) -> Option<Image> {
 
 impl Backdrop {
     /// Como `glass`, mas com outro desfoque e escurecimento (prévia ao vivo nas configurações).
-    pub fn glass_with(&self, content: &Image, radius: f32, x: i32, y: i32, blur_px: f64, tint: f64) -> Image {
+    pub fn glass_with(&self, content: &Image, radius: f32, x: i32, y: i32, blur_px: f64, tint: f64, look: GlassLook) -> Image {
         let (w, h) = (content.w, content.h);
         let (bx, by, bw, bh) = self.bbox(x, y, w, h);
         let s = self.scale_for(x, y);
@@ -568,15 +694,15 @@ impl Backdrop {
         let mut base = piece.sample(bx - ox, by - oy, bw, bh, w, h);
         let gray = base.gray();
         let light = gray.iter().map(|&level| level as u64).sum::<u64>() as f32 / gray.len().max(1) as f32 / 255.0;
-        let amount = tint_amount(tint, light);
-        let tint_rgb = [TINT.0 as f32, TINT.1 as f32, TINT.2 as f32];
+        let amount = look.amount(tint, light);
+        let tint_rgb = look.tint_rgb();
         for pixel in base.px.chunks_exact_mut(3) {
             for (channel, tint_channel) in pixel.iter_mut().zip(tint_rgb) {
                 *channel = (*channel as f32 + (tint_channel - *channel as f32) * amount).round() as u8;
             }
         }
         grain(&mut base, x, y);
-        finish_glass(&base.to_image(), content, radius, s)
+        finish_glass(&base.to_image(), content, radius, s, look)
     }
 }
 
@@ -599,6 +725,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Os dois vidros: escuro e claro.
+    const ALL_LOOKS: [GlassLook; 2] = [GlassLook { light: false }, GlassLook { light: true }];
+
+    /// No vidro claro, o texto secundário (escuro, no tema claro) também fica legível (4,5:1) em
+    /// qualquer papel de parede, com o escurecimento escolhido inteiro ou só a parte que o vidro
+    /// líquido usa.
+    #[test]
+    fn secondary_text_is_legible_on_light_glass() {
+        for tint in [TINT_AMOUNT, 0.15, 0.35, TINT_AMOUNT * LIQUID_TINT] {
+            for step in 0..=100 {
+                let light = step as f32 / 100.0;
+                let amount = light_tint_amount(tint, light);
+                assert!(light_muted_contrast(light, amount) >= MIN_TEXT_CONTRAST, "clareamento {tint}, claridade {light}: {:.2}", light_muted_contrast(light, amount));
+            }
+        }
+    }
+
+    /// O vidro líquido deixa o papel de parede aparecer mais que o escurecimento escolhido inteiro
+    /// (vai menos para a cor do vidro), sem passar do contraste mínimo do texto.
+    #[test]
+    fn liquid_glass_shows_more_of_the_wallpaper() {
+        let glass = GlassLook::default();
+        assert!(glass.amount(TINT_AMOUNT, 0.2) < tint_amount(TINT_AMOUNT, 0.2));
+        for step in 0..=100 {
+            let light = step as f32 / 100.0;
+            assert!(muted_contrast(light, glass.amount(TINT_AMOUNT, light)) >= MIN_TEXT_CONTRAST);
+        }
+    }
+
+    /// A lente da beirada: perto da borda, o fundo vem de mais para dentro (e o vermelho e o azul
+    /// se separam); no meio do vidro, nada muda.
+    #[test]
+    fn the_edge_bends_the_background_like_a_lens() {
+        // listras verticais: só o que anda na horizontal aparece
+        let (w, h) = (200u32, 120u32);
+        let mut base = Image::new(w, h);
+        for (i, p) in base.px.chunks_exact_mut(4).enumerate() {
+            let x = i as u32 % w;
+            let v = if (x / 3) % 2 == 0 { 40 } else { 220 };
+            p.copy_from_slice(&[v, v, v, 255]);
+        }
+        let bent = refract(&base, 24.0, 1.0);
+        let at = |img: &Image, x: u32, y: u32| img.px[((y * w + x) * 4) as usize..][..4].to_vec();
+        assert_eq!(at(&bent, w / 2, h / 2), at(&base, w / 2, h / 2), "o meio mudou");
+        let changed = (0..8).filter(|&x| at(&bent, x, h / 2) != at(&base, x, h / 2)).count();
+        assert!(changed > 0, "a beirada não curvou o fundo");
+        let fringe = (0..8).any(|x| {
+            let p = at(&bent, x, h / 2);
+            p[0] != p[2]
+        });
+        assert!(fringe, "sem a franja de cor na beirada");
     }
 
     /// O vidro montado por peças sai igual ao feito de uma vez (`finish_glass`), com o conteúdo de
@@ -624,18 +803,21 @@ mod tests {
                 let mut c = Canvas::new(w, h, s);
                 kind.draw(&mut c, mode, &crate::widgets::Env { cfg: &cfg, key: kind.key() });
                 let content = c.finish();
-                let base = bd.glass_base(w, h, 40, 30, 0.4);
                 let r = l.radius * s;
-                let whole = finish_glass(&base, &content, r, s);
-                let parts = GlassParts::new(&base, r, s).compose(&content);
-                assert_eq!(whole.px.len(), parts.px.len(), "{name}");
-                for (a, b) in whole.px.iter().zip(&parts.px) {
-                    let d = a.abs_diff(*b);
-                    worst = worst.max(d);
-                    differing += (d > 0) as usize;
+                // em cada vidro: escuro, claro, líquido e claro líquido
+                for look in ALL_LOOKS {
+                    let base = bd.glass_base(w, h, 40, 30, 0.4, look);
+                    let whole = finish_glass(&base, &content, r, s, look);
+                    let parts = GlassParts::new(&base, r, s, look).compose(&content);
+                    assert_eq!(whole.px.len(), parts.px.len(), "{name}");
+                    for (a, b) in whole.px.iter().zip(&parts.px) {
+                        let d = a.abs_diff(*b);
+                        worst = worst.max(d);
+                        differing += (d > 0) as usize;
+                    }
+                    total += whole.px.len();
+                    drawn += 1;
                 }
-                total += whole.px.len();
-                drawn += 1;
             }
         }
         println!("vidros: {drawn}; maior diferença: {worst}; bytes diferentes: {differing} de {total}");
@@ -659,7 +841,7 @@ mod tests {
         for s in [1.0, 1.25, 1.5] {
             let bd = Backdrop::from_picture(&picture, 8.0, s);
             for (x, y, cw, ch, tint) in [(0, 0, 200, 120, 0.4), (37, 51, 455, 282, 0.49), (-30, -12, 158, 158, 0.12), (600, 380, 300, 200, 0.85), (123, 77, 1, 1, 0.3)] {
-                let fast = bd.glass_base(cw, ch, x, y, tint);
+                let fast = bd.glass_base(cw, ch, x, y, tint, GlassLook::default());
                 let slow = bd.glass_base_steps(cw, ch, x, y, tint);
                 assert_eq!((fast.w, fast.h), (slow.w, slow.h));
                 let first = fast.px.iter().zip(&slow.px).position(|(a, b)| a != b);

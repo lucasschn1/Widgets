@@ -86,7 +86,14 @@ pub const TIPS: [(&str, &str); 5] = [
     ("Menu", "Clique direito num widget ou no ícone da bandeja: layouts, modo foco, edição e mais."),
 ];
 
-pub const APPEARANCE_KEYS: [&str; 7] = ["desfoque", "escurecimento", crate::data::shared::WALL_COLOR, "texto", "esmaecer", "opacidade_ociosa", "animacoes"];
+pub const APPEARANCE_KEYS: [&str; 6] = [
+    "desfoque",
+    "escurecimento",
+    crate::data::shared::WALL_COLOR,
+    crate::data::shared::LIGHT_THEME,
+    "texto",
+    "animacoes",
+];
 pub const BEHAVIOR_KEYS: [&str; 4] = ["atalhos_clique", "dicas", "economia_bateria", "placa_de_video"];
 
 /// Faixas das durações do Pomodoro: (fase, rótulo, mínimo, máximo, passo).
@@ -101,7 +108,9 @@ pub struct SettingsState {
     pub thumbs: HashMap<&'static str, (bool, Option<Image>)>,
     /// a prévia do alto da página do widget: (widget, visível, imagem)
     hero: Option<(&'static str, bool, Option<Image>)>,
-    preview: Option<((i32, i32, u32, u32, i64, i64, u64, bool), Image)>,
+    /// a prévia da Aparência e do que ela depende (lugar, tamanho, desfoque, escurecimento,
+    /// versão do fundo e as opções de cor: papel de parede e tema claro)
+    preview: Option<((i32, i32, u32, u32, i64, i64, u64, (bool, bool)), Image)>,
     pub city: Suggest,
 }
 
@@ -324,14 +333,45 @@ impl Control {
 
 pub struct Row(pub String, pub Option<String>, pub Control);
 
-/// O título de uma seção, em versalete como os grupos do menu ("SEUS WIDGETS"), alinhado com o
-/// texto das linhas do cartão logo abaixo. Devolve o y do cartão.
+/// O título de uma seção, em seminegrito e sem caixa alta (como os grupos dos Ajustes do macOS),
+/// alinhado com o texto das linhas do cartão logo abaixo. Devolve o y do cartão.
 fn section(ui: &mut Ui, x: f32, y: f32, title: &str) -> f32 {
-    ui.text(x + ROW_TEXT_X, y, &title.to_uppercase(), 10.5, WHITE.with_a(128), Face::Semibold, Anchor::LA, None);
+    ui.text(x + ROW_TEXT_X, y, title, 13.0, FG.alpha(0.92), Face::Semibold, Anchor::LA, None);
     #[cfg(test)]
-    tests::placed(x, y, y + 16.0);
-    y + 24.0
+    tests::placed(x, y, y + 18.0);
+    y + 28.0
 }
+
+/// As explicações de uma seção (o que não é uma opção: como algo funciona, o que o clique faz),
+/// logo abaixo do cartão dela, em letra menor e com um ícone de dica. Como linhas sem controle
+/// dentro do cartão, pareciam opções que não faziam nada. `y` é o que `rows` devolveu. Devolve
+/// o y logo abaixo.
+fn notes(ui: &mut Ui, x: f32, y: f32, w: f32, notes: &[&str]) -> f32 {
+    // `rows` deixa o espaço até a próxima seção: as dicas ficam mais perto do cartão
+    let top = y - NOTE_PULL;
+    let text_x = x + ROW_TEXT_X + NOTE_INDENT;
+    let text_w = x + w - ROW_TEXT_X - text_x;
+    let mut line_y = top;
+    for note in notes {
+        let lines = ui.wrap(note, 11.5, text_w, NOTE_MAX_LINES);
+        ui.icon(x + ROW_TEXT_X + 6.0, line_y + 8.5, "dicas", 12.0, FAINT);
+        for (j, line) in lines.iter().enumerate() {
+            ui.text(text_x, line_y + NOTE_LINE * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(text_w));
+        }
+        line_y += NOTE_LINE * lines.len() as f32 + NOTE_GAP;
+    }
+    #[cfg(test)]
+    tests::placed(x, top, line_y);
+    line_y + NOTE_PULL + 4.0
+}
+
+/// As dicas embaixo de um cartão: quanto sobem para perto dele, o recuo do texto (o ícone fica
+/// na frente), a altura de cada linha, o espaço entre uma dica e outra e o máximo de linhas.
+const NOTE_PULL: f32 = 12.0;
+const NOTE_INDENT: f32 = 22.0;
+const NOTE_LINE: f32 = 17.0;
+const NOTE_GAP: f32 = 8.0;
+const NOTE_MAX_LINES: usize = 4;
 
 /// Onde o texto das linhas começa dentro de um cartão (o título da seção acompanha).
 const ROW_TEXT_X: f32 = 18.0;
@@ -750,20 +790,16 @@ fn page_aparencia(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View)
             Control::Slider("escurecimento", (tint * 100.0).round(), 15.0, 70.0, 1.0, format!("{}%", (tint * 100.0).round()))),
         Row("Cor do papel de parede".into(), Some("As cores dos widgets seguem a do papel de parede (a ilha e o Clawd ficam como são)".into()),
             setting_switch(v, crate::data::shared::WALL_COLOR)),
+        Row("Tema claro do Windows".into(), Some("Com o Windows no tema claro, vidro claro e texto escuro (Tempo e Mídia ficam com o fundo deles)".into()),
+            setting_switch(v, crate::data::shared::LIGHT_THEME)),
     ]);
     let following = config::setting_f64(cfg, "texto") <= 0.0;
-    let esmaecer = config::setting_bool(cfg, "esmaecer");
     let mut r = vec![Row("Seguir o tamanho de texto do Windows".into(), Some("Configurações → Acessibilidade → Tamanho do texto".into()), sw("texto_auto", following, Action::Toggle("texto_auto")))];
     if !following {
         let pct = (v.sh.text_scale as f64 * 100.0).round();
         r.push(Row("Tamanho do texto".into(), None, Control::Slider("texto", pct, 90.0, 120.0, 1.0, format!("{pct}%"))));
     }
-    r.push(Row("Esmaecer sem o mouse".into(), Some("Os widgets ficam mais transparentes até o mouse passar por cima".into()), setting_switch(v, "esmaecer")));
-    if esmaecer {
-        let pct = (config::setting_f64(cfg, "opacidade_ociosa") * 100.0).round();
-        r.push(Row("Opacidade sem o mouse".into(), None, Control::Slider("opacidade_ociosa", pct, 40.0, 95.0, 1.0, format!("{pct}%"))));
-    }
-    let y = section(ui, x, y, "Texto e transparência");
+    let y = section(ui, x, y, "Texto");
     let y = rows(ui, x, y, w, r);
     let y = section(ui, x, y, "Movimento");
     let options = [("auto", "Seguir o Windows"), ("sempre", "Sempre"), ("nunca", "Nunca")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
@@ -785,22 +821,23 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
     let sx = v.origin.0 + ((ui.ox + x) * s).round() as i32;
     let sy = v.origin.1 + ((ui.oy + y) * s).round() as i32;
     let (pw, ph) = ((w * s).round() as u32, (h * s).round() as u32);
-    let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version, v.sh.wall_color);
+    let key = (sx, sy, pw, ph, (blur * 10.0) as i64, (tint * 1000.0) as i64, v.sh.backdrop.version, (v.sh.wall_color, v.sh.light));
     if st.preview.as_ref().map(|p| p.0) != Some(key) {
         let order = ["tempo", "sistema", "pomodoro", "midia", "github"];
         let mut shown: Vec<&'static str> = order.into_iter().filter(|k| v.visible.contains(k)).take(2).collect();
         if shown.is_empty() {
             shown.push("tempo");
         }
-        let cards: Vec<(Image, f32)> = shown.iter().zip([Mode::M, Mode::P]).filter_map(|(k, m)| (v.render)(k, m, s)).collect();
+        let cards: Vec<(Image, f32, &str)> = shown.iter().zip([Mode::M, Mode::P]).filter_map(|(k, m)| (v.render)(k, m, s).map(|(img, radius)| (img, radius, *k))).collect();
         if !cards.is_empty() {
             let mut stage = v.sh.backdrop.region(sx, sy, pw, ph, true).to_image();
             let gap = (16.0 * s).round() as i32;
             let total: i32 = cards.iter().map(|c| c.0.w as i32).sum::<i32>() + gap * (cards.len() as i32 - 1);
             let mut cx = (pw as i32 - total) / 2;
-            for (content, radius) in &cards {
+            for (content, radius, key) in &cards {
                 let cy = (ph as i32 - content.h as i32) / 2;
-                let glass = v.sh.backdrop.glass_with(content, *radius, sx + cx, sy + cy, blur, tint);
+                let look = v.sh.glass_look(crate::widgets::own_background(key));
+                let glass = v.sh.backdrop.glass_with(content, *radius, sx + cx, sy + cy, blur, tint, look);
                 stage.over(&glass, cx, cy);
                 cx += content.w as i32 + gap;
             }
@@ -840,7 +877,7 @@ fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
         let thumb = match cached {
             Some(img) => img,
             None => {
-                let img = thumbnail(key, ui, tx + 8.0, ty + 8.0, tile_w - 16.0, stage_h, v);
+                let img = thumbnail(key, ui, tx + 8.0, ty + 8.0, tile_w - 16.0, stage_h, v, GALLERY_ZOOM);
                 st.thumbs.insert(key, (visible, img.clone()));
                 img
             }
@@ -861,10 +898,11 @@ fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
     y + rows * (tile_h + gap)
 }
 
-/// O widget em vidro, cabendo no palco da galeria.
-fn thumbnail(key: &'static str, ui: &Ui, x: f32, y: f32, w: f32, h: f32, v: &View) -> Option<Image> {
+/// O widget médio em vidro, a `zoom` do tamanho de verdade, cabendo no palco (x, y, w, h).
+#[allow(clippy::too_many_arguments)]
+fn thumbnail(key: &'static str, ui: &Ui, x: f32, y: f32, w: f32, h: f32, v: &View, zoom: f32) -> Option<Image> {
     let s = ui.s();
-    let (mut content, mut radius) = (v.render)(key, Mode::M, s * 0.72)?;
+    let (mut content, mut radius) = (v.render)(key, Mode::M, s * zoom)?;
     let max_w = (w - 24.0) * s;
     let max_h = (h - 20.0) * s;
     // grande demais para o palco: reduz (nunca amplia)
@@ -875,7 +913,7 @@ fn thumbnail(key: &'static str, ui: &Ui, x: f32, y: f32, w: f32, h: f32, v: &Vie
     }
     let sx = v.origin.0 + ((ui.ox + x) * s) as i32;
     let sy = v.origin.1 + ((ui.oy + y) * s) as i32;
-    Some(v.sh.backdrop.glass(&content, radius, sx, sy, v.sh.tint))
+    Some(v.sh.backdrop.glass(&content, radius, sx, sy, v.sh.tint, v.sh.glass_look(crate::widgets::own_background(key))))
 }
 
 /// A página de um widget: o alto (a prévia, o tamanho e onde ele aparece) e as opções dele.
@@ -901,18 +939,13 @@ fn notify_switch(v: &View, kind: &'static str) -> Control {
 /// O Sistema: o que os anéis abrem e os avisos de CPU, memória e disco.
 #[allow(clippy::too_many_arguments)]
 fn widget_sistema(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View) -> f32 {
-    let y = section(ui, x, y, "Ao clicar nos anéis");
-    let y = rows(ui, x, y, w, vec![Row(
-        "Apps que mais usam".into(),
-        Some("CPU e memória mostram os 5 apps que mais usam; o disco mostra as unidades".into()),
-        Control::None,
-    )]);
     let y = section(ui, x, y, "Avisos");
-    rows(ui, x, y, w, vec![
+    let y = rows(ui, x, y, w, vec![
         Row(NOTIFY[0].1.into(), Some(NOTIFY[0].2.into()), notify_switch(v, "cpu")),
         Row(NOTIFY[1].1.into(), Some(NOTIFY[1].2.into()), notify_switch(v, "ram")),
         Row(NOTIFY[2].1.into(), Some(NOTIFY[2].2.into()), notify_switch(v, "disco")),
-    ])
+    ]);
+    notes(ui, x, y, w, &["Clique num anel: a CPU e a memória mostram os 5 apps que mais usam; o disco mostra as unidades."])
 }
 
 /// O Tempo: a cidade (com as sugestões por cima do resto), atualizar, avisar de chuva e o tremor do trovão.
@@ -942,13 +975,13 @@ fn widget_midia(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View) -> f32 {
     let wcfg = &v.sh.cfg["midia"];
     let options = [("auto", "Automático"), ("spotify", "Spotify"), ("youtube", "YouTube")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let y = section(ui, x, y, "Reprodução");
-    rows(ui, x, y, w, vec![
+    let y = rows(ui, x, y, w, vec![
         Row("Mostrar".into(), Some("Qual player o widget acompanha quando há mais de um tocando".into()),
             Control::Seg("fonte", options, wcfg.str_of("fonte").unwrap_or("auto").into())),
-        Row("Roda do mouse".into(), Some("Sobre o widget, ajusta o volume do app que está tocando (ou o do Windows)".into()), Control::None),
         Row("Capa em alta do YouTube".into(), Some("O navegador só passa uma miniatura pequena; esta opção busca a original no youtube.com pelo título e canal do vídeo".into()),
             sw("capa_hd", widgets::media::hd_covers(&v.sh.cfg), Action::Toggle("capa_hd"))),
-    ])
+    ]);
+    notes(ui, x, y, w, &["A roda do mouse sobre o widget ajusta o volume do app que está tocando (ou o do Windows)."])
 }
 
 /// O GitHub: o usuário, atualizar e avisar dos pedidos de revisão.
@@ -968,11 +1001,11 @@ fn widget_github(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, visible: bool) -
 /// A Bateria: o aviso de pouca bateria, quais aparelhos aparecem e o que o clique abre.
 #[allow(clippy::too_many_arguments)]
 fn widget_bateria(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View) -> f32 {
-    let y = section(ui, x, y, "Dispositivos");
-    rows(ui, x, y, w, vec![
-        Row("Avisar com pouca bateria".into(), Some(NOTIFY[6].2.into()), notify_switch(v, "bateria")),
-        Row("Quais aparecem".into(), Some("Os que informam a bateria ao Windows: a maioria dos fones e dos mouses e teclados Bluetooth. Os que usam um receptor USB próprio só mostram a carga no app do fabricante".into()), Control::None),
-        Row("Clique".into(), Some("No anel, abre as configurações de energia; na lista, as de Bluetooth".into()), Control::None),
+    let y = section(ui, x, y, "Avisos");
+    let y = rows(ui, x, y, w, vec![Row("Avisar com pouca bateria".into(), Some(NOTIFY[6].2.into()), notify_switch(v, "bateria"))]);
+    notes(ui, x, y, w, &[
+        "Aparecem os aparelhos que informam a bateria ao Windows: a maioria dos fones e dos mouses e teclados Bluetooth. Os que usam um receptor USB próprio só mostram a carga no app do fabricante.",
+        "Clique no anel para abrir as configurações de energia; na lista, as de Bluetooth.",
     ])
 }
 
@@ -989,22 +1022,17 @@ fn widget_claude(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View) -> f32 {
         Link::Missing => ("O Claude Code não foi encontrado neste computador", Control::None),
     };
     let y = section(ui, x, y, "Claude Code");
-    let y = rows(ui, x, y, w, vec![
-        Row("Conexão".into(), Some(state.into()), control),
-        Row("Como funciona".into(), Some("O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana, e recebe o aviso de quando ele precisa de você".into()), Control::None),
-    ]);
-    let y = section(ui, x, y, "Clawd na barra de tarefas");
-    let y = rows(ui, x, y, w, vec![
-        Row("Como levar".into(), Some("Clique no Clawd e ele pula para cima da barra de tarefas; outro clique o traz de volta".into()), Control::None),
-        Row("Nomes de arquivos no balão".into(), Some("O balão mostra o arquivo ou o comando em uso; desligado, só a ação (bom para compartilhar a tela)".into()),
-            sw("claude_nomes", widgets::claude::show_names(&v.sh.cfg), Action::Toggle("claude_nomes"))),
-    ]);
+    let y = rows(ui, x, y, w, vec![Row("Conexão".into(), Some(state.into()), control)]);
+    let y = notes(ui, x, y, w, &["O widget vira a linha de status do Claude Code, que informa o uso da sessão de 5 horas e da semana, e recebe o aviso de quando ele precisa de você."]);
     let natal = [("dezembro", "Em dezembro"), ("sempre", "Sempre"), ("nunca", "Nunca")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let y = section(ui, x, y, "Clawd");
-    rows(ui, x, y, w, vec![
+    let y = rows(ui, x, y, w, vec![
+        Row("Nomes de arquivos no balão".into(), Some("O balão mostra o arquivo ou o comando em uso; desligado, só a ação (bom para compartilhar a tela)".into()),
+            sw("claude_nomes", widgets::claude::show_names(&v.sh.cfg), Action::Toggle("claude_nomes"))),
         Row("Tema de Natal".into(), Some("Gorro de Papai Noel e neve caindo".into()),
             Control::Seg("claude_natal", natal, wcfg.str_of("natal").unwrap_or("dezembro").into())),
-    ])
+    ]);
+    notes(ui, x, y, w, &["Clique no Clawd e ele pula para cima da barra de tarefas; outro clique o traz de volta."])
 }
 
 /// O Pomodoro: as durações, o comportamento e o total de hoje.
@@ -1040,28 +1068,35 @@ fn widget_pomodoro(ui: &mut Ui, x: f32, y: f32, w: f32, v: &View) -> f32 {
     )])
 }
 
-/// O alto da página de um widget: a prévia em vidro, o nome e se ele está na área de trabalho
-/// (e na ilha). Devolve o y logo abaixo.
+/// O tamanho das miniaturas da galeria e do palco no alto da página de um widget (fração do
+/// widget de verdade).
+const GALLERY_ZOOM: f32 = 0.72;
+const HERO_ZOOM: f32 = 0.94;
+/// O alto da página de um widget: altura do cartão e largura do palco da prévia.
+const HERO_H: f32 = 228.0;
+const HERO_STAGE_W: f32 = 340.0;
+/// O seletor de tamanho: cada opção (largura, altura), o espaço entre elas e a caixa em que a
+/// forma do tamanho cabe (largura, altura).
+const SIZE_TILE: (f32, f32) = (78.0, 84.0);
+const SIZE_TILE_GAP: f32 = 8.0;
+const SIZE_SHAPE_BOX: (f32, f32) = (50.0, 40.0);
+
+/// O alto da página de um widget: a prévia grande em vidro, num palco com a luz da cor dele, o
+/// tamanho escolhido pela forma e se ele está na área de trabalho (e na ilha). Devolve o y logo
+/// abaixo.
 #[allow(clippy::too_many_arguments)]
 fn hero(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, key: &'static str, visible: bool) -> f32 {
-    let h = 168.0;
+    let h = HERO_H;
     ui.card(x, y, x + w, y + h);
     #[cfg(test)]
     tests::placed(x, y, y + h);
-    // o palco da prévia, com um brilho na cor do widget
-    let (sx, sy, stage_w, stage_h) = (x + 10.0, y + 10.0, 236.0, h - 20.0);
-    let tint = page_color(key);
-    let (gx, gy) = (sx + ui.ox, sy + ui.oy);
-    ui.fill(sx, sy, sx + stage_w, sy + stage_h, 9.0, Rgba(0, 0, 0, 40));
-    ui.c.push_round_clip(gx, gy, gx + stage_w, gy + stage_h, 9.0);
-    ui.c.fill_radial(gx + stage_w / 2.0, gy + stage_h * 0.62, stage_w * 0.7, stage_h * 0.8, &[(0.0, tint.alpha(0.30)), (1.0, tint.alpha(0.0))]);
-    ui.c.pop_clip();
-    ui.rect(sx, sy, sx + stage_w, sy + stage_h, 9.0, None, Some(WHITE.with_a(14)), 1.0);
+    let (sx, sy, stage_w, stage_h) = (x + 10.0, y + 10.0, HERO_STAGE_W, h - 20.0);
+    draw_stage(ui, (sx, sy, stage_w, stage_h), page_color(key));
     let cached = st.hero.as_ref().filter(|(k, vis, _)| *k == key && *vis == visible).map(|(_, _, img)| img.clone());
     let thumb = match cached {
         Some(img) => img,
         None => {
-            let img = thumbnail(key, ui, sx, sy, stage_w, stage_h, v);
+            let img = thumbnail(key, ui, sx, sy, stage_w, stage_h, v, HERO_ZOOM);
             st.hero = Some((key, visible, img.clone()));
             img
         }
@@ -1074,9 +1109,8 @@ fn hero(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, k
     let rx = sx + stage_w + 22.0;
     let rw = x + w - 18.0 - rx;
     let current = v.modes.get(key).copied().or_else(|| v.sh.cfg[key].str_of("tamanho").and_then(Mode::from_code)).unwrap_or(widgets::DEFAULT_MODE);
-    let sizes: Vec<(String, String)> = Mode::ALL.iter().map(|m| (m.code().to_string(), m.name().to_string())).collect();
-    ui.text(rx, y + 24.0, "Tamanho", 11.5, MUTED, Face::Regular, Anchor::LM, None);
-    ui.segmented(size_id(key), rx, y + 36.0, &sizes, current.code(), false);
+    ui.text(rx, y + 24.0, "Tamanho", 12.0, MUTED, Face::Semibold, Anchor::LM, None);
+    size_tiles(ui, key, rx, y + 38.0, current);
     let mut toggles: Vec<(&'static str, String, bool, Action)> = vec![("ver:hero", "Na área de trabalho".into(), visible, Action::Visible(key, !visible))];
     if ISLAND_KEYS.contains(&key) {
         let on = widgets::on_island(&v.sh.cfg, key);
@@ -1101,6 +1135,49 @@ fn hero(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, v: &View, k
         ty += 30.0;
     }
     y + h + 26.0
+}
+
+/// O palco da prévia (x, y, largura, altura): escuro, com a luz da cor do widget vindo de baixo
+/// e um reflexo frio no alto, como um widget sobre um papel de parede.
+fn draw_stage(ui: &mut Ui, (sx, sy, stage_w, stage_h): (f32, f32, f32, f32), tint: Rgba) {
+    let (gx, gy) = (sx + ui.ox, sy + ui.oy);
+    ui.fill(sx, sy, sx + stage_w, sy + stage_h, 11.0, Rgba(0, 0, 0, 52));
+    ui.c.push_round_clip(gx, gy, gx + stage_w, gy + stage_h, 11.0);
+    ui.c.fill_radial(gx + stage_w / 2.0, gy + stage_h * 0.7, stage_w * 0.75, stage_h * 0.85, &[(0.0, tint.alpha(0.38)), (1.0, tint.alpha(0.0))]);
+    ui.c.fill_radial(gx + stage_w * 0.15, gy, stage_w * 0.6, stage_h * 0.6, &[(0.0, Rgba::rgb(120, 140, 255).alpha(0.16)), (1.0, Rgba::rgb(120, 140, 255).alpha(0.0))]);
+    ui.c.pop_clip();
+    ui.rect(sx, sy, sx + stage_w, sy + stage_h, 11.0, None, Some(WHITE.with_a(16)), 1.0);
+}
+
+/// O seletor de tamanho pela forma, como a galeria de widgets do macOS: cada tamanho é um
+/// cartãozinho com o desenho dele (o pequeno quadrado, o médio largo, o grande alto), na
+/// proporção de verdade, e o nome embaixo. Cada um responde como uma opção do seletor
+/// segmentado de antes (`Action::Seg` com o mesmo id).
+fn size_tiles(ui: &mut Ui, key: &str, x: f32, y: f32, current: Mode) {
+    let id = size_id(key);
+    let (tile_w, tile_h) = SIZE_TILE;
+    // pontos da forma por ponto do widget: o maior dos três cabendo na caixa
+    let unit = Mode::ALL.iter().map(|&m| {
+        let l = widgets::Layout::of(m);
+        (SIZE_SHAPE_BOX.0 / l.w).min(SIZE_SHAPE_BOX.1 / l.h)
+    }).fold(f32::INFINITY, f32::min);
+    for (i, &mode) in Mode::ALL.iter().enumerate() {
+        let tx = x + i as f32 * (tile_w + SIZE_TILE_GAP);
+        let option = format!("{id}:{}", mode.code());
+        let (active, hot) = (mode == current, ui.hot(&option));
+        let fill = if active { ACCENT.with_a(40) } else { WHITE.with_a(if hot { 18 } else { 9 }) };
+        let outline = if active { ACCENT.with_a(210) } else { WHITE.with_a(if hot { 44 } else { 22 }) };
+        ui.rect(tx, y, tx + tile_w, y + tile_h, 12.0, Some(fill), Some(outline), if active { 1.5 } else { 1.0 });
+        // a forma, centrada na caixa de cima
+        let l = widgets::Layout::of(mode);
+        let (shape_w, shape_h) = (l.w * unit, l.h * unit);
+        let (cx, cy) = (tx + tile_w / 2.0, y + 10.0 + SIZE_SHAPE_BOX.1 / 2.0);
+        let color = if active { ACCENT } else { WHITE.with_a(if hot { 120 } else { 80 }) };
+        ui.fill(cx - shape_w / 2.0, cy - shape_h / 2.0, cx + shape_w / 2.0, cy + shape_h / 2.0, 3.5, color);
+        let face = if active { Face::Semibold } else { Face::Regular };
+        ui.text(cx, y + tile_h - 15.0, mode.name(), 11.5, if active { FG } else { MUTED }, face, Anchor::MM, None);
+        ui.region(&option, tx, y, tx + tile_w, y + tile_h, Action::Seg(id, mode.code().to_string()), Cursor::Hand);
+    }
 }
 
 pub fn size_id(key: &str) -> &'static str {

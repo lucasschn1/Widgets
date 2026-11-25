@@ -75,7 +75,7 @@ fn keep_old_defaults(map: &mut Map<String, Value>, existing: bool) {
     if !existing {
         return;
     }
-    let old = [("desfoque", json!(26.0)), ("escurecimento", json!(0.40)), ("esmaecer", json!(true)), ("animacoes", json!("auto"))];
+    let old = [("desfoque", json!(26.0)), ("escurecimento", json!(0.40)), ("animacoes", json!("auto"))];
     for (name, value) in old {
         if app.get(name).is_none_or(Value::is_null) {
             app.insert(name.into(), value);
@@ -151,11 +151,11 @@ pub fn default_setting(name: &str) -> Value {
         "desfoque" => json!(crate::ui::theme::BLUR),
         "escurecimento" => json!(crate::ui::theme::TINT_AMOUNT),
         "texto" => json!(0.0), // 0 = seguir o Windows
-        "esmaecer" | crate::data::shared::WALL_COLOR => json!(false),
+        crate::data::shared::WALL_COLOR => json!(false),
+        crate::data::shared::LIGHT_THEME => json!(true),
         "atalhos_clique" | "dicas" | "economia_bateria" | "procurar_atualizacoes" | "ilha_widgets" => json!(true),
         // (experimental: desligado até ser conferido em mais PCs)
         "placa_de_video" => json!(false),
-        "opacidade_ociosa" => json!(0.8),
         "animacoes" => json!("sempre"),
         "notificacoes" => json!({"cpu": true, "ram": true, "disco": true, "chuva": true, "github": true, "pomodoro": true, "bateria": true}),
         _ => Value::Null,
@@ -263,7 +263,6 @@ mod tests {
         let cfg = loaded("{}");
         assert_eq!(setting_f64(&cfg, "desfoque"), 12.0);
         assert_eq!(setting_f64(&cfg, "escurecimento"), 0.57);
-        assert!(!setting_bool(&cfg, "esmaecer"));
         assert_eq!(setting_str(&cfg, "animacoes"), "sempre");
         // nada gravado além da marca: os padrões continuam vindo do código
         assert_eq!(cfg["app"], json!({"padroes": DEFAULTS_VERSION}));
@@ -279,7 +278,6 @@ mod tests {
         let cfg = loaded(r#"{"tempo": {"x": 10, "y": 20}, "midia": {"x": 10, "y": 300}, "github": {}, "app": {"dicas_vistas": true}}"#);
         assert_eq!(setting_f64(&cfg, "desfoque"), 26.0);
         assert_eq!(setting_f64(&cfg, "escurecimento"), 0.40);
-        assert!(setting_bool(&cfg, "esmaecer"));
         assert_eq!(setting_str(&cfg, "animacoes"), "auto");
         assert_eq!(cfg["midia"]["tamanho"], "g");
         assert_eq!(cfg["github"]["tamanho"], "g");
@@ -291,12 +289,12 @@ mod tests {
 
     #[test]
     fn personal_choices_are_untouched() {
-        let text = r#"{"app": {"desfoque": 18, "escurecimento": 0.3, "esmaecer": false, "animacoes": "nunca", "texto": 1.1},
+        let text = r#"{"app": {"desfoque": 18, "escurecimento": 0.3, "animacoes": "nunca", "texto": 1.1},
                        "midia": {"tamanho": "p", "ilha": true}, "github": {"compact": true, "usuario": "alguem"},
                        "tempo": {"city": "Curitiba", "tamanho": "g"}}"#;
         let before: Value = serde_json::from_str(text).unwrap();
         let cfg = loaded(text);
-        for name in ["desfoque", "escurecimento", "esmaecer", "animacoes", "texto"] {
+        for name in ["desfoque", "escurecimento", "animacoes", "texto"] {
             assert_eq!(cfg["app"][name], before["app"][name], "{name}");
         }
         assert_eq!(cfg["midia"], before["midia"]);

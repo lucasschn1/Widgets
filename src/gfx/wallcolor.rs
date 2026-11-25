@@ -33,10 +33,10 @@ pub struct WallColor {
 
 /// Uma cor no OKLab: claridade (0 a 1) e os dois eixos de cor.
 #[derive(Clone, Copy, Debug)]
-struct Lab {
-    l: f32,
-    a: f32,
-    b: f32,
+pub(crate) struct Lab {
+    pub(crate) l: f32,
+    pub(crate) a: f32,
+    pub(crate) b: f32,
 }
 
 /// Um canal sRGB (0 a 255) na luz de verdade (linear, 0 a 1).
@@ -51,7 +51,7 @@ fn from_linear(v: f32) -> f32 {
 }
 
 /// A cor (sem o alfa) no OKLab.
-fn lab_of(r: u8, g: u8, b: u8) -> Lab {
+pub(crate) fn lab_of(r: u8, g: u8, b: u8) -> Lab {
     let (r, g, b) = (to_linear(r), to_linear(g), to_linear(b));
     let l = (0.412_221_47 * r + 0.536_332_54 * g + 0.051_445_99 * b).cbrt();
     let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
@@ -64,7 +64,7 @@ fn lab_of(r: u8, g: u8, b: u8) -> Lab {
 }
 
 /// A cor do OKLab em sRGB (0 a 1 por canal); pode sair de 0 a 1 se a tela não mostra essa cor.
-fn rgb_of(lab: Lab) -> [f32; 3] {
+pub(crate) fn rgb_of(lab: Lab) -> [f32; 3] {
     let l = (lab.l + 0.396_337_78 * lab.a + 0.215_803_76 * lab.b).powi(3);
     let m = (lab.l - 0.105_561_346 * lab.a - 0.063_854_17 * lab.b).powi(3);
     let s = (lab.l - 0.089_484_18 * lab.a - 1.291_485_5 * lab.b).powi(3);

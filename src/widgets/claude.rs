@@ -98,7 +98,7 @@ const ALERT_HUES: (f32, f32) = (15.0, 45.0);
 // ---------- fontes: a Outfit, embutida no app ----------
 /// a porcentagem
 /// os números grandes (os mesmos dos outros widgets)
-const NUM: Face = super::HERO;
+const NUM: Face = super::PERCENT;
 /// os textos
 const TEXT: Face = Face::Custom("Outfit", 400);
 /// os títulos e o botão
@@ -253,7 +253,7 @@ fn presence(was: bool, will: bool, p: f32, delay: f32, dur: f32, out: f32) -> f3
 /// No médio com números, o rótulo vai no alto, no meio, entre os dois anéis (em cima do Clawd).
 fn draw_medium_label(c: &mut Canvas) {
     let w = c.text_width(LABEL, Face::Semibold, super::LABEL_SIZE);
-    super::draw_label(c, (WIDE - w) / 2.0, super::LABEL_Y, LABEL, ORANGE);
+    super::draw_label(c, (WIDE - w) / 2.0, super::LABEL_Y, LABEL);
 }
 
 /// O medidor `g` com o tamanho multiplicado por `s`, no mesmo centro.
@@ -316,7 +316,7 @@ fn number_base(g: &Geom) -> f32 {
 }
 /// O rótulo do widget ("USO DO CLAUDE"), no mesmo lugar e na mesma letra dos rótulos dos outros
 /// widgets ("GITHUB", "SISTEMA"...), na cor do Claude.
-const LABEL: &str = "USO DO CLAUDE";
+const LABEL: &str = "Uso do Claude";
 /// A margem de dentro do grande: um pouco maior que a dos outros widgets (`CARD_PAD`), porque o
 /// alto do cartão é aberto (o rótulo e o Clawd, sem uma lista que encoste nas bordas) e, colado
 /// no canto arredondado, o rótulo parecia apertado.
@@ -1132,7 +1132,7 @@ impl Claude {
         faded(c, r.head, |c| {
             // o rótulo desce um pouco enquanto aparece
             let y = BRAND_Y - (1.0 - r.head) * 8.0;
-            super::draw_label(c, BRAND_X, y, LABEL, ORANGE);
+            super::draw_label(c, BRAND_X, y, LABEL);
             c.text(BRAND_X, y + SUBTITLE_DY, &self.subtitle(now), TEXT, 10.5, MUTED, Anchor::LA, Some(SUBTITLE_W));
         });
         // a linha abre do meio
@@ -1211,7 +1211,7 @@ impl Claude {
         self.crab(c, Mode::G);
         self.draw_gauges(c, Mode::G, now, None);
         if !self.has_data() {
-            super::draw_label(c, BRAND_X, BRAND_Y, LABEL, ORANGE);
+            super::draw_label(c, BRAND_X, BRAND_Y, LABEL);
             let (title, text) = self.waiting_text();
             let top = 262.0;
             c.text(WIDE / 2.0, top, title, BOLD, 13.0, FG, Anchor::MA, Some(WIDE - 2.0 * pad));

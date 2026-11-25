@@ -48,9 +48,9 @@
 <table>
   <tr>
     <td width="50%" valign="top">
-      <b>Vidro de verdade.</b> O fundo de cada widget é o seu próprio papel de parede desfocado,
-      como um vidro fosco. Sem o mouse em cima, eles ficam mais transparentes e não roubam a
-      atenção.
+      <b>Vidro de verdade.</b> O fundo de cada widget é o seu próprio papel de parede, visto por
+      um vidro líquido como o do macOS: a beirada curva o fundo como uma lente e pega a luz nas
+      quinas. Claros no tema claro do Windows.
     </td>
     <td width="50%" valign="top">
       <b>Uma ilha dinâmica no Windows.</b> Uma pílula na barra de tarefas, como a do iPhone: a
@@ -411,7 +411,7 @@ pilha**.
 ## Configurações
 
 Tudo muda na hora, sem botão de salvar: o quanto o vidro desfoca e escurece (com uma prévia ao
-vivo), quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
+vivo), o tema claro, quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
 Na primeira vez, umas boas-vindas rápidas ajudam a escolher os widgets e a cidade do clima.
 
 <table>
@@ -715,6 +715,7 @@ src/
     output.rs, gpu/   como o quadro chega à tela (pela CPU ou pela placa de vídeo)
     meter.rs          o medidor de desempenho (WIDGETS_PERF=1)
     wallcolor.rs      os widgets na cor do papel de parede
+    lighttheme.rs     o tema claro dos widgets
   platform/           a conversa com o Windows
     win.rs            o resto da API do Windows (monitores, barra de tarefas, relógio...)
     events.rs         janelas do Windows e a fila de eventos
@@ -828,5 +829,6 @@ memória.
 ## Licença
 
 [MIT](LICENSE): use, modifique e distribua à vontade, inclusive em forks e projetos comerciais,
-mantendo o aviso de copyright. A fonte Outfit, embutida no app, tem a licença dela
-([SIL Open Font License](res/fonts/OFL.txt)).
+mantendo o aviso de copyright. As fontes embutidas no app têm a licença delas, a SIL Open Font
+License: a Inter do texto ([OFL-Inter.txt](res/fonts/OFL-Inter.txt)), a Nunito dos números
+([OFL-Nunito.txt](res/fonts/OFL-Nunito.txt)) e a Outfit ([OFL.txt](res/fonts/OFL.txt)).

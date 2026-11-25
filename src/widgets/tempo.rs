@@ -35,6 +35,23 @@ const HOURS: usize = 6;
 /// horas na faixa da tela principal (rolando)
 const NEXT_HOURS: usize = 24;
 const STRIP_H: f32 = 66.0;
+/// A temperatura de agora, o maior número do widget: a fonte dos números, mais leve que nos
+/// outros widgets (no peso normal, de tão grande, pesava demais).
+const TEMP_FACE: Face = Face::NumbersLight;
+/// A temperatura de cada hora e a máxima de cada dia: no peso médio (em seminegrito, as linhas
+/// de números pesavam mais que o resto).
+const HOUR_TEMP_FACE: Face = Face::Medium;
+/// Uma coluna de hora com a chance de chuva (a faixa que rola e a ilha): onde fica o ícone (e o
+/// tamanho dele), a chance de chuva e a temperatura, a partir do alto da coluna. A chance de
+/// chuva tem a linha dela, com respiro do ícone e da temperatura.
+const HOUR_ICON_Y: f32 = 14.0;
+const HOUR_ICON: f32 = 20.0;
+const HOUR_POP_Y: f32 = 37.0;
+const HOUR_TEMP_Y: f32 = 50.0;
+/// No grande, as horas: o respiro entre o ícone e a chance de chuva, e onde fica a temperatura
+/// (abaixo da linha da chance de chuva, em todas as horas, para ficarem alinhadas).
+const BIG_POP_GAP: f32 = 2.5;
+const BIG_HOUR_TEMP_Y: f32 = 57.0;
 // tela principal, com respiro (como o Tempo da Apple): margem maior, a temperatura solta das
 // horas e, no grande, 5 dias em linhas altas
 const M_PAD: f32 = CARD_PAD;
@@ -956,7 +973,9 @@ impl Tempo {
         Some(Alert {
             key: format!("temperatura|{}|{change}", tomorrow.str_of("date").unwrap_or("")),
             short: "Amanhã".into(),
-            value: format!("{}{}°", if change < 0 { "−" } else { "+" }, change.abs()),
+            // a máxima de amanhã com uma seta para onde ela vai ("Amanhã ↓ 19°"): a diferença
+            // sozinha ("Amanhã −8°") parecia a temperatura de amanhã, abaixo de zero
+            value: format!("{} {tomorrow_max}°", if change < 0 { "↓" } else { "↑" }),
             banner: format!("Amanhã {verb}: máxima de {tomorrow_max}°"),
             banner_short: format!("Amanhã {verb}"),
             title: format!("Amanhã {verb} {}°", change.abs()),
@@ -1044,13 +1063,7 @@ impl Tempo {
         for (i, hour) in hours.iter().enumerate() {
             let cx = x0 + col_w * (i as f32 + 0.5);
             c.text(cx, top, hour[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
-            let px = (22.0 * c.s).round() as u32;
-            c.image(&weather_art(hour[1].as_str().unwrap_or("clouds"), px), cx - 11.0, top + 15.0);
-            let pop = hour[4].as_i64().unwrap_or(0);
-            if pop >= 20 {
-                c.text(cx, top + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
-            }
-            c.text(cx, top + 50.0, &format!("{}°", hour[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
+            draw_hour_column(c, cx, top, hour);
         }
         for (act, b) in island_buttons(IslandForm::Large, w, h) {
             let label = if act == ISLAND_OK { "OK" } else { "Previsão" };
@@ -1389,19 +1402,12 @@ impl Tempo {
         }
         let (x0, x1) = Self::strip_bounds();
         let col = (x1 - x0) / HOURS as f32;
-        let icon = 22.0;
         c.push_round_clip(x0, y - 2.0, x1, y + STRIP_H, 0.0);
         let first = (off.floor() as usize).saturating_sub(1);
         for (i, h) in list.iter().enumerate().skip(first).take(HOURS + 2) {
             let cx = x0 + col * (i as f32 - off + 0.5);
             c.text(cx, y, h[0].as_str().unwrap_or(""), Face::Regular, 10.5, MUTED, Anchor::MA, None);
-            c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + 15.0);
-            // a chance de chuva fica junto da temperatura, menor, sem encostar no ícone
-            let pop = h[4].as_i64().unwrap_or(0);
-            if pop >= 20 {
-                c.text(cx, y + 39.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
-            }
-            c.text(cx, y + 50.0, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, 12.5, FG, Anchor::MA, None);
+            draw_hour_column(c, cx, y, h);
         }
         c.pop_clip();
         let max = Self::max_scroll(list.len());
@@ -1432,7 +1438,7 @@ impl Tempo {
         let pad = if big { G_PAD } else { M_PAD };
         let (city_y, temp_y, temp_size) = if big { (18.0, 30.0, 54.0) } else { (16.0, 29.0, 40.0) };
         c.text(pad, city_y, &short_city(&self.city(env)), Face::Semibold, if big { 14.0 } else { 13.0 }, FG, Anchor::LA, Some(170.0));
-        self.temp_roll.draw(c, pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), super::HERO, temp_size, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, pad - if big { 4.0 } else { 3.0 }, temp_y, &self.temp_text(), TEMP_FACE, temp_size, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = if big { 26.0 } else { 22.0 };
@@ -1455,7 +1461,7 @@ impl Tempo {
     fn top_desc_w(&self, c: &Canvas, big: bool) -> f32 {
         let pad = if big { G_PAD } else { M_PAD };
         let temp_size = if big { 54.0 } else { 40.0 };
-        let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), super::HERO, temp_size);
+        let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), TEMP_FACE, temp_size);
         W - pad - temp_end - 14.0
     }
 
@@ -1471,7 +1477,8 @@ impl Tempo {
         let (x0, x1) = main_strip_bounds(mode);
         let col = (x1 - x0) / HOURS as f32;
         let icon = if big { 24.0 } else { 22.0 };
-        let (icon_y, temp_y) = if big { (17.0, 52.0) } else { (16.0, 43.0) };
+        // no grande, a chance de chuva tem a linha dela entre o ícone e a temperatura
+        let (icon_y, temp_y) = if big { (17.0, BIG_HOUR_TEMP_Y) } else { (16.0, 43.0) };
         c.push_round_clip(x0, y - 2.0, x1, y + temp_y + 18.0, 0.0);
         let first = (off.floor() as usize).saturating_sub(1);
         for (i, h) in list.iter().enumerate().skip(first).take(HOURS + 2) {
@@ -1481,7 +1488,7 @@ impl Tempo {
             c.image(&weather_art(h[1].as_str().unwrap_or("clouds"), (icon * c.s).round() as u32), cx - icon / 2.0, y + icon_y);
             let pop = h[4].as_i64().unwrap_or(0);
             if big && pop >= 20 {
-                c.text(cx, y + icon_y + icon + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
+                c.text(cx, y + icon_y + icon + BIG_POP_GAP, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
             }
             match h[2].as_str() {
                 Some(name) => {
@@ -1489,7 +1496,7 @@ impl Tempo {
                     let size = event_label_size(c, name, col - 2.0);
                     c.text(cx, y + temp_y + 1.5 + (10.0 - size) / 2.0, name, Face::Semibold, size, FG, Anchor::MA, Some(col))
                 }
-                None => c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), Face::Semibold, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None),
+                None => c.text(cx, y + temp_y, &format!("{}°", h[2].as_i64().unwrap_or(0)), HOUR_TEMP_FACE, if big { 13.0 } else { 12.5 }, FG, Anchor::MA, None),
             };
         }
         c.pop_clip();
@@ -1525,7 +1532,7 @@ impl Tempo {
             }
             let (mn, mx) = (d[2].as_i64().unwrap_or(0) as f32, d[3].as_i64().unwrap_or(0) as f32);
             c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Regular, 13.0, MUTED, Anchor::RM, None);
-            c.text(W - pad, cy, &format!("{mx}°"), Face::Semibold, 13.0, FG, Anchor::RM, None);
+            c.text(W - pad, cy, &format!("{mx}°"), HOUR_TEMP_FACE, 13.0, FG, Anchor::RM, None);
             c.fill_round_rect(bx0, cy - 2.5, bx1, cy + 2.5, 2.5, Rgba(0, 0, 0, 55));
             // a faixa da mínima à máxima do dia, na escala da semana (de `lo` a `lo + span`)
             let (from_x, to_x) = (bx0 + (bx1 - bx0) * (mn - lo) / span, bx0 + (bx1 - bx0) * (mx - lo) / span);
@@ -1545,7 +1552,7 @@ impl Tempo {
     fn draw_compact(&self, c: &mut Canvas, env: &Env) {
         let (x, w) = (16.0, SMALL - 32.0);
         c.text(x, 16.0, &short_city(&self.city(env)), Face::Semibold, 12.5, FG, Anchor::LA, Some(w - 28.0));
-        self.temp_roll.draw(c, x - 3.0, 29.0, &self.temp_text(), super::HERO, 44.0, FG, Anchor::LA, None);
+        self.temp_roll.draw(c, x - 3.0, 29.0, &self.temp_text(), TEMP_FACE, 44.0, FG, Anchor::LA, None);
         match &self.weather {
             Some(wx) => {
                 let size = 22.0;
@@ -2091,12 +2098,24 @@ impl Tempo {
 }
 
 /// Tela principal: onde fica a faixa de horas, a altura dela e as pontas das colunas.
+/// O ícone, a chance de chuva (quando passa de 20%) e a temperatura de uma hora `hour`, na coluna
+/// centrada em `cx` que começa em `top` (o nome da hora fica no alto, à parte).
+fn draw_hour_column(c: &mut Canvas, cx: f32, top: f32, hour: &Value) {
+    let art = weather_art(hour[1].as_str().unwrap_or("clouds"), (HOUR_ICON * c.s).round() as u32);
+    c.image(&art, cx - HOUR_ICON / 2.0, top + HOUR_ICON_Y);
+    let pop = hour[4].as_i64().unwrap_or(0);
+    if pop >= 20 {
+        c.text(cx, top + HOUR_POP_Y, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
+    }
+    c.text(cx, top + HOUR_TEMP_Y, &format!("{}°", hour[2].as_i64().unwrap_or(0)), HOUR_TEMP_FACE, 12.5, FG, Anchor::MA, None);
+}
+
 fn main_hours_y(mode: Mode) -> f32 {
     if mode == Mode::G { G_HOURS_Y } else { M_HOURS_Y }
 }
 
 fn main_strip_h(mode: Mode) -> f32 {
-    if mode == Mode::G { 70.0 } else { 60.0 }
+    if mode == Mode::G { BIG_HOUR_TEMP_Y + 18.0 } else { 60.0 }
 }
 
 fn main_strip_bounds(mode: Mode) -> (f32, f32) {
@@ -2646,7 +2665,9 @@ mod tests {
         let storm = Tempo::sample_island("trovoada").island_alert().expect("trovoada");
         assert_eq!((storm.title.as_str(), storm.value.as_str()), ("Trovoada às 16h", "16h"));
         let cold = Tempo::sample_island("frio").island_alert().expect("frio");
-        assert_eq!((cold.title.as_str(), cold.value.as_str()), ("Amanhã esfria 8°", "−8°"));
+        // o valor curto é a máxima de amanhã com a seta (a diferença sozinha, "−8°", parecia
+        // a temperatura de amanhã abaixo de zero)
+        assert_eq!((cold.title.as_str(), cold.value.as_str()), ("Amanhã esfria 8°", "↓ 19°"));
         assert_eq!(cold.color, COLD);
         // trovoada agora: na frente de tudo, com o céu dela
         let now = Tempo::sample_sky(95, 15.0, false, Mode::M).island_alert().expect("trovoada agora");

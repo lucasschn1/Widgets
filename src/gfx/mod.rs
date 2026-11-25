@@ -6,13 +6,15 @@
 //!
 //! Na pasta: `drawing` (formas e ícones reaproveitados), `imgops` (desfoque e recortes à mão),
 //! `output` e `gpu` (como o quadro chega à tela: pela CPU ou pela placa de vídeo), `meter` (o
-//! medidor de desempenho do app aberto) e `wallcolor` (os widgets na cor do papel de parede).
+//! medidor de desempenho do app aberto), `wallcolor` (os widgets na cor do papel de parede) e
+//! `lighttheme` (o tema claro).
 
 pub mod drawing;
 pub mod imgops;
 pub mod output;
 pub mod meter;
 pub mod wallcolor;
+pub mod lighttheme;
 pub mod gpu;
 
 use std::cell::RefCell;
@@ -89,9 +91,18 @@ impl Image {
 /// A fonte de um texto.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Face {
+    /// O texto (a Inter, embutida), no peso normal, médio e em seminegrito.
     Regular,
+    Medium,
     Semibold,
-    Light,
+    /// Os números grandes (a temperatura, o relógio do Pomodoro): a Nunito, embutida, de pontas
+    /// arredondadas como a SF Pro Rounded dos widgets da Apple, no peso normal.
+    Numbers,
+    /// A mesma, mais leve: a temperatura de agora no Tempo, o maior número de todos.
+    NumbersLight,
+    /// A mesma, um pouco mais firme (médio, e não seminegrito: as porcentagens dos anéis ficam
+    /// marcadas sem pesar).
+    NumbersMedium,
     Symbol,
     Icons,
     /// Qualquer família, no peso dado (100 a 900): primeiro entre as fontes embutidas no app
@@ -145,8 +156,6 @@ pub struct Gfx {
     layouts: RefCell<HashMap<LayoutKey, Measured>>,
     round: ID2D1StrokeStyle,
     icon_family: &'static str,
-    /// números grandes (temperatura, relógio): a fonte de títulos do Windows 11, se houver
-    display_family: &'static str,
     /// algarismos de largura igual (o relógio não "treme" quando os números mudam)
     tabular: Option<IDWriteTypography>,
     /// as fontes embutidas no executável (None se o Windows não conseguir carregá-las)
@@ -182,9 +191,20 @@ const LAYOUTS: usize = 1500;
 #[cfg(test)]
 pub static LAYOUT_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// As fontes embutidas: a Outfit, variável do peso 100 ao 900 (licença SIL Open Font License, ver
-/// res/fonts/OFL.txt).
-static EMBEDDED: [&[u8]; 1] = [include_bytes!("../../res/fonts/Outfit.ttf")];
+/// As fontes embutidas, todas variáveis no peso e com a licença SIL Open Font License: a Outfit
+/// (res/fonts/OFL.txt), a Inter do texto (OFL-Inter.txt) e a Nunito dos números (OFL-Nunito.txt).
+static EMBEDDED: [&[u8]; 3] = [
+    include_bytes!("../../res/fonts/Outfit.ttf"),
+    include_bytes!("../../res/fonts/Inter.ttf"),
+    include_bytes!("../../res/fonts/Nunito.ttf"),
+];
+/// As famílias do texto e dos números (embutidas).
+const TEXT_FAMILY: &str = "Inter";
+const NUMBERS_FAMILY: &str = "Nunito";
+/// A Inter sai a esta fração do tamanho pedido: as minúsculas dela são mais altas que as da
+/// Segoe UI, para a qual os tamanhos e as larguras dos layouts foram feitos; assim o texto tem a
+/// mesma altura aparente e ocupa o mesmo espaço.
+const TEXT_SIZE_FIT: f32 = 0.95;
 
 /// Coleção com as fontes destes arquivos, lidos da memória (sem instalar nada no Windows; o
 /// DirectWrite guarda uma cópia dos bytes).
@@ -229,12 +249,11 @@ impl Gfx {
             };
             let round = d2d.CreateStrokeStyle(&props, None)?;
             let icon_family = if crate::platform::win::font_exists("SegoeIcons.ttf") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
-            let display_family = if crate::platform::win::font_exists("SegUIVar.ttf") { "Segoe UI Variable Display" } else { "Segoe UI" };
             let tabular = dw.CreateTypography().ok().filter(|typography| {
                 typography.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES, parameter: 1 }).is_ok()
             });
             let embedded = memory_collection(&dw, &EMBEDDED).ok();
-            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()), round, icon_family, display_family, tabular, embedded })
+            Ok(Gfx { d2d, dw, wic, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()), round, icon_family, tabular, embedded })
         }
     }
 
@@ -251,10 +270,17 @@ impl Gfx {
             let found = self.embedded.as_ref().filter(|collection| unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists).is_ok() } && exists.as_bool());
             (family, found)
         };
+        /// A família achada (e onde) com o peso `weight`.
+        fn with_weight<'a>((family, found): (&'static str, Option<&'a IDWriteFontCollection>), weight: DWRITE_FONT_WEIGHT) -> (&'static str, DWRITE_FONT_WEIGHT, Option<&'a IDWriteFontCollection>) {
+            (family, weight, found)
+        }
         let (family, weight, collection): (&str, DWRITE_FONT_WEIGHT, Option<&IDWriteFontCollection>) = match face {
-            Face::Regular => ("Segoe UI", DWRITE_FONT_WEIGHT_NORMAL, None),
-            Face::Semibold => ("Segoe UI", DWRITE_FONT_WEIGHT_SEMI_BOLD, None),
-            Face::Light => (self.display_family, DWRITE_FONT_WEIGHT_LIGHT, None),
+            Face::Regular => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
+            Face::Medium => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
+            Face::Semibold => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            Face::Numbers => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
+            Face::NumbersLight => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_LIGHT),
+            Face::NumbersMedium => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
             Face::Symbol => ("Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL, None),
             Face::Icons => (self.icon_family, DWRITE_FONT_WEIGHT_NORMAL, None),
             Face::Custom(family, weight) => {
@@ -263,6 +289,7 @@ impl Gfx {
             }
         };
         let family = wide(family);
+        let px = if matches!(face, Face::Regular | Face::Medium | Face::Semibold) { px * TEXT_SIZE_FIT } else { px };
         let format = unsafe {
             self.dw
                 .CreateTextFormat(PCWSTR(family.as_ptr()), collection, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!("pt-br"))
@@ -569,6 +596,9 @@ pub struct Canvas {
     /// com a cor do papel de parede: as cores de alerta do widget (`Kind::alert_hues`, matizes em
     /// graus no OKLab), que ficam como são
     pub alert_hues: Option<(f32, f32)>,
+    /// o tema claro (vidro claro): cada cor pintada vira a versão dela para o vidro claro
+    /// (`lighttheme::light_variant`)
+    pub light: bool,
 }
 
 /// Pixels BGRA com alfa pré-multiplicado, a 96 dpi (as coordenadas da tela já estão em pixels).
@@ -666,7 +696,7 @@ impl Canvas {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None, domain: 0, wall_color: None, alert_hues: None }
+            Canvas { rt, bmp: Some(bmp), w, h, s, text_scale: 1.0, layers: 0, rec: None, domain: 0, wall_color: None, alert_hues: None, light: false }
         })
     }
 
@@ -682,7 +712,7 @@ impl Canvas {
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
         }
-        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None, domain, wall_color: None, alert_hues: None }
+        Canvas { rt, bmp: None, w, h, s, text_scale: 1.0, layers: 0, rec: None, domain, wall_color: None, alert_hues: None, light: false }
     }
 
     /// Termina o desenho numa tela da placa de vídeo (`on_target`).
@@ -693,17 +723,22 @@ impl Canvas {
         unsafe { self.rt.EndDraw(None, None) }
     }
 
-    /// A cor como o Direct2D a recebe, já no matiz do papel de parede quando a tela o usa.
+    /// A cor como o Direct2D a recebe: no matiz do papel de parede e na versão do tema claro,
+    /// conforme o que a tela usa.
     fn color(&self, rgba: Rgba) -> D2D1_COLOR_F {
-        d2d_color(self.wall_color.map_or(rgba, |wall| wall.apply_except(rgba, self.alert_hues)))
+        let mut color = self.wall_color.map_or(rgba, |wall| wall.apply_except(rgba, self.alert_hues));
+        if self.light {
+            color = lighttheme::light_variant(color);
+        }
+        d2d_color(color)
     }
 
-    /// Desenha `draw` com as cores de sempre, mesmo com a cor do papel de parede ligada (o Clawd
-    /// não muda de cor).
+    /// Desenha `draw` com as cores de sempre, mesmo com a cor do papel de parede ou o tema claro
+    /// ligados (o Clawd não muda de cor).
     pub fn own_colors<T>(&mut self, draw: impl FnOnce(&mut Canvas) -> T) -> T {
-        let saved = self.wall_color.take();
+        let saved = (self.wall_color.take(), std::mem::replace(&mut self.light, false));
         let result = draw(self);
-        self.wall_color = saved;
+        (self.wall_color, self.light) = saved;
         result
     }
 
@@ -1660,7 +1695,7 @@ mod digit_tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
         let c = Canvas::new(1, 1, 1.0);
-        for face in [Face::Light, Face::Regular, Face::Semibold] {
+        for face in [Face::Numbers, Face::Regular, Face::Semibold] {
             let (a, b) = (c.text_width("11:11", face, 40.0), c.text_width("00:00", face, 40.0));
             assert!((a - b).abs() < 0.5, "{face:?}: 11:11 = {a}, 00:00 = {b}");
         }
@@ -1849,7 +1884,7 @@ mod glow_tests {
     fn digits_have_the_same_width() {
         com();
         let c = Canvas::new(10, 10, 1.0);
-        for face in [Face::Custom("Outfit", 300), Face::Custom("Outfit", 600), Face::Regular, Face::Light] {
+        for face in [Face::Custom("Outfit", 300), Face::Custom("Outfit", 600), Face::Regular, Face::Numbers] {
             let widths: Vec<f32> = (0..10).map(|d| c.text_width(&d.to_string(), face, 30.0)).collect();
             assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.01), "{face:?}: {widths:?}");
             assert!((c.text_width("11:11", face, 30.0) - c.text_width("00:00", face, 30.0)).abs() < 0.01, "{face:?}");
@@ -1932,7 +1967,7 @@ mod cache_tests {
     fn cached_text_measures_match_measuring_again() {
         com();
         with(|gfx| {
-            for face in [Face::Regular, Face::Semibold, Face::Light, Face::Symbol, Face::Icons, Face::Custom("Outfit", 600)] {
+            for face in [Face::Regular, Face::Semibold, Face::Numbers, Face::NumbersMedium, Face::Symbol, Face::Icons, Face::Custom("Outfit", 600)] {
                 for px in [9.0, 13.75, 22.5, 61.0] {
                     for text in ["Florianópolis", "23°", "12:07", "\u{e995}", "Uso diário 46%…", " "] {
                         let fresh = gfx.measure_now(text, face, px);

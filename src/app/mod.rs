@@ -1715,7 +1715,14 @@ impl App {
     // ---------- verificações periódicas ----------
 
     fn check_backdrop(&mut self) {
+        let was_light = self.sh.light;
         self.sh.read_preferences();
+        if self.sh.light != was_light {
+            // o Windows trocou de tema: os widgets trocam junto (vidro e cores)
+            for card in &mut self.cards {
+                card.refresh(&self.sh);
+            }
+        }
         let blur = config::setting_f64(&self.sh.cfg, "desfoque");
         let changed = self.sh.backdrop.check(blur);
         let progman = win::desktop_window();
