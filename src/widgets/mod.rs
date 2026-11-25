@@ -42,13 +42,35 @@ pub const LARGE_H: f32 = 448.0;
 /// A margem de dentro do cartão, a mesma em todos os widgets e tamanhos (como os 16 pt dos
 /// widgets do macOS): o texto e os gráficos começam e terminam a esta distância da borda.
 pub const CARD_PAD: f32 = 16.0;
-/// O rótulo do widget no cabeçalho ("GITHUB", "SISTEMA", "POMODORO"...): a mesma letra e a
-/// mesma altura em todos (lado a lado, ficam alinhados), cada um na cor de destaque dele.
-pub const LABEL_Y: f32 = 13.0;
-pub const LABEL_SIZE: f32 = 10.0;
-/// Escreve o rótulo do widget (o "GITHUB", o "SISTEMA") em (x, y), na cor dele.
-pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::ui::theme::Rgba) {
-    c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, color, crate::gfx::Anchor::LA, None);
+/// O título do widget no cabeçalho ("GitHub", "Sistema", "Pomodoro"...): a mesma letra e a mesma
+/// altura em todos (lado a lado, ficam alinhados), sem caixa alta e na cor do texto, como os do
+/// macOS. A cor de destaque de cada widget fica no conteúdo (anéis, barras, quadrados).
+pub const LABEL_Y: f32 = 12.0;
+pub const LABEL_SIZE: f32 = 12.0;
+/// Escreve o título do widget (o "GitHub", o "Sistema") em (x, y).
+pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str) {
+    c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, crate::ui::theme::FG, crate::gfx::Anchor::LA, None);
+}
+
+/// Os números grandes de todos os widgets (a temperatura, o tempo do Pomodoro): a mesma letra em
+/// todos, para que, lado a lado na área de trabalho, pareçam da mesma família. É a Nunito,
+/// arredondada como a SF Pro Rounded dos widgets da Apple, no peso normal.
+pub const HERO: crate::gfx::Face = crate::gfx::Face::Numbers;
+/// As porcentagens no meio dos anéis (Uso do Claude e bateria): a mesma fonte, um pouco mais
+/// firme (médio), para marcar sem pesar.
+pub const PERCENT: crate::gfx::Face = crate::gfx::Face::NumbersMedium;
+
+/// Quanto o "%" conta ao centralizar uma porcentagem no meio de um anel (Uso do Claude e
+/// bateria). Com 0, só os algarismos ficam no centro, e o "%" pendurado parece empurrar tudo para
+/// a direita; com 1, o número e o "%" ficam juntos no centro, e os algarismos, que pesam muito
+/// mais aos olhos, parecem ir para a esquerda. No meio-termo o conjunto parece centrado (o
+/// "centro óptico").
+pub const PERCENT_SIGN_WEIGHT: f32 = 0.5;
+
+/// Onde começam os algarismos de uma porcentagem com o centro óptico em `x`: `digits` é a
+/// largura do número e `sign`, a do "%" com o espaço antes dele.
+pub fn optical_start(x: f32, digits: f32, sign: f32) -> f32 {
+    x - digits / 2.0 - PERCENT_SIGN_WEIGHT * sign / 2.0
 }
 
 /// cantos de cada tamanho
@@ -75,6 +97,15 @@ pub const KEYS: &[&str] = &["tempo", "sistema", "midia", "github", "pomodoro", "
 
 /// Widgets que chegaram depois: quem já usava o app não os vê aparecer sozinhos (ficam na galeria).
 pub const ADDED_LATER: &[&str] = &["claude", "bateria"];
+
+/// Os widgets que pintam o próprio fundo (o céu de agora no Tempo, a capa desfocada na Mídia),
+/// com o texto branco por cima: no tema claro, ficam como estão, sobre o vidro escuro.
+const OWN_BACKGROUND: [&str; 2] = ["tempo", "midia"];
+
+/// O widget `key` pinta o próprio fundo (veja `OWN_BACKGROUND`)?
+pub fn own_background(key: &str) -> bool {
+    OWN_BACKGROUND.contains(&key)
+}
 
 /// Nome do widget `key` (sem criar o widget).
 pub fn title(key: &str) -> &'static str {
@@ -382,8 +413,9 @@ pub trait Kind {
     /// Desenha o conteúdo (o vidro e os detalhes da base são feitos pelo `Card`).
     fn draw(&self, c: &mut Canvas, mode: Mode, env: &Env);
     /// O bichinho que pode sair do widget para a barra de tarefas (o Clawd): onde ele fica no
-    /// cartão neste tamanho (centro, em pontos). None: o widget não tem.
-    fn perch_from(&self, _mode: Mode) -> Option<(f32, f32)> {
+    /// cartão neste tamanho: o centro, em pontos, e o tamanho dos quadradinhos dele (o `unit` de
+    /// `clawd::draw`, para o pulo sair e chegar do mesmo tamanho). None: o widget não tem.
+    fn perch_from(&self, _mode: Mode) -> Option<(f32, f32, f32)> {
         None
     }
     /// Ele foi para a barra de tarefas (true) ou voltou para o widget.
@@ -478,6 +510,12 @@ pub trait Kind {
     /// tem o que mostrar (e o "carregando" é o brilho correndo no topo).
     fn skeleton(&self, _mode: Mode) -> Vec<Hot> {
         Vec::new()
+    }
+    /// Com a cor do papel de parede ligada: a faixa de matiz (graus no OKLab, de-até) das cores
+    /// que são alerta neste widget e por isso não mudam (o vermelho da bateria fraca). None: tudo
+    /// segue o papel de parede (o vermelho da Pomodoro é a cor dela, não um alerta).
+    fn alert_hues(&self) -> Option<(f32, f32)> {
+        None
     }
     /// Texto vindo de uma pergunta ou das configurações (ex.: "city", "user"); `extra` é a
     /// cidade escolhida na lista de sugestões.

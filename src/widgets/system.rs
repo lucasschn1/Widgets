@@ -1,8 +1,11 @@
 //! Widget Sistema: três anéis (CPU, memória e disco) no estilo dos anéis de atividade. Clicar num
 //! anel mostra os apps que mais usam aquele recurso (no disco, as unidades): no pequeno e no
 //! médio o cartão "vira" e mostra os 3 primeiros; no grande, a lista fica embaixo dos anéis.
+//! Ao lado dos anéis, no médio e no grande, a CPU do último minuto num gráfico pequeno (o valor
+//! de agora o anel já mostra); a memória e o disco, que quase não mudam num minuto, numa barra.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -35,6 +38,18 @@ const G_FOOT_Y: f32 = LARGE_H - 34.0;
 const _: () = assert!(G_LIST_Y + ROW_H * LIST_N as f32 + 6.0 <= G_FOOT_Y, "a lista não cabe no grande");
 
 const EVERY: Duration = Duration::from_secs(2);
+/// Lendo os apps: quantas linhas de esqueleto a lista mostra, no máximo, e a força dos blocos
+/// (a mesma do esqueleto dos outros widgets).
+const SKELETON_ROWS: usize = 6;
+const SKELETON_ALPHA: f32 = 0.12;
+/// Quantas medidas o gráfico do último minuto guarda (uma a cada `EVERY`).
+const HISTORY_LEN: usize = 30;
+/// Quantos recursos têm gráfico: só a CPU (a memória e o disco ficam na barra).
+const WITH_HISTORY: usize = 1;
+/// O alto do gráfico vale pelo menos isto (com a CPU quase parada, o gráfico não exagera os
+/// tremores) e um pouco mais que o pico do último minuto (para a forma aparecer).
+const HISTORY_MIN_TOP: f32 = 0.25;
+const HISTORY_HEADROOM: f32 = 1.2;
 const RING_MS: f32 = 550.0;
 /// mudança a partir da qual os anéis animam (3 pontos percentuais); menor, vão direto
 const RING_STEP: f32 = 0.03;
@@ -128,6 +143,29 @@ fn app_icon(c: &mut Canvas, icon: Option<&Image>, name: &str, x: f32, y: f32, si
 /// Sombra suave logo à frente da ponta de um anel (o fim arredondado em `end` graus), como nos
 /// anéis de atividade: desenhada antes do arco, só aparece a parte que sai da frente dele e dá
 /// a impressão de a ponta estar um pouco acima do trilho.
+/// O alto da escala do gráfico (0 a 1): um pouco acima do pico do último minuto, nunca abaixo de
+/// `HISTORY_MIN_TOP` nem acima de 100%.
+fn history_top(history: &VecDeque<f32>) -> f32 {
+    let peak = history.iter().copied().fold(0.0, f32::max);
+    (peak * HISTORY_HEADROOM).clamp(HISTORY_MIN_TOP, 1.0)
+}
+
+/// O gráfico do último minuto de um recurso no retângulo (x0, y0)–(x1, y1): a de agora na
+/// direita, de 0 (embaixo) até `history_top` (em cima), numa linha com a área embaixo dela
+/// clarinha. Com menos de um minuto medido, começa no meio do caminho (o resto fica vazio).
+fn draw_history(c: &mut Canvas, history: &VecDeque<f32>, x0: f32, y0: f32, x1: f32, y1: f32, color: Rgba) {
+    c.fill_round_rect(x0, y1 - 1.0, x1, y1, 0.5, WHITE.alpha(0.12));
+    let step = (x1 - x0) / (HISTORY_LEN - 1) as f32;
+    let start = x1 - step * (history.len() - 1) as f32;
+    let top = history_top(history);
+    let line: Vec<(f32, f32)> = history.iter().enumerate().map(|(k, value)| (start + step * k as f32, y1 - (y1 - y0) * (value / top).clamp(0.0, 1.0))).collect();
+    let mut area = line.clone();
+    area.push((x1, y1));
+    area.push((start, y1));
+    c.polygon(&area, color.alpha(0.22));
+    c.line(&line, color, 1.5);
+}
+
 fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, thickness: f32) {
     let angle = end.to_radians();
     // a direção em que o anel anda (sentido horário na tela)
@@ -140,7 +178,37 @@ fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, thickness
 }
 
 /// espaço entre o nome e a porcentagem no título do pequeno virado
-const BACK_P_GAP: f32 = 5.0;
+const BACK_P_GAP: f32 = 4.0;
+/// onde o título do pequeno virado começa (depois da bolinha da cor) e o respiro até a área do ✕
+/// (que é maior que o desenho dele)
+const BACK_P_TITLE_X: f32 = 26.0;
+const BACK_P_CLOSE_GAP: f32 = 2.0;
+
+/// Nas linhas do médio e do grande: o espaço entre o nome e a quantidade em uso, e as letras que a
+/// quantidade pode ter (a primeira que deixa o nome inteiro).
+const METRIC_NAME_GAP: f32 = 6.0;
+const AMOUNT_SIZES: [f32; 2] = [11.0, 10.0];
+
+/// A quantidade em uso só com a parte usada ("10,9/16 GB" vira "10,9 GB"); None se ela já é curta
+/// (a CPU, "2,84 GHz").
+fn short_amount(amount: &str) -> Option<String> {
+    let (used, rest) = amount.split_once('/')?;
+    let unit = rest.split_whitespace().last()?;
+    Some(format!("{used} {unit}"))
+}
+
+/// A quantidade em uso ao lado do nome ("Memória") em `room` pontos e a letra dela: a inteira
+/// ("10,9/16 GB") na maior letra que deixa o nome inteiro, senão a curta ("10,9 GB"), ou None
+/// (sem a quantidade) se nada deixa.
+fn amount_for(c: &Canvas, name: &str, amount: &str, room: f32) -> Option<(String, f32)> {
+    let name_w = c.text_width(name, Face::Regular, 12.0);
+    let fits = |text: &str, size: f32| name_w + METRIC_NAME_GAP + c.text_width(text, Face::Regular, size) <= room;
+    let mut options: Vec<(String, f32)> = AMOUNT_SIZES.iter().map(|&size| (amount.to_string(), size)).collect();
+    if let Some(short) = short_amount(amount) {
+        options.extend(AMOUNT_SIZES.iter().map(|&size| (short.clone(), size)));
+    }
+    options.into_iter().find(|(text, size)| fits(text, *size))
+}
 
 /// Letra do título do pequeno virado ("Memória 68%"): 12,5, ou menor até caber em `room`.
 fn back_p_title_size(c: &Canvas, name: &str, pct: &str, room: f32) -> f32 {
@@ -199,6 +267,8 @@ pub struct System {
     details: [String; 3],
     /// quanto está em uso agora, curto (médio e grande): "2,84 GHz", "10,9/16 GB", "412/477 GB"
     amounts: [String; 3],
+    /// a CPU (0 a 1) do último minuto, da mais antiga à de agora
+    history: [VecDeque<f32>; WITH_HISTORY],
     speed: Option<CpuSpeed>,
     last_cpu: (u64, u64),
     last_net: NetReading,
@@ -240,6 +310,7 @@ impl System {
             ring_since: Instant::now(),
             details: Default::default(),
             amounts: Default::default(),
+            history: Default::default(),
             speed: None,
             last_cpu: win::cpu_times(),
             last_net: NetReading { received, sent, at: Instant::now() },
@@ -269,6 +340,12 @@ impl System {
         system.from = system.target;
         system.amounts = ["2,84 GHz".into(), "10,9/16 GB".into(), "258/477 GB".into()];
         system.ring_since = Instant::now() - Duration::from_secs(5);
+        // um minuto de exemplo: a CPU subindo e descendo, a memória quase parada
+        for k in 0..HISTORY_LEN {
+            let t = k as f32 / (HISTORY_LEN - 1) as f32;
+            let cpu = 0.24 + 0.16 * (t * 9.0).sin() * (1.0 - t) + 0.08 * (t * 23.0).sin().max(0.0);
+            system.remember([cpu.clamp(0.02, 1.0), 0.66 + 0.02 * t, 0.54]);
+        }
         system
     }
 
@@ -356,12 +433,23 @@ impl System {
             format!("{:.0}/{:.0} GB", win::gb(dused), win::gb(dtotal)),
         ];
         self.set_rings(values);
+        self.remember(values);
         self.watch_high(values);
         let (received, sent) = sysinfo::net_bytes();
         let secs = self.last_net.at.elapsed().as_secs_f64().max(0.1);
         self.rates = (received.saturating_sub(self.last_net.received) as f64 / secs, sent.saturating_sub(self.last_net.sent) as f64 / secs);
         self.last_net = NetReading { received, sent, at: Instant::now() };
         self.next = Instant::now() + EVERY;
+    }
+
+    /// Guarda a medida de agora no gráfico do último minuto (esquecendo a mais antiga).
+    fn remember(&mut self, values: [f32; 3]) {
+        for (history, value) in self.history.iter_mut().zip(values) {
+            history.push_back(value);
+            while history.len() > HISTORY_LEN {
+                history.pop_front();
+            }
+        }
     }
 
     /// Leva os anéis aos valores novos (0 a 1): partindo de onde estão agora, animados só se a
@@ -583,11 +671,11 @@ impl System {
     /// direita; no médio, no alto da coluna das medidas (os anéis ocupam a altura toda).
     fn draw_header(&self, c: &mut Canvas, mode: Mode) {
         if mode == Mode::M {
-            super::draw_label(c, Self::metric_rect(mode, 0).0, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+            super::draw_label(c, Self::metric_rect(mode, 0).0, super::LABEL_Y, "Sistema");
             return;
         }
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        super::draw_label(c, PAD, super::LABEL_Y, "SISTEMA", PINK.mix(WHITE, 0.12));
+        super::draw_label(c, PAD, super::LABEL_Y, "Sistema");
         c.text(W - PAD, super::LABEL_Y, &format!("{cores} núcleos"), Face::Regular, 11.5, MUTED, Anchor::RA, None);
     }
 
@@ -609,15 +697,23 @@ impl System {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
                 let pw = draw_counting(c, x1 - 6.0, y + 7.0, pct, "%", Face::Semibold, 13.5, text, Anchor::RM);
-                // quanto está em uso agora, antes da porcentagem
-                let aw = c.text(x1 - 6.0 - pw - 7.0, y + 7.5, &self.amounts[i], Face::Regular, 11.0, MUTED, Anchor::RM, None);
-                let name_w = (x1 - 6.0 - pw - 7.0 - aw - 6.0) - (x0 + 13.0);
+                // quanto está em uso agora, antes da porcentagem (menor, só a parte usada, ou
+                // nenhum, se o nome não couber inteiro: "Mem…" não diz o que é)
+                let amount_x = x1 - 6.0 - pw - 7.0;
+                let amount = amount_for(c, NAMES[i], &self.amounts[i], amount_x - (x0 + 13.0));
+                let aw = amount.map_or(0.0, |(text, size)| c.text(amount_x, y + 7.5, &text, Face::Regular, size, MUTED, Anchor::RM, None) + METRIC_NAME_GAP);
+                let name_w = amount_x - aw - (x0 + 13.0);
                 c.text(x0 + 13.0, y + 7.0, NAMES[i], Face::Regular, 12.0, MUTED, Anchor::LM, Some(name_w.max(10.0)));
                 let (bx0, bx1, by) = (x0, x1 - 6.0, y + 19.0);
-                c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.12));
-                let w = (bx1 - bx0) * shown[i].clamp(0.0, 1.0);
-                if w > 1.0 {
-                    c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(i));
+                match self.history.get(i).filter(|history| history.len() >= 2) {
+                    Some(history) => draw_history(c, history, bx0, by - 5.0, bx1, by + 7.0, color(i)),
+                    None => {
+                        c.fill_round_rect(bx0, by, bx1, by + 4.0, 2.0, WHITE.alpha(0.12));
+                        let w = (bx1 - bx0) * shown[i].clamp(0.0, 1.0);
+                        if w > 1.0 {
+                            c.fill_round_rect(bx0, by, bx0 + w.max(4.0), by + 4.0, 2.0, color(i));
+                        }
+                    }
                 }
             }
         }
@@ -628,8 +724,22 @@ impl System {
     fn draw_list(&self, c: &mut Canvas, which: usize, y0: f32, n_max: usize, row_h: f32) {
         let rows = self.rows(which);
         if rows.is_empty() {
-            let msg = if which == 2 { "Nenhuma unidade encontrada" } else { "Lendo os apps…" };
-            c.text(W / 2.0, y0 + 40.0, msg, Face::Regular, 12.0, MUTED, Anchor::MM, None);
+            if which == 2 {
+                c.text(W / 2.0, y0 + 40.0, "Nenhuma unidade encontrada", Face::Regular, 12.0, MUTED, Anchor::MM, None);
+            } else {
+                // lendo os apps: as linhas da lista em esqueleto (um "Lendo os apps…" sozinho
+                // deixava o grande quase vazio), cada uma mais apagada que a de cima
+                for index in 0..n_max.min(SKELETON_ROWS) {
+                    let y = y0 + row_h * index as f32;
+                    let fade = 1.0 - index as f32 / SKELETON_ROWS as f32 * 0.7;
+                    let block = WHITE.alpha(SKELETON_ALPHA * fade);
+                    let tx = PAD + 36.0;
+                    c.fill_round_rect(PAD, y + 5.0, PAD + 26.0, y + 31.0, 7.0, block);
+                    c.fill_round_rect(tx, y + 7.0, tx + 70.0 + 22.0 * ((index * 5 % 3) as f32), y + 17.0, 4.0, block);
+                    c.fill_round_rect(W - PAD - 34.0, y + 7.0, W - PAD, y + 17.0, 4.0, block);
+                    c.fill_round_rect(tx, y + 24.0, W - PAD, y + 28.0, 2.0, WHITE.alpha(0.06 * fade));
+                }
+            }
             return;
         }
         let since = self.bars_since.elapsed().as_secs_f32() * 1000.0;
@@ -681,10 +791,10 @@ impl System {
         c.fill_circle(17.0, 22.0, 4.0, color(which));
         // o nome inteiro ("Memória", como no médio e no grande) e a porcentagem antes do ✕ (a letra
         // diminui um pouco se não couber)
-        let room = Self::close_rect(Mode::P).0 - 4.0 - 26.0;
+        let room = Self::close_rect(Mode::P).0 - BACK_P_CLOSE_GAP - BACK_P_TITLE_X;
         let size = back_p_title_size(c, NAMES[which], &pct, room);
-        let nw = c.text(26.0, 22.0, NAMES[which], Face::Semibold, size, FG, Anchor::LM, None);
-        c.text(26.0 + nw + BACK_P_GAP, 22.0, &pct, Face::Semibold, size, color(which), Anchor::LM, None);
+        let nw = c.text(BACK_P_TITLE_X, 22.0, NAMES[which], Face::Semibold, size, FG, Anchor::LM, None);
+        c.text(BACK_P_TITLE_X + nw + BACK_P_GAP, 22.0, &pct, Face::Semibold, size, color(which), Anchor::LM, None);
         self.draw_close(c, Mode::P);
         let rows = self.rows(which);
         if rows.is_empty() {
@@ -914,6 +1024,32 @@ mod tests {
         }
     }
 
+    /// No médio e no grande, o nome do recurso ("Memória") nunca é cortado: com a quantidade em
+    /// uso mais longa e a porcentagem de três algarismos, ela fica menor, só com a parte usada
+    /// (ou sai), mas o nome fica inteiro; no caso comum, a quantidade aparece junto.
+    #[test]
+    fn metric_names_are_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let probe = Canvas::new(1, 1, 1.0);
+        assert_eq!(short_amount("10,9/16 GB").as_deref(), Some("10,9 GB"));
+        assert_eq!(short_amount("2,84 GHz"), None);
+        let room_with = |mode: Mode, i: usize, pct: &str| {
+            let (x0, _, x1, _) = System::metric_rect(mode, i);
+            x1 - 6.0 - probe.text_width(pct, Face::Semibold, 13.5) - 7.0 - (x0 + 13.0)
+        };
+        for mode in [Mode::M, Mode::G] {
+            for i in 0..3 {
+                let room = room_with(mode, i, "100%");
+                let used = amount_for(&probe, NAMES[i], "258,4/476,9 GB", room).map_or(0.0, |(text, size)| probe.text_width(&text, Face::Regular, size) + METRIC_NAME_GAP);
+                assert!(probe.text_width(NAMES[i], Face::Regular, 12.0) <= room - used, "{mode:?}: {} cortado", NAMES[i]);
+                // o caso comum: dois algarismos e a quantidade de sempre
+                assert!(amount_for(&probe, NAMES[i], "10,9/16 GB", room_with(mode, i, "68%")).is_some(), "{mode:?}: {} sem a quantidade comum", NAMES[i]);
+            }
+        }
+    }
+
     /// "Memória" em todos os tamanhos (o pequeno dizia "RAM"): o nome inteiro cabe na coluna do
     /// pequeno e, virado, o título com 100% cabe antes do ✕; no médio, o rótulo e as três linhas
     /// cabem na altura dos anéis.
@@ -927,9 +1063,10 @@ mod tests {
         for i in 0..3 {
             let (x0, _, x1, _) = System::metric_rect(Mode::P, i);
             assert!(probe.text_width(NAMES[i], Face::Regular, 10.0) <= x1 - x0 - 2.0, "{} não cabe no pequeno", NAMES[i]);
-            let room = System::close_rect(Mode::P).0 - 4.0 - 26.0;
+            let room = System::close_rect(Mode::P).0 - BACK_P_CLOSE_GAP - BACK_P_TITLE_X;
             let size = back_p_title_size(&probe, NAMES[i], "100%", room);
-            assert!(size >= 11.0, "{}: letra {size} no pequeno virado", NAMES[i]);
+            let need = |size: f32| probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size);
+            assert!(size >= 11.0, "{}: letra {size} no pequeno virado (a 11, {:.1} de {room:.1})", NAMES[i], need(11.0));
             assert!(probe.text_width(NAMES[i], Face::Semibold, size) + BACK_P_GAP + probe.text_width("100%", Face::Semibold, size) <= room);
         }
         // médio: a primeira linha começa embaixo do rótulo e a última barra termina com os anéis
@@ -978,6 +1115,27 @@ mod tests {
         let names = ["Google Chrome", "Visual Studio Code", "Discord", "Spotify", "Steam", "Notepad"];
         let distinct: std::collections::HashSet<_> = names.iter().map(|n| { let c = tile_color(n); (c.0, c.1, c.2) }).collect();
         assert!(distinct.len() >= 3, "as cores variam entre os apps");
+    }
+
+    /// O gráfico guarda só o último minuto da CPU e da memória (o disco fica na barra), com a
+    /// medida de agora no fim.
+    #[test]
+    fn history_keeps_the_last_minute() {
+        let mut system = System::with(Sampler::idle());
+        for k in 0..HISTORY_LEN + 7 {
+            system.remember([k as f32 / 100.0, 0.5, 0.9]);
+        }
+        assert_eq!(system.history[0].len(), HISTORY_LEN);
+        assert_eq!(system.history[0].back().copied(), Some((HISTORY_LEN + 6) as f32 / 100.0), "a de agora no fim");
+        assert_eq!(system.history[0].front().copied(), Some(7.0 / 100.0), "as mais antigas saem");
+        assert_eq!(system.history.len(), 1, "a memória e o disco não têm gráfico");
+        // a escala: um pouco acima do pico, sem exagerar a CPU parada
+        let calm: VecDeque<f32> = [0.02, 0.03, 0.02].into_iter().collect();
+        assert_eq!(history_top(&calm), HISTORY_MIN_TOP);
+        let busy: VecDeque<f32> = [0.2, 0.5, 0.3].into_iter().collect();
+        assert!((history_top(&busy) - 0.6).abs() < 1e-6);
+        let full: VecDeque<f32> = [0.9, 1.0].into_iter().collect();
+        assert_eq!(history_top(&full), 1.0);
     }
 
     #[test]

@@ -477,7 +477,7 @@ mod tests {
     fn the_same_pieces_move_and_the_others_fade() {
         com();
         let a = rec(|c| {
-            c.text(16.0, 16.0, "24°", Face::Light, 40.0, WHITE, Anchor::LA, None);
+            c.text(16.0, 16.0, "24°", Face::Numbers, 40.0, WHITE, Anchor::LA, None);
             c.fill_circle(20.0, 100.0, 5.0, Rgba::rgb(0, 200, 0));
             for i in 0..2 {
                 c.fill_round_rect(i as f32 * 10.0, 0.0, i as f32 * 10.0 + 8.0, 8.0, 2.0, Rgba::rgb(9, 9, 9));
@@ -485,7 +485,7 @@ mod tests {
         });
         let b = rec(|c| {
             c.text(16.0, 16.0, "Céu limpo", Face::Semibold, 12.0, WHITE, Anchor::LA, None);
-            c.text(20.0, 18.0, "24°", Face::Light, 54.0, WHITE, Anchor::LA, None);
+            c.text(20.0, 18.0, "24°", Face::Numbers, 54.0, WHITE, Anchor::LA, None);
             c.fill_circle(200.0, 100.0, 10.0, Rgba::rgb(0, 200, 0));
             for i in 0..5 {
                 c.fill_round_rect(i as f32 * 10.0, 0.0, i as f32 * 10.0 + 8.0, 8.0, 2.0, Rgba::rgb(9, 9, 9));

@@ -38,7 +38,13 @@ pub enum Action {
     Startup,
     Lock,
     Slider(&'static str),
+    /// um slider volta a este valor (o "Desfazer" de uma opção fora do padrão)
+    SliderSet(&'static str, f64),
     Seg(&'static str, String),
+    /// várias ações de uma vez (o "Restaurar tudo": o "Desfazer" de cada opção fora do padrão)
+    Many(Vec<Action>),
+    /// um resultado da busca: a página e a altura da opção nela
+    Find(&'static str, f32),
     Visible(&'static str, bool),
     Widget(&'static str, u32),
     /// silenciar (ou voltar a mostrar) as notificações de um app na ilha (a identidade dele)

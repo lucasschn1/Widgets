@@ -48,9 +48,9 @@
 <table>
   <tr>
     <td width="50%" valign="top">
-      <b>Vidro de verdade.</b> O fundo de cada widget é o seu próprio papel de parede desfocado,
-      como um vidro fosco. Sem o mouse em cima, eles ficam mais transparentes e não roubam a
-      atenção.
+      <b>Vidro de verdade.</b> O fundo de cada widget é o seu próprio papel de parede, visto por
+      um vidro líquido como o do macOS: a beirada curva o fundo como uma lente e pega a luz nas
+      quinas. Claros no tema claro do Windows.
     </td>
     <td width="50%" valign="top">
       <b>Uma ilha dinâmica no Windows.</b> Uma pílula na barra de tarefas, como a do iPhone: a
@@ -116,8 +116,8 @@ irm https://raw.githubusercontent.com/lucasschn1/Widgets/main/install.ps1 | iex
 
 <br>
 
-Esses avisos aparecem porque as versões ainda saem **sem assinatura digital** (o pedido está em
-andamento; veja a [política de assinatura](#code-signing-policy)). O Windows e os navegadores
+Esses avisos aparecem porque as versões saem **sem assinatura digital** (veja
+[Assinatura digital](#assinatura-digital)). O Windows e os navegadores
 desconfiam de todo programa novo, sem assinatura, que pouca gente baixou. O aviso não quer dizer
 que encontraram algo no arquivo. Se quiser conferir antes, veja
 [Por que dá para confiar](#por-que-dá-para-confiar).
@@ -410,8 +410,9 @@ pilha**.
 
 ## Configurações
 
-Tudo muda na hora, sem botão de salvar: o quanto o vidro desfoca e escurece (com uma prévia ao
-vivo), quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
+Tudo muda na hora, sem botão de salvar, e a busca no alto do menu acha qualquer opção ("chuva",
+"bateria"). As opções fora do padrão ficam marcadas, com Desfazer. Dá para mudar o quanto o vidro
+desfoca e escurece (com uma prévia ao vivo), o tema claro, quais widgets aparecem, as opções de cada um, a ilha e quais avisos você quer receber.
 Na primeira vez, umas boas-vindas rápidas ajudam a escolher os widgets e a cidade do clima.
 
 <table>
@@ -511,7 +512,7 @@ widget mostra, e só quando o widget está ligado:
 | Estação Espacial | [CelesTrak](https://celestrak.org) | Nada: baixa a órbita da ISS a cada 12 horas; as passagens são calculadas no seu PC |
 | Uso do Claude | Ninguém | Os números chegam do Claude Code, na sua máquina |
 | Sistema, Pomodoro, Bateria, pôr do sol, lua, modo foco | Ninguém | |
-| Atualizações | api.github.com | Nada além do pedido da versão mais recente, a cada 6 horas. Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** |
+| Atualizações | api.github.com e github.com | Nada além do pedido da versão mais recente, a cada 6 horas (e, quando você clica em **Atualizar**, o download do `Widgets.exe` novo). Dá para desligar em **Configurações → Sobre → Procurar atualizações sozinho** |
 
 Fora disso, o app não envia nenhuma informação para outros sistemas em rede, a não ser quando
 você pede (abrir um link, por exemplo). O instalador e o `install.ps1` mostram este resumo antes
@@ -585,25 +586,18 @@ Geral.
 
 </details>
 
-## Code signing policy
+## Assinatura digital
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/).
+As versões saem **sem** assinatura digital. O pedido de um certificado gratuito para projetos de
+código aberto (o da SignPath Foundation) ainda não foi aprovado: o projeto é novo e pouco
+conhecido. Ele será feito de novo quando o Widgets tiver mais gente usando. Até lá, o Windows
+mostra o aviso de [programa pouco baixado](#o-aviso-do-windows).
 
-- **Committers and reviewers:** [lucasschn1](https://github.com/lucasschn1)
-- **Approvers:** [lucasschn1](https://github.com/lucasschn1)
-
-> **Situação:** o pedido de assinatura à SignPath Foundation ainda está em andamento. Até ele ser
-> aprovado, as versões saem **sem** assinatura digital (veja
-> [O Windows disse que "protegeu o computador"](#o-aviso-do-windows)).
-
-Em português: cada versão é compilada pelo
+Sem assinatura, o que garante a origem do arquivo é o caminho dele: cada versão é compilada pelo
 [GitHub Actions](https://github.com/lucasschn1/Widgets/actions/workflows/release.yml) a partir do
-código público da tag, depois de passar nos testes. O `Widgets.exe` e o instalador só são
-assinados depois que um aprovador confere e aprova o pedido de assinatura daquela versão. Só é
-assinado o que é compilado deste repositório. Sobre os dados, veja [Privacidade](#privacidade):
-o app não envia nenhuma informação para outros sistemas em rede, a não ser nos casos descritos lá
-ou quando você pede.
+código público da tag, depois de passar nos testes, e o Release traz o SHA-256 de cada arquivo.
+Sobre os dados, veja [Privacidade](#privacidade): o app não envia nenhuma informação para outros
+sistemas em rede, a não ser nos casos descritos lá ou quando você pede.
 
 ---
 
@@ -714,6 +708,8 @@ src/
     imgops.rs         desfoque e recortes feitos à mão
     output.rs, gpu/   como o quadro chega à tela (pela CPU ou pela placa de vídeo)
     meter.rs          o medidor de desempenho (WIDGETS_PERF=1)
+    wallcolor.rs      os widgets na cor do papel de parede
+    lighttheme.rs     o tema claro dos widgets
   platform/           a conversa com o Windows
     win.rs            o resto da API do Windows (monitores, barra de tarefas, relógio...)
     events.rs         janelas do Windows e a fila de eventos
@@ -827,5 +823,6 @@ memória.
 ## Licença
 
 [MIT](LICENSE): use, modifique e distribua à vontade, inclusive em forks e projetos comerciais,
-mantendo o aviso de copyright. A fonte Outfit, embutida no app, tem a licença dela
-([SIL Open Font License](res/fonts/OFL.txt)).
+mantendo o aviso de copyright. As fontes embutidas no app têm a licença delas, a SIL Open Font
+License: a Inter do texto ([OFL-Inter.txt](res/fonts/OFL-Inter.txt)), a Nunito dos números
+([OFL-Nunito.txt](res/fonts/OFL-Nunito.txt)) e a Outfit ([OFL.txt](res/fonts/OFL.txt)).

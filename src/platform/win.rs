@@ -40,8 +40,31 @@ pub struct Monitor {
     pub screen: Rect,
     /// área de trabalho, sem a barra de tarefas
     pub work: Rect,
-    /// 1 = 96 dpi
+    /// a escala do Windows (1 = 96 dpi)
     pub scale: f32,
+    /// a escala dos widgets (veja `widget_scale`); num monitor guardado no config.json, a escala
+    /// em que as posições foram guardadas (as de antes dela, a do Windows)
+    pub widgets: f32,
+}
+
+/// O lado menor da tela (em pontos, já descontada a escala do Windows) em que os widgets ficam no
+/// tamanho em que foram desenhados: o de um monitor de 1080p a 100%.
+const DESIGN_SCREEN_SIDE: f32 = 1080.0;
+/// O máximo que os widgets crescem além da escala do Windows (um 4K a 100% para aqui, e não em 2×:
+/// maior que isso, um widget só já tomaria a tela).
+const MAX_WIDGET_GROWTH: f32 = 1.5;
+
+/// Escala dos widgets (1 = 96 dpi) num monitor com a escala `dpi` do Windows e a tela `screen`.
+/// A escala do Windows sozinha deixa os widgets pequenos num monitor grande a 100% (um 1440p ou um
+/// ultrawide informa a mesma escala de um 1080p): por isso, quando o lado menor da tela passa de
+/// 1080 pontos, os widgets crescem na mesma proporção e ocupam a mesma parte da tela que num
+/// 1080p. Nunca diminuem (num notebook a 150%, fica a do Windows). O lado menor, e não a altura,
+/// para um monitor em pé não deixar os widgets mais largos que ele.
+pub fn widget_scale(dpi: f32, screen: Rect) -> f32 {
+    let shorter_side = (screen.2 - screen.0).min(screen.3 - screen.1).max(1) as f32 / dpi.max(0.5);
+    let growth = (shorter_side / DESIGN_SCREEN_SIDE).clamp(1.0, MAX_WIDGET_GROWTH);
+    // em centésimos: a mesma tela dá sempre a mesma escala (o app compara escalas para redesenhar)
+    (dpi * growth * 100.0).round() / 100.0
 }
 
 /// O retângulo do Windows como `Rect`.
@@ -89,7 +112,8 @@ fn monitor_of(monitor: HMONITOR) -> Option<(Monitor, bool)> {
     }
     let found = info.monitorInfo;
     // (dwFlags 1 = MONITORINFOF_PRIMARY)
-    Some((Monitor { id, screen: rect_of(found.rcMonitor), work: rect_of(found.rcWork), scale: dpi_x as f32 / 96.0 }, found.dwFlags & 1 != 0))
+    let (screen, scale) = (rect_of(found.rcMonitor), dpi_x as f32 / 96.0);
+    Some((Monitor { id, screen, work: rect_of(found.rcWork), scale, widgets: widget_scale(scale, screen) }, found.dwFlags & 1 != 0))
 }
 
 /// Monitores ligados, o principal primeiro.
@@ -172,6 +196,11 @@ pub fn foreground_screen() -> Option<Rect> {
     }
 }
 
+/// O Windows está no tema claro (Personalização → Cores → "Modo do aplicativo": Claro)?
+pub fn light_theme() -> bool {
+    registry(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme") == "1"
+}
+
 /// Área de trabalho do monitor onde está o mouse (onde a pessoa está olhando).
 pub fn area_at_pointer() -> Rect {
     let (x, y) = pointer();
@@ -204,6 +233,13 @@ pub fn scale_at(x: i32, y: i32) -> f32 {
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         dpi_x as f32 / 96.0
     }
+}
+
+/// Escala dos widgets (veja `widget_scale`) no monitor mais perto do ponto. Os painéis, menus e
+/// dicas seguem só a do Windows (`scale_at`), como as janelas dos outros programas.
+pub fn widget_scale_at(x: i32, y: i32) -> f32 {
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    monitor_of(monitor).map(|(found, _)| found.widgets).unwrap_or_else(|| scale_at(x, y))
 }
 
 /// Onde está o mouse na tela.
@@ -325,6 +361,19 @@ pub fn set_hit_area(hwnd: HWND, area: Option<Rect>) {
 }
 
 // ---------- registro e sistema ----------
+
+/// Troca o texto de um valor em HKEY_CURRENT_USER, só se ele já existe (nunca cria chave nem
+/// valor: ex., a versão na entrada de "Aplicativos instalados", que só existe se o app foi
+/// instalado pelo install.ps1 ou pelo instalador).
+pub fn update_registry_text(path: &str, name: &str, value: &str) {
+    if registry(path, name).is_empty() {
+        return;
+    }
+    let (wpath, wname, wvalue) = (wide(path), wide(name), wide(value));
+    unsafe {
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, PCWSTR(wpath.as_ptr()), PCWSTR(wname.as_ptr()), REG_SZ.0, Some(wvalue.as_ptr() as _), (wvalue.len() * 2) as u32);
+    }
+}
 
 /// Valor de texto (ou número, convertido) em HKEY_CURRENT_USER; "" se não existir.
 pub fn registry(path: &str, name: &str) -> String {
@@ -765,6 +814,25 @@ pub fn style_window(hwnd: HWND, caption: Option<crate::ui::theme::Rgba>, framele
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Os widgets ocupam a mesma parte da tela em qualquer monitor: crescem nos grandes a 100%,
+    /// ficam na escala do Windows nos de 1080 pontos ou menos e param em 1,5× nos enormes.
+    #[test]
+    fn widgets_grow_on_big_screens() {
+        let screen = |w: i32, h: i32| (0, 0, w, h);
+        assert_eq!(widget_scale(1.0, screen(1920, 1080)), 1.0, "1080p a 100%: o tamanho desenhado");
+        assert_eq!(widget_scale(1.5, screen(1920, 1080)), 1.5, "notebook a 150%: só a escala do Windows");
+        assert_eq!(widget_scale(1.25, screen(1920, 1080)), 1.25, "nunca diminui");
+        assert_eq!(widget_scale(1.0, screen(2560, 1440)), 1.33, "1440p a 100%: um terço maior");
+        assert_eq!(widget_scale(1.0, screen(3440, 1440)), 1.33, "ultrawide: pela altura");
+        assert_eq!(widget_scale(1.5, screen(3840, 2160)), 2.0, "4K a 150%: como um 1440p");
+        assert_eq!(widget_scale(1.0, screen(3840, 2160)), 1.5, "4K a 100%: no máximo 1,5×");
+        assert_eq!(widget_scale(1.0, screen(1440, 2560)), 1.33, "em pé: pela largura");
+        // a escala dos widgets no mesmo monitor é a mesma de 1080p (o que a tela ocupa)
+        let share = |dpi: f32, w: i32, h: i32| 300.0 * widget_scale(dpi, screen(w, h)) / h as f32;
+        assert!((share(1.0, 2560, 1440) - share(1.0, 1920, 1080)).abs() < 0.001);
+        assert!((share(1.5, 3840, 2160) - share(1.0, 1920, 1080)).abs() < 0.001);
+    }
 
     /// Só a economia de energia do Windows pausa as animações: o notebook fora da tomada, sem
     /// ela, anima normalmente.

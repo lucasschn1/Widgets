@@ -2,9 +2,16 @@
 
 use serde_json::Value;
 
-use crate::card::backdrop::Backdrop;
+use crate::card::backdrop::{Backdrop, GlassLook};
+use crate::gfx::wallcolor::WallColor;
 use crate::data::config::{self, Get};
 use crate::platform::win;
+
+/// A opção "Cor do papel de parede" (Aparência), em cfg["app"].
+pub const WALL_COLOR: &str = "cor_do_papel_de_parede";
+/// A opção "Tema claro do Windows" (Aparência): com o Windows no tema claro, os widgets ficam
+/// claros também (vidro claro, texto escuro), como no macOS.
+pub const LIGHT_THEME: &str = "tema_claro";
 
 /// O que o App e todos os cartões dividem.
 pub struct Shared {
@@ -13,8 +20,11 @@ pub struct Shared {
     pub backdrop: Backdrop,
     pub text_scale: f32,
     pub animations: bool,
-    pub idle_opacity: f32,
     pub tint: f64,
+    /// os widgets na cor do papel de parede (Aparência → "Cor do papel de parede")
+    pub wall_color: bool,
+    /// o tema claro: a opção ligada e o Windows no tema claro
+    pub light: bool,
     /// widgets mostrados na frente das janelas
     pub peeking: bool,
     /// modo edição: fechar, redimensionar e arrastar à vontade
@@ -36,8 +46,9 @@ impl Shared {
             cache,
             text_scale: 1.0,
             animations: true,
-            idle_opacity: 1.0,
             tint: 0.4,
+            wall_color: false,
+            light: false,
             peeking: false,
             editing: false,
             paused: Vec::new(),
@@ -59,7 +70,7 @@ impl Shared {
         self.cfg["app"].bool_of("travado").unwrap_or(false)
     }
 
-    /// Valores que dependem das configurações e do Windows (texto, animações, opacidade).
+    /// Valores que dependem das configurações e do Windows (texto, animações, vidro).
     pub fn read_preferences(&mut self) {
         let mut text = config::setting_f64(&self.cfg, "texto");
         if text <= 0.0 {
@@ -72,9 +83,28 @@ impl Shared {
             "nunca" => false,
             _ => win::animations_enabled(),
         };
-        self.idle_opacity =
-            if config::setting_bool(&self.cfg, "esmaecer") { config::setting_f64(&self.cfg, "opacidade_ociosa") as f32 } else { 1.0 };
         self.tint = config::setting_f64(&self.cfg, "escurecimento");
+        self.wall_color = config::setting_bool(&self.cfg, WALL_COLOR);
+        self.light = config::setting_bool(&self.cfg, LIGHT_THEME) && win::light_theme();
+    }
+
+    /// O vidro dos widgets agora (claro ou escuro). `own_background`: o widget pinta o próprio
+    /// fundo (o céu do Tempo, a cor da capa na Mídia) e fica com o vidro escuro também no tema
+    /// claro, com o texto branco que combina com esse fundo.
+    pub fn glass_look(&self, own_background: bool) -> GlassLook {
+        GlassLook { light: self.light && !own_background }
+    }
+
+    /// A cor do papel de parede para um widget nesse retângulo da tela (a do monitor dele), ou
+    /// None com a opção desligada.
+    pub fn wall_color_at(&self, rect: win::Rect) -> Option<WallColor> {
+        self.wall_color.then(|| self.backdrop.wall_color_at((rect.0 + rect.2) / 2, (rect.1 + rect.3) / 2))
+    }
+
+    /// A cor do papel de parede para um widget desenhado fora da área de trabalho (as miniaturas e
+    /// a prévia das configurações): a do monitor principal.
+    pub fn wall_color_main(&self) -> Option<WallColor> {
+        self.wall_color.then(|| self.backdrop.wall_color_at(0, 0))
     }
 
     /// Grava as opções.

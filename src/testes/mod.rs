@@ -170,6 +170,37 @@ fn draw(kind: &dyn Kind, mode: Mode, cfg: &Value) -> Image {
     c.finish()
 }
 
+/// As faixas de tinta de um desenho dentro do círculo de raio `inner` em volta de (cx, cy), só
+/// acima de `max_y` (tudo em pontos, numa imagem na escala `s`): cada faixa é um trecho de
+/// linhas seguidas com algum pixel forte, como (x0, y0, x1, y1), de cima para baixo. No meio de
+/// um anel, a primeira faixa é o número e a de baixo, o nome. Serve para medir se o que está
+/// escrito fica no meio do anel (a letra de verdade, e não a caixa que a fonte diz que ela ocupa).
+pub(crate) fn ink_bands(img: &Image, s: f32, (cx, cy): (f32, f32), inner: f32, max_y: f32) -> Vec<[f32; 4]> {
+    const STRONG: u8 = 110;
+    let mut bands: Vec<[f32; 4]> = vec![];
+    let mut inside_band = false;
+    for y in ((cy - inner) * s) as u32..(max_y * s) as u32 {
+        let mut row: Option<(u32, u32)> = None;
+        for x in ((cx - inner) * s) as u32..((cx + inner) * s) as u32 {
+            let inside = (x as f32 / s - cx).hypot(y as f32 / s - cy) <= inner;
+            if inside && img.px[((y * img.w + x) * 4 + 3) as usize] >= STRONG {
+                row = Some(row.map_or((x, x), |(left, right)| (left.min(x), right.max(x))));
+            }
+        }
+        let Some((left, right)) = row else {
+            inside_band = false;
+            continue;
+        };
+        let (x0, x1, y0, y1) = (left as f32 / s, (right + 1) as f32 / s, y as f32 / s, (y + 1) as f32 / s);
+        match bands.last_mut() {
+            Some(band) if inside_band => *band = [band[0].min(x0), band[1], band[2].max(x1), y1],
+            _ => bands.push([x0, y0, x1, y1]),
+        }
+        inside_band = true;
+    }
+    bands
+}
+
 /// Quanto da imagem tem alguma tinta (0 a 1).
 fn ink(img: &Image) -> f32 {
     let painted = img.px.chunks_exact(4).filter(|p| p[3] > 8).count();
@@ -249,14 +280,25 @@ fn widgets_that_draw_their_size_change_draw_every_frame() {
     assert!(morphing > 0, "nenhum widget desenha a troca de tamanho");
 }
 
-/// Os rótulos dos cabeçalhos ("GITHUB", "SISTEMA", "POMODORO", "SPOTIFY"...) têm todos a mesma
-/// letra, em cor (nunca cinza); os do alto do cartão ficam todos na mesma altura (lado a lado,
-/// alinhados).
+/// O widget dono de um título: sem caixa alta, "Spotify" também é o nome de um app na lista de
+/// processos do Sistema, e lá não é título.
+fn label_owner(text: &str) -> &'static str {
+    match text {
+        "GitHub" => "github",
+        "Sistema" => "sistema",
+        "Pomodoro" => "pomodoro",
+        _ => "midia",
+    }
+}
+
+/// Os títulos dos cabeçalhos ("GitHub", "Sistema", "Pomodoro", "Spotify"...) têm todos a mesma
+/// letra, na cor do texto (como no macOS); os do alto do cartão ficam todos na mesma altura (lado
+/// a lado, alinhados).
 #[test]
 fn header_labels_look_the_same_everywhere() {
     use crate::gfx::{Face, Op};
     com();
-    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let labels = ["GitHub", "Sistema", "Pomodoro", "Spotify", "YouTube", "Mídia"];
     let mut top_base: Option<f32> = None;
     let mut seen = std::collections::HashSet::new();
     for (name, kind, cfg) in cases() {
@@ -265,21 +307,21 @@ fn header_labels_look_the_same_everywhere() {
             let _ = draw(kind.as_ref(), mode, &cfg);
             for rec in crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops {
                 let Op::Text { base, text, face, size, color, .. } = rec.op else { continue };
-                if !labels.contains(&text.as_str()) {
+                if !labels.contains(&text.as_str()) || label_owner(&text) != kind.key() {
                     continue;
                 }
                 seen.insert(text.clone());
                 assert!(face == Face::Semibold && size == widgets::LABEL_SIZE, "{name} {mode:?}: {text} em {face:?} {size}");
-                assert!(color.0.abs_diff(color.1).max(color.1.abs_diff(color.2)) > 20, "{name} {mode:?}: {text} sem cor");
+                assert_eq!(color, crate::ui::theme::FG, "{name} {mode:?}: {text} fora da cor do texto");
                 // os que ficam no alto do cartão (o da música fica junto do texto dela)
-                if base < 30.0 && !["SPOTIFY", "YOUTUBE", "MÍDIA"].contains(&text.as_str()) {
+                if base < 30.0 && !["Spotify", "YouTube", "Mídia"].contains(&text.as_str()) {
                     let first = *top_base.get_or_insert(base);
                     assert!((base - first).abs() < 0.01, "{name} {mode:?}: {text} em {base}, os outros em {first}");
                 }
             }
         }
     }
-    for label in ["GITHUB", "SISTEMA", "POMODORO"] {
+    for label in ["GitHub", "Sistema", "Pomodoro"] {
         assert!(seen.contains(label), "nenhum caso desenhou {label}");
     }
 }
@@ -290,7 +332,7 @@ fn header_labels_look_the_same_everywhere() {
 fn labels_on_medium_and_large_never_on_small() {
     use crate::gfx::Op;
     com();
-    let labels = ["GITHUB", "SISTEMA", "POMODORO", "SPOTIFY", "YOUTUBE", "MÍDIA"];
+    let labels = ["GitHub", "Sistema", "Pomodoro", "Spotify", "YouTube", "Mídia"];
     let mut checked = 0;
     for (name, kind, cfg) in cases() {
         // as vistas de dentro (o Sistema virado) e os avisos sem dados têm o próprio título
@@ -300,7 +342,7 @@ fn labels_on_medium_and_large_never_on_small() {
         let env = Env { cfg: &cfg, key: kind.key() };
         for &mode in kind.sizes() {
             let _ = draw(kind.as_ref(), mode, &cfg);
-            let has = crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops.iter().any(|rec| matches!(&rec.op, Op::Text { text, .. } if labels.contains(&text.as_str())));
+            let has = crate::card::morph::record(kind.as_ref(), mode, 1.0, 1.0, &env).ops.iter().any(|rec| matches!(&rec.op, Op::Text { text, .. } if labels.contains(&text.as_str()) && label_owner(text) == kind.key()));
             assert_eq!(has, mode != Mode::P, "{name} {mode:?}: rótulo {}", if has { "no pequeno" } else { "faltando" });
             checked += 1;
         }
@@ -664,11 +706,11 @@ fn zz_fingerprint() {
     let pic = pic.finish();
     let bd = crate::card::backdrop::Backdrop::from_picture(&pic, 20.0, S);
     let content = draw(all[0].1.as_ref(), Mode::M, &all[0].2);
-    out += &format!("vidro {:x}\n", hash(&bd.glass(&content, 22.0, 30, 20, 0.5)));
-    let base = bd.glass_base(content.w, content.h, 30, 20, 0.5);
+    out += &format!("vidro {:x}\n", hash(&bd.glass(&content, 22.0, 30, 20, 0.5, crate::card::backdrop::GlassLook::default())));
+    let base = bd.glass_base(content.w, content.h, 30, 20, 0.5, crate::card::backdrop::GlassLook::default());
     out += &format!("vidro base {:x}\n", hash(&base));
-    out += &format!("vidro fim {:x}\n", hash(&crate::card::backdrop::finish_glass(&base, &content, 22.0, S)));
-    out += &format!("vidro partes {:x}\n", hash(&crate::card::backdrop::GlassParts::new(&base, 22.0, S).compose(&content)));
+    out += &format!("vidro fim {:x}\n", hash(&crate::card::backdrop::finish_glass(&base, &content, 22.0, S, crate::card::backdrop::GlassLook::default())));
+    out += &format!("vidro partes {:x}\n", hash(&crate::card::backdrop::GlassParts::new(&base, 22.0, S, crate::card::backdrop::GlassLook::default()).compose(&content)));
     // o menu de vidro
     {
         use crate::widgets::MenuItem;

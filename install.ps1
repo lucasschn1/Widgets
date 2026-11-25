@@ -9,7 +9,8 @@
 #
 # Antes de fechar os widgets abertos, confere se o Windows deixa a versão nova abrir (o
 # Controle Inteligente de Aplicativos barra programas novos sem assinatura digital); se não
-# deixar, nada é trocado. Códigos de saída (o botão "Atualizar" do app os lê):
+# deixar, nada é trocado. Códigos de saída (as versões até a 3.22 rodavam este script pelo botão
+# "Atualizar" e liam estes códigos; as novas trocam o Widgets.exe sozinhas, em updates.rs):
 #   0 instalado e aberto; 3 o Windows barrou a versão nova (nada mudou);
 #   4 a versão nova não abriu depois de instalada (a anterior voltou); 1 outro erro.
 

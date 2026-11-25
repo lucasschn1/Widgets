@@ -334,6 +334,7 @@ impl App {
                         }
                     }
                     PanelKind::Settings(state) if id == "cidade" => state.city.typed(&text),
+                    PanelKind::Settings(state) if id == settings::SEARCH_ID => state.searched(&text),
                     PanelKind::Welcome(state) if id == "cidade" => {
                         state.city_text = text.clone();
                         state.city_place = None;
@@ -395,6 +396,19 @@ impl App {
                 }
             }
             (PanelKind::Settings(_), 0x0D) if id == "usuario" => self.apply_github_user(text),
+            // na busca: Esc apaga; Enter vai para a primeira opção achada
+            (PanelKind::Settings(_), 0x1B) if id == settings::SEARCH_ID => {
+                self.panels[i].win.set_entry(settings::SEARCH_ID, "");
+                if let PanelKind::Settings(state) = &mut self.panels[i].kind {
+                    state.searched("");
+                }
+                self.panels[i].win.dirty = true;
+            }
+            (PanelKind::Settings(state), 0x0D) if id == settings::SEARCH_ID => {
+                if let Some((page, y)) = state.first_result() {
+                    self.panel_action(i, Action::Find(page, y));
+                }
+            }
             _ => {}
         }
     }
@@ -407,9 +421,30 @@ impl App {
         match action {
             Action::Go(page) => {
                 if let PanelKind::Settings(state) = &mut self.panels[i].kind {
-                    state.go(page);
+                    // (escolher uma página no menu sai da busca)
+                    if state.searching() {
+                        state.searched("");
+                        self.panels[i].win.set_entry(settings::SEARCH_ID, "");
+                    }
+                    if let PanelKind::Settings(state) = &mut self.panels[i].kind {
+                        state.go(page);
+                    }
                 }
             }
+            Action::Find(page, y) => {
+                self.panels[i].win.set_entry(settings::SEARCH_ID, "");
+                if let PanelKind::Settings(state) = &mut self.panels[i].kind {
+                    state.find(page, y);
+                }
+            }
+            Action::Many(actions) => {
+                for action in actions {
+                    if i < self.panels.len() {
+                        self.panel_action(i, action);
+                    }
+                }
+            }
+            Action::SliderSet(id, value) => self.slider_moved(id, value, true),
             Action::Focus(id) => self.panels[i].win.focus_entry(&id, false),
             Action::Toggle(id) => self.toggle(i, id),
             Action::Notify(kind) => {
@@ -667,7 +702,6 @@ impl App {
             "desfoque" => ("desfoque", json!(value.round() as i64)),
             "escurecimento" => ("escurecimento", json!(value.round() / 100.0)),
             "texto" => ("texto", json!(value.round() / 100.0)),
-            "opacidade_ociosa" => ("opacidade_ociosa", json!(value.round() / 100.0)),
             "dur:foco" | "dur:pausa" | "dur:longa" => {
                 let phase = &id[4..];
                 let minutes = value.round() as u32;
@@ -722,7 +756,9 @@ impl App {
             let blur = config::setting_f64(&self.sh.cfg, "desfoque");
             self.sh.backdrop.check(blur);
         }
-        let redraw = matches!(name, "texto" | "*" | "animacoes");
+        // (o vidro líquido e o apagar mudam só o vidro, que o `present` refaz; as cores do tema
+        // claro estão no conteúdo)
+        let redraw = matches!(name, "texto" | "*" | "animacoes" | crate::data::shared::WALL_COLOR | crate::data::shared::LIGHT_THEME);
         for card in &mut self.cards {
             if redraw {
                 card.refresh(&self.sh);

@@ -172,6 +172,8 @@ fn window_shot(title: &str, w: f32, h: f32, draw: impl FnOnce(&mut crate::ui::pa
     sh.backdrop = bd;
     sh.text_scale = 1.0;
     sh.tint = GLASS_TINT;
+    // as imagens são as mesmas em qualquer PC: o vidro escuro, mesmo com o Windows no tema claro
+    sh.light = false;
     let sh = sh;
     let render = |key: &'static str, mode: Mode, s: f32| {
         let (kind, cfg) = readme_sample(key, mode);
@@ -273,7 +275,7 @@ fn compose(wall: &Image, bd: &Backdrop, items: &[Item], labels: &[Label]) -> Ima
     c.image(wall, 0.0, 0.0);
     for it in items {
         // sem sombra, como no app
-        let glass = bd.glass(&it.img, it.radius, it.x, it.y, GLASS_TINT);
+        let glass = bd.glass(&it.img, it.radius, it.x, it.y, GLASS_TINT, crate::card::backdrop::GlassLook::default());
         c.image(&glass, it.x as f32, it.y as f32);
     }
     for l in labels {
@@ -376,6 +378,9 @@ fn readme() {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
     }
     let cfg = empty_cfg();
+
+    // ---------- o ícone do app (o mesmo desenho do .ico e da bandeja) ----------
+    save(&crate::ui::tray::icon_image(128), &docs().join("icone.png"));
 
     // ---------- capa: os seis widgets no pequeno, se mexendo ----------
     {
@@ -670,7 +675,7 @@ fn readme() {
         let (cx, cy) = ((w - 40 - card_img.w) as i32, (h - 40 - card_img.h) as i32);
         let card_geo = (cx as f32, cy as f32, card_img.w as f32, card_img.h as f32, radius);
         // o cartão como aparece na tela: a ilha se transforma nele (e a partir dele)
-        let face = bd.glass(&card_img, radius, cx, cy, GLASS_TINT);
+        let face = bd.glass(&card_img, radius, cx, cy, GLASS_TINT, crate::card::backdrop::GlassLook::default());
         let with_card = compose(&wall, &bd, &[Item { img: card_img, radius, x: cx, y: cy }], &[]);
         let frames = crate::app::island::readme_frames(&info, card_geo, &face, (w as f32 / 2.0, 14.0), S);
         let mut list = String::new();

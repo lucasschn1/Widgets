@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use crate::card::backdrop::{finish_glass, Backdrop, GlassParts};
+use crate::card::backdrop::{finish_glass, Backdrop, GlassLook, GlassParts};
 use crate::gfx::{Canvas, Image, Kept};
 use crate::gfx::meter::{cycles_per_ms, thread_cycles as cycles};
 use crate::widgets::{Env, Kind, Layout, Mode};
@@ -95,14 +95,14 @@ fn perf() {
     let mut c = Canvas::new(w, h, S);
     crate::widgets::system::System::sample().draw(&mut c, Mode::M, &Env { cfg: &serde_json::json!({}), key: "sistema" });
     let content = c.finish();
-    let base = backdrop.glass_base(w, h, 300, 200, 0.4);
-    let parts = GlassParts::new(&base, r, S);
+    let base = backdrop.glass_base(w, h, 300, 200, 0.4, GlassLook::default());
+    let parts = GlassParts::new(&base, r, S, GlassLook::default());
     let k = RUNS * 4;
     println!("\nvidro {w} × {h}:");
     println!("  fundo (recorte, escurecer, granulado): passo a passo {:.2} ms, numa passada {:.2} ms (só quando o cartão anda)",
-        avg(k, || drop(backdrop.glass_base_steps(w, h, 300, 200, 0.4))), avg(k, || drop(backdrop.glass_base(w, h, 300, 200, 0.4))));
+        avg(k, || drop(backdrop.glass_base_steps(w, h, 300, 200, 0.4))), avg(k, || drop(backdrop.glass_base(w, h, 300, 200, 0.4, GlassLook::default()))));
     println!("  acabamento (reflexo, conteúdo, bordas, cantos): de uma vez {:.3} ms, por peças {:.3} ms (preparar as peças: {:.3} ms, só quando o fundo muda)",
-        avg(k, || drop(finish_glass(&base, &content, r, S))), avg(k, || drop(parts.compose(&content))), avg(RUNS, || drop(GlassParts::new(&base, r, S))));
+        avg(k, || drop(finish_glass(&base, &content, r, S, GlassLook::default()))), avg(k, || drop(parts.compose(&content))), avg(RUNS, || drop(GlassParts::new(&base, r, S, GlassLook::default()))));
     println!("  tela em memória vazia (criar e ler os pixels): {:.3} ms", avg(k, || drop(Canvas::new(w, h, S).finish())));
 }
 

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 
 use crate::card::entrance::{Entrance, Look};
-use crate::card::backdrop::GlassParts;
+use crate::card::backdrop::{GlassLook, GlassParts};
 use crate::gfx::{Canvas, Image, Kept};
 use crate::gfx::meter::{self, Step};
 use crate::gfx::output::{Frame, Output};
@@ -67,9 +67,13 @@ pub struct ResizeAnim {
 /// de cada coisa andar até o lugar novo.
 pub const MORPH_MS: u64 = 650;
 
-/// Do que o fundo do vidro guardado depende: canto na tela, tamanho, versão do fundo, escurecimento
-/// e o raio dos cantos.
-type BaseKey = ((i32, i32), (u32, u32), u64, u64, u32);
+/// Do que o fundo do vidro guardado depende: canto na tela, tamanho, versão do fundo, escurecimento,
+/// o raio dos cantos e o vidro (claro ou escuro, clássico ou líquido).
+type BaseKey = ((i32, i32), (u32, u32), u64, u64, u32, GlassLook);
+
+/// Do que o vidro montado com o conteúdo depende: canto na tela, versão do fundo, tamanho e o
+/// vidro.
+type ComposedKey = ((i32, i32), u64, (u32, u32), GlassLook);
 
 pub struct Slide {
     from: (i32, i32),
@@ -88,6 +92,9 @@ pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
     let layout = Layout::of(mode);
     let mut c = Canvas::new((layout.w * s).round() as u32, (layout.h * s).round() as u32, s);
     c.text_scale = sh.text_scale;
+    c.wall_color = sh.wall_color_main();
+    c.alert_hues = kind.alert_hues();
+    c.light = sh.glass_look(crate::widgets::own_background(kind.key())).light;
     let env = Env { cfg: &sh.cfg, key: kind.key() };
     kind.draw(&mut c, mode, &env);
     c.finish()
@@ -98,11 +105,9 @@ pub fn render_kind(kind: &dyn Kind, mode: Mode, s: f32, sh: &Shared) -> Image {
 const GLOW_RADIUS: f32 = 150.0;
 const GLOW_FRAME_MS: u64 = 33;
 
-/// Apertando uma área grande do widget (um anel, a capa, o relógio), o cartão inteiro afunda até
-/// este tamanho e volta com mola ao soltar, como no macOS; botões pequenos só escurecem.
+/// Apertando qualquer área clicável do widget, o cartão inteiro afunda até este tamanho e volta
+/// com mola ao soltar, como no macOS (o botão apertado, além disso, escurece).
 pub const PRESS_SCALE: f32 = 0.97;
-/// a área apertada precisa ocupar pelo menos isto do cartão para ele afundar inteiro
-const PRESS_WHOLE: f32 = 0.2;
 
 /// Numa pilha, a troca de widget: o de cima encolhe um pouco e some, e o novo cresce até o
 /// tamanho com mola enquanto aparece. A duração e quanto eles encolhem.
@@ -149,7 +154,7 @@ pub struct Card {
     pub expand_at: Option<Instant>,
     pub outside_since: Option<Instant>,
     pub content: Option<Image>,
-    composed: Option<((i32, i32), u64, (u32, u32), Kept)>,
+    composed: Option<(ComposedKey, Kept)>,
     /// o fundo do vidro (papel de parede desfocado, escurecido e com granulado): só muda quando o
     /// cartão anda, muda de tamanho, ou o fundo ou o escurecimento mudam
     base: Option<(BaseKey, Image, Option<GlassParts>)>,
@@ -168,8 +173,6 @@ pub struct Card {
     /// e se ele andou desde o último quadro
     glow: Option<(f32, f32)>,
     glow_moved: bool,
-    /// a área apertada é grande: o cartão inteiro afunda
-    press_whole: bool,
     /// numa pilha, embaixo de outro: a janela fica escondida e nada é redesenhado
     pub stacked: bool,
     /// numa pilha: a troca de widget em andamento (desde quando, true = este entra)
@@ -223,7 +226,6 @@ impl Card {
             last_frame: Instant::now(),
             glow: None,
             glow_moved: false,
-            press_whole: false,
             stacked: false,
             swap: None,
             dots: None,
@@ -316,8 +318,6 @@ impl Card {
 
     /// Começou a apertar uma área clicável (a que está sob o mouse).
     pub fn press_down(&mut self) {
-        let layout = self.layout(self.mode);
-        self.press_whole = self.hot.is_some_and(|((x0, y0, x1, y1, _), _)| (x1 - x0) * (y1 - y0) >= PRESS_WHOLE * layout.w * layout.h);
         self.pressing = true;
         self.press_anim = Some((Instant::now(), true));
     }
@@ -328,12 +328,8 @@ impl Card {
         self.press_anim = Some((Instant::now(), false));
     }
 
-    /// O tamanho do cartão agora (1: normal; menor apertando uma área grande; um tico maior na
-    /// volta da mola).
+    /// O tamanho do cartão agora (1: normal; menor apertando; um tico maior na volta da mola).
     pub fn press_scale(&self) -> f32 {
-        if !self.press_whole {
-            return 1.0;
-        }
         let depth = 1.0 - PRESS_SCALE;
         match self.press_anim {
             Some((at, true)) => 1.0 - depth * ease_out_quick(at.elapsed().as_secs_f32() * 1000.0 / 90.0),
@@ -492,10 +488,25 @@ impl Card {
             let (w, h) = self.card_size_of(mode);
             let mut c = Canvas::new(w as u32, h as u32, self.s);
             c.text_scale = sh.text_scale;
+            self.use_palette(&mut c, sh);
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw(&mut c, mode, &env);
             c.finish()
         })
+    }
+
+    /// A tela `c` desenha este widget com as cores dele agora: na cor do papel de parede do
+    /// monitor dele (com a opção ligada, deixando as cores de alerta como são) e na versão do
+    /// tema claro (com o vidro claro).
+    fn use_palette(&self, c: &mut Canvas, sh: &Shared) {
+        c.wall_color = sh.wall_color_at(self.card_rect());
+        c.alert_hues = self.kind.alert_hues();
+        c.light = self.glass_look(sh).light;
+    }
+
+    /// O vidro deste cartão: o de todos, menos no tema claro, se o widget pinta o próprio fundo.
+    pub fn glass_look(&self, sh: &Shared) -> GlassLook {
+        sh.glass_look(crate::widgets::own_background(self.kind.key()))
     }
 
     /// Redesenha o cartão com os dados atuais e mostra na tela.
@@ -562,18 +573,12 @@ impl Card {
     pub fn face(&self, sh: &Shared) -> Image {
         let content = self.render(self.mode, sh);
         let margin = self.margin;
-        sh.backdrop.glass(&content, self.radius_px(self.mode), self.pos.0 + margin, self.pos.1 + margin, sh.tint)
+        sh.backdrop.glass(&content, self.radius_px(self.mode), self.pos.0 + margin, self.pos.1 + margin, sh.tint, self.glass_look(sh))
     }
 
-    /// Opacidade da janela: os widgets esmaecem quando o mouse não está em cima.
-    pub fn opacity(&self, sh: &Shared) -> u8 {
-        let swap = self.swap_look().1;
-        let swap = swap * self.entrance_look().alpha;
-        let idle = sh.idle_opacity;
-        if sh.peeking || sh.editing || self.drag.is_some() || self.temp || idle >= 1.0 {
-            return (255.0 * swap).round() as u8;
-        }
-        (255.0 * (idle + (1.0 - idle) * self.hover) * swap).round() as u8
+    /// Opacidade da janela: inteira, menos entrando ou trocando de lugar numa pilha.
+    pub fn opacity(&self) -> u8 {
+        (255.0 * self.swap_look().1 * self.entrance_look().alpha).round() as u8
     }
 
     /// Mostra o cartão já desenhado sobre o vidro, com a margem e os detalhes por cima.
@@ -584,15 +589,16 @@ impl Card {
             return;
         }
         let margin = self.margin;
-        let key = (self.pos, sh.backdrop.version, (content.w, content.h));
-        if self.composed.as_ref().map(|c| (c.0, c.1, c.2)) != Some(key) {
+        let look = self.glass_look(sh);
+        let key: ComposedKey = (self.pos, sh.backdrop.version, (content.w, content.h), look);
+        if self.composed.as_ref().map(|c| c.0) != Some(key) {
             let (x, y) = (self.pos.0 + margin, self.pos.1 + margin);
             let radius = self.radius_px(self.mode);
-            let base_key: BaseKey = ((x, y), (content.w, content.h), sh.backdrop.version, sh.tint.to_bits(), radius.to_bits());
+            let base_key: BaseKey = ((x, y), (content.w, content.h), sh.backdrop.version, sh.tint.to_bits(), radius.to_bits(), look);
             let key_name = self.kind.key();
             let moved = self.base.as_ref().map(|b| b.0) != Some(base_key);
             if moved {
-                let base = meter::time(key_name, Step::Base, || sh.backdrop.glass_base(content.w, content.h, x, y, sh.tint));
+                let base = meter::time(key_name, Step::Base, || sh.backdrop.glass_base(content.w, content.h, x, y, sh.tint, look));
                 self.base = Some((base_key, base, None));
             }
             let (_, base, parts) = self.base.as_mut().unwrap();
@@ -600,18 +606,18 @@ impl Card {
                 if moved {
                     // num lugar novo (andando, arrastando), de uma vez: preparar as peças só vale
                     // a pena se o cartão ficar parado ali
-                    sh.backdrop.glass_on(base, content, radius, x, y)
+                    sh.backdrop.glass_on(base, content, radius, x, y, look)
                 } else {
                     // parado: só o conteúdo muda, montado sobre as peças guardadas
-                    parts.get_or_insert_with(|| sh.backdrop.glass_parts(base, radius, x, y)).compose(content)
+                    parts.get_or_insert_with(|| sh.backdrop.glass_parts(base, radius, x, y, look)).compose(content)
                 }
             });
             // (guardado: na placa de vídeo, o vidro é enviado uma vez só, não a cada quadro)
-            self.composed = Some((key.0, key.1, key.2, Kept::new(glass)));
+            self.composed = Some((key, Kept::new(glass)));
         }
-        let glass = &self.composed.as_ref().unwrap().3;
+        let glass = &self.composed.as_ref().unwrap().1;
         let (w, h) = (glass.w + 2 * margin as u32, glass.h + 2 * margin as u32);
-        let frame = Frame { w, h, s: self.s, pos: move_win.then_some(self.pos), alpha: self.opacity(sh), hit: self.hit_area(sh, (w, h)) };
+        let frame = Frame { w, h, s: self.s, pos: move_win.then_some(self.pos), alpha: self.opacity(), hit: self.hit_area(sh, (w, h)) };
         let mut out = std::mem::replace(&mut self.out, Output::Layered);
         meter::time(self.kind.key(), Step::Show, || out.show(self.hwnd, frame, |c| self.paint(c, sh)));
         self.out = out;
@@ -620,7 +626,7 @@ impl Card {
 
     /// O quadro do cartão: o vidro com o conteúdo, a camada animada e os detalhes por cima.
     fn paint(&self, c: &mut Canvas, sh: &Shared) {
-        let Some((_, _, _, glass)) = &self.composed else { return };
+        let Some((_, glass)) = &self.composed else { return };
         // sem sombra, como os widgets do macOS: em volta do vidro, a margem fica transparente (e
         // os cliques ali passam para a área de trabalho)
         // apertando uma área grande, o cartão inteiro afunda (e volta com mola); entrando, cresce
@@ -635,7 +641,11 @@ impl Card {
         let dy = dy + look.lift;
         c.image_kept(glass, MARGIN + dx, MARGIN + dy);
         if self.anim.is_none() {
+            // a camada animada também com as cores do widget (na cor do papel de parede, no tema
+            // claro); os botões do cartão, por cima, não
+            self.use_palette(c, sh);
             meter::time(self.kind.key(), Step::Overlay, || self.kind.overlay(c, self.mode, MARGIN + dx, MARGIN + dy));
+            (c.wall_color, c.light) = (None, false);
         }
         meter::time(self.kind.key(), Step::Decorate, || self.decorate(c, sh));
         c.reset_transform();
@@ -940,6 +950,7 @@ impl Card {
             // o widget desenha o caminho de um tamanho ao outro
             let mut c = Canvas::new(w, h, self.s);
             c.text_scale = sh.text_scale;
+            self.use_palette(&mut c, sh);
             let env = Env { cfg: &sh.cfg, key: self.key() };
             self.kind.draw_between(&mut c, anim.from, self.mode, progress, &env);
             c.finish()
@@ -947,6 +958,7 @@ impl Card {
             // as peças que existem nos dois tamanhos andam de um lugar para o outro
             let mut c = Canvas::new(w, h, self.s);
             c.text_scale = sh.text_scale;
+            self.use_palette(&mut c, sh);
             crate::card::morph::draw(&mut c, &recs.0, &recs.1, progress);
             c.finish()
         } else {
@@ -965,10 +977,10 @@ impl Card {
         let x = (anim.x as f32 + (anim.to.0 - anim.x) as f32 * eased).round() as i32;
         let y = (anim.y as f32 + (anim.to.1 - anim.y) as f32 * eased).round() as i32;
         let radius = anim.r0 + (anim.r1 - anim.r0) * eased;
-        let glass = sh.backdrop.glass(&content, radius, x + margin, y + margin, sh.tint);
+        let glass = sh.backdrop.glass(&content, radius, x + margin, y + margin, sh.tint, self.glass_look(sh));
         let mut img = Image::new(w + 2 * margin as u32, h + 2 * margin as u32);
         img.over(&glass, margin, margin);
-        let frame = Frame { w: img.w, h: img.h, s: self.s, pos: Some((x, y)), alpha: self.opacity(sh), hit: None };
+        let frame = Frame { w: img.w, h: img.h, s: self.s, pos: Some((x, y)), alpha: self.opacity(), hit: None };
         self.out.show_image(self.hwnd, frame, &img);
         if progress >= 1.0 {
             self.pos = anim.to;
@@ -1147,18 +1159,31 @@ mod tests {
         }
         let mut sh = Shared::new(serde_json::json!({}), serde_json::json!({}), 1.0);
         sh.animations = true;
-        sh.idle_opacity = 1.0;
         let mut c = card();
         c.enter(10_000.0, &sh);
-        assert_eq!(c.opacity(&sh), 0, "esperando a vez, invisível");
+        assert_eq!(c.opacity(), 0, "esperando a vez, invisível");
         assert!(c.next_frame().is_some(), "entrando, sem quadros");
         c.entrance = Some(Entrance::finished());
-        assert_eq!(c.opacity(&sh), 255);
+        assert_eq!(c.opacity(), 255);
         c.frame(&sh);
         assert!(c.entrance.is_none() && c.next_frame().is_none(), "terminou e continua animando");
         sh.animations = false;
         c.enter(0.0, &sh);
-        assert!(c.entrance.is_none() && c.opacity(&sh) == 255);
+        assert!(c.entrance.is_none() && c.opacity() == 255);
+    }
+
+    /// No tema claro, o vidro é claro, menos nos widgets que pintam o próprio fundo (o Tempo e a
+    /// Mídia), que ficam no escuro com o texto branco deles.
+    #[test]
+    fn light_theme_spares_widgets_with_their_own_background() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut sh = Shared::new(serde_json::json!({}), serde_json::json!({}), 1.0);
+        sh.light = true;
+        assert!(card().glass_look(&sh).light);
+        let tempo = Card::new(Box::new(crate::widgets::tempo::Tempo::sample("inicio", 0, 0.0, Mode::M)), HWND::default(), Mode::M, 1.0);
+        assert!(!tempo.glass_look(&sh).light);
     }
 
     /// Mudar de tamanho na hora (numa pilha) não deixa o desenho do tamanho de antes: senão o
@@ -1224,15 +1249,16 @@ mod tests {
         assert!((k - (1.0 - SWAP_SHRINK)).abs() < 1e-3 && a == 0.0, "{k} {a}");
     }
 
-    /// Apertando uma área grande (o anel), o cartão inteiro afunda e volta com mola, passando um
-    /// tico do tamanho; apertando um botão pequeno, só o realce dele muda.
+    /// Apertando qualquer área clicável (um botão pequeno ou o anel), o cartão inteiro afunda e
+    /// volta com mola, passando um tico do tamanho, como no macOS.
     #[test]
-    fn pressing_a_big_area_sinks_the_whole_card_and_springs_back() {
+    fn pressing_sinks_the_whole_card_and_springs_back() {
         let mut c = card();
         c.hot = Some(((10.0, 10.0, 40.0, 40.0, 8.0), HoverStyle::Surface));
         c.press_down();
         c.press_anim = Some((Instant::now() - Duration::from_millis(200), true));
-        assert_eq!(c.press_scale(), 1.0, "botão pequeno");
+        assert!((c.press_scale() - PRESS_SCALE).abs() < 1e-3, "botão pequeno: {}", c.press_scale());
+        c.press_up();
         c.hot = Some(((0.0, 0.0, 140.0, 140.0, 70.0), HoverStyle::Quiet));
         c.press_down();
         assert!(c.pressing);

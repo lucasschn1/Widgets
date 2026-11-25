@@ -127,8 +127,8 @@ pub struct App {
     next_update: Instant,
     /// busca em andamento: a resposta e se foi pedida pelo botão
     update_rx: Option<(std::sync::mpsc::Receiver<updates::Found>, bool)>,
-    /// o install.ps1 rodando (se ele terminar e o app continuar aberto, a atualização não foi)
-    installer: Option<std::process::Child>,
+    /// a versão nova sendo baixada e conferida (numa thread; pronta, troca e o app fecha)
+    installer: Option<std::sync::mpsc::Receiver<updates::Prepared>>,
     /// opção mexida por um slider, para aplicar no vidro daqui a pouco (sem pesar a cada pixel)
     pending_setting: Option<(Instant, &'static str)>,
     /// abrir as boas-vindas (primeira vez)
@@ -383,7 +383,7 @@ impl App {
             let area = win::work_areas()[0];
             (area.2 - 200, area.1 + 100)
         });
-        let s = win::scale_at(anchor.0 + 150, anchor.1 + 100);
+        let s = win::widget_scale_at(anchor.0 + 150, anchor.1 + 100);
         let mut card = Card::new(kind, hwnd, mode, s);
         if gpu {
             card.out = crate::gfx::output::Output::gpu(hwnd);
@@ -394,7 +394,7 @@ impl App {
         };
         // está num monitor com outra escala?
         let (x0, y0, x1, y1) = card.card_rect();
-        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        let scale = win::widget_scale_at((x0 + x1) / 2, (y0 + y1) / 2);
         if (scale - card.s).abs() > 0.01 {
             card.set_scale(scale);
         }
@@ -640,7 +640,7 @@ impl App {
         self.sh.save();
         self.send_to_back(i);
         let (x0, y0, x1, y1) = self.cards[i].card_rect();
-        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        let scale = win::widget_scale_at((x0 + x1) / 2, (y0 + y1) / 2);
         if (scale - self.cards[i].s).abs() > 0.01 {
             self.cards[i].set_scale(scale);
             self.cards[i].refresh(&self.sh);
@@ -1715,7 +1715,14 @@ impl App {
     // ---------- verificações periódicas ----------
 
     fn check_backdrop(&mut self) {
+        let was_light = self.sh.light;
         self.sh.read_preferences();
+        if self.sh.light != was_light {
+            // o Windows trocou de tema: os widgets trocam junto (vidro e cores)
+            for card in &mut self.cards {
+                card.refresh(&self.sh);
+            }
+        }
         let blur = config::setting_f64(&self.sh.cfg, "desfoque");
         let changed = self.sh.backdrop.check(blur);
         let progman = win::desktop_window();
@@ -1726,7 +1733,11 @@ impl App {
             }
             // (trocar de monitor é com o `check_screens`)
             if changed && c.content.is_some() && !c.animating() {
-                c.present(&self.sh, false);
+                if self.sh.wall_color {
+                    c.refresh(&self.sh); // as cores seguem o papel de parede novo
+                } else {
+                    c.present(&self.sh, false);
+                }
             }
         }
     }
@@ -2220,17 +2231,28 @@ impl App {
         self.installer = updates::install();
     }
 
-    /// O install.ps1 terminou e este app continua aberto: a atualização não aconteceu (deu
-    /// certo, ele teria fechado este app). Diz o porquê.
+    /// A versão nova chegou e foi conferida: troca os arquivos e fecha este app (a nova abre
+    /// sozinha). Não deu: diz o porquê (sem o Widgets.exe solto no Release, abre a página dele).
     fn poll_installer(&mut self) {
-        let Some(child) = &mut self.installer else { return };
-        let code = match child.try_wait() {
-            Ok(None) => return, // ainda rodando
-            Ok(Some(status)) => status.code(),
-            Err(_) => None,
+        let Some(rx) = &self.installer else { return };
+        let prepared = match rx.try_recv() {
+            Ok(prepared) => prepared,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return, // ainda baixando
+            Err(_) => Err(updates::Failure::Network),
         };
         self.installer = None;
-        let (title, detail) = updates::failure_message(code);
+        let failure = match prepared.and_then(|()| updates::switch_to_new()) {
+            Ok(()) => {
+                self.sh.save();
+                self.exit();
+                return;
+            }
+            Err(failure) => failure,
+        };
+        if failure == updates::Failure::NoExe {
+            updates::open_releases();
+        }
+        let (title, detail) = updates::failure_message(failure);
         self.update_status = title.to_string();
         self.toast(title, Some(detail), "close", WARNING, None);
         self.panels_changed();

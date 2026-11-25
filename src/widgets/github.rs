@@ -249,9 +249,13 @@ const fn grid_h(step: f32) -> f32 {
     7.0 * step - GAP
 }
 
-/// os cinco níveis do mapa: o dia vazio, quase apagado, e o verde cada vez mais forte
-const GREEN: Rgba = Rgba::rgb(48, 209, 88);
-const LEVELS: [Rgba; 5] = [Rgba(255, 255, 255, 18), Rgba(GREEN.0, GREEN.1, GREEN.2, 71), Rgba(GREEN.0, GREEN.1, GREEN.2, 128), Rgba(GREEN.0, GREEN.1, GREEN.2, 191), Rgba::rgb(76, 224, 122)];
+/// os cinco níveis do mapa: o dia vazio, quase apagado, e o verde cada vez mais claro. Verdes
+/// sólidos, com o brilho subindo em passos que se distinguem sobre o vidro escuro (o mesmo verde
+/// com mais ou menos transparência ficava parecido de um nível para o outro; veja o teste
+/// `levels_are_told_apart`)
+const LEVELS: [Rgba; 5] = [Rgba(255, 255, 255, 18), Rgba::rgb(24, 92, 52), Rgba::rgb(30, 146, 68), Rgba::rgb(48, 198, 88), Rgba::rgb(126, 236, 152)];
+/// O contorno do quadrado de hoje: o verde mais claro dos níveis.
+const TODAY: Rgba = LEVELS[4];
 
 const FETCH_EVERY: Duration = Duration::from_secs(10 * 60);
 const RETRY: Duration = Duration::from_secs(2 * 60);
@@ -344,12 +348,11 @@ fn grouped(number: i64) -> String {
     out
 }
 
-/// O período de uma faixa: "nov 2025 – mar" (o ano do fim só quando muda).
+/// O período de uma faixa, sempre do mesmo jeito: os dois meses e o ano do fim ("nov – mar
+/// 2026", "mar – jul 2026"). Antes o ano aparecia ora no começo, ora nos dois lados.
 fn band_range(first: i64, last: i64) -> String {
     let (first, last) = (util::civil_from_days(first), util::civil_from_days(last));
-    let end_month = MONTHS[last.month as usize - 1];
-    let end = if first.year == last.year { end_month.to_string() } else { format!("{end_month} {}", last.year) };
-    format!("{} {} – {end}", MONTHS[first.month as usize - 1], first.year)
+    format!("{} – {} {}", MONTHS[first.month as usize - 1], MONTHS[last.month as usize - 1], last.year)
 }
 
 /// "Nenhuma contribuição", "1 contribuição", "1.500 contribuições".
@@ -535,7 +538,7 @@ impl GitHub {
     }
 
     /// Os quadrados de um bloco: os dias que já passaram (sem dados: o nível vazio) e hoje com
-    /// um contorno.
+    /// um contorno verde (branco, parecia uma caixa de marcar).
     fn draw_grid(c: &mut Canvas, grid: &Grid, days: &HashMap<i64, (i64, i64)>, today: i64) {
         let cell = grid.cell();
         let radius = cell * 0.3;
@@ -544,7 +547,7 @@ impl GitHub {
             let level = days.get(&day).map_or(0, |&(level, _)| level).clamp(0, 4) as usize;
             c.fill_round_rect(x, y, x + cell, y + cell, radius, LEVELS[level]);
             if day == today {
-                c.stroke_round_rect(x + 0.75, y + 0.75, x + cell - 0.75, y + cell - 0.75, radius - 0.5, WHITE.alpha(0.9), 1.5);
+                c.stroke_round_rect(x + 0.75, y + 0.75, x + cell - 0.75, y + cell - 0.75, radius - 0.5, TODAY, 1.5);
             }
         }
     }
@@ -610,13 +613,13 @@ impl Kind for GitHub {
                 // (na mesma altura de quando os dados chegam: o rótulo não pula; o pequeno não
                 // tem rótulo)
                 if mode != Mode::P {
-                    super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                    super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 }
             } else if mode == Mode::G {
-                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 c.text(PAD, 36.0, &self.msg, Face::Semibold, 14.0, FG, Anchor::LA, Some(W - 2.0 * PAD));
             } else if mode == Mode::P {
-                super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+                super::draw_label(c, PAD, HEAD_Y, "GitHub");
                 for (i, line) in c.wrap(&self.msg, Face::Semibold, 12.0, SMALL - 2.0 * PAD, 4).iter().enumerate() {
                     c.text(PAD, 36.0 + 17.0 * i as f32, line, Face::Semibold, 12.0, FG, Anchor::LA, Some(SMALL - 2.0 * PAD));
                 }
@@ -626,7 +629,7 @@ impl Kind for GitHub {
             return;
         };
         if mode != Mode::P {
-            super::draw_label(c, PAD, HEAD_Y, "GITHUB", GITHUB_GREEN);
+            super::draw_label(c, PAD, HEAD_Y, "GitHub");
         }
         Self::draw_total(c, data.total, mode);
         let days = self.by_day();
@@ -815,13 +818,17 @@ mod tests {
         }
     }
 
+    /// Cada nível se distingue do anterior sobre o vidro escuro: o brilho (a luminância relativa
+    /// da WCAG) sobe pelo menos 40% de um para o outro; e o dia vazio fica quase apagado.
     #[test]
-    fn levels_get_stronger() {
-        for w in LEVELS.windows(2) {
-            assert!(w[1].3 >= w[0].3, "{w:?}");
+    fn levels_are_told_apart() {
+        let glass = Rgba::rgb(42, 40, 60);
+        for pair in LEVELS.windows(2) {
+            let (dimmer, brighter) = (pair[0].over(glass), pair[1].over(glass));
+            assert!(brighter.luminance() > dimmer.luminance(), "{pair:?}: não clareia");
+            assert!(contrast(brighter, dimmer) >= 1.4, "{pair:?}: {:.2}", contrast(brighter, dimmer));
         }
         assert!(LEVELS[0].3 < 30, "o dia vazio chama atenção");
-        assert_eq!((LEVELS[1].0, LEVELS[1].1, LEVELS[1].2), (GREEN.0, GREEN.1, GREEN.2));
     }
 
     #[test]
@@ -833,8 +840,8 @@ mod tests {
         assert_eq!(amount(1), "1 contribuição");
         assert_eq!(amount(1500), "1.500 contribuições");
         let d = |y, m, d| util::days_from_civil(y, m, d);
-        assert_eq!(band_range(d(2026, 3, 1), d(2026, 7, 4)), "mar 2026 – jul");
-        assert_eq!(band_range(d(2025, 11, 9), d(2026, 3, 14)), "nov 2025 – mar 2026");
+        assert_eq!(band_range(d(2026, 3, 1), d(2026, 7, 4)), "mar – jul 2026");
+        assert_eq!(band_range(d(2025, 11, 9), d(2026, 3, 14)), "nov – mar 2026");
     }
 
     /// O cache de uma versão antiga (com a lista de atividades) ainda abre, e o novo não a guarda.

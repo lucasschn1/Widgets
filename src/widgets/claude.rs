@@ -91,10 +91,14 @@ const GROW_MS: f32 = 900.0;
 const TURN_MS: f32 = 450.0;
 /// O arco acima de 90%.
 const RED: Rgba = crate::ui::theme::RED;
+/// Com a cor do papel de parede, os matizes que não mudam (graus no OKLab): o vermelho do limite
+/// (uns 27°) e o dos avisos (uns 34°); o laranja do Claude (uns 59°) muda.
+const ALERT_HUES: (f32, f32) = (15.0, 45.0);
 
 // ---------- fontes: a Outfit, embutida no app ----------
 /// a porcentagem
-const NUM: Face = Face::Custom("Outfit", 300);
+/// os números grandes (os mesmos dos outros widgets)
+const NUM: Face = super::PERCENT;
 /// os textos
 const TEXT: Face = Face::Custom("Outfit", 400);
 /// os títulos e o botão
@@ -126,13 +130,13 @@ const HISTORY_EVERY: Duration = Duration::from_secs(30 * 60);
 const FRAME: Duration = Duration::from_millis(16);
 /// A altura do centro do Clawd sozinho embaixo de um medidor (na abertura de baixo do anel, no
 /// lugar do sol) e o tamanho dos quadradinhos dele aí (o `unit` de `clawd::draw`). No pequeno,
-/// um pouco mais embaixo: o gorro, a lâmpada, o chapéu e os "z" não chegam ao "Uso diário".
+/// um pouco mais embaixo: o gorro, a lâmpada, o chapéu e os "z" não chegam ao "Diário".
 const CRAB_Y: f32 = 127.0;
 const CRAB_Y_SMALL: f32 = 129.0;
 const CRAB_UNIT_SOLO: f32 = 2.0;
 /// No médio com números, o Clawd fica no meio, entre os dois anéis: o centro dele e o tamanho
-/// dos quadradinhos (2,4 pontos: 3 pixels a 125%, como no pequeno). Embaixo dele, o que está
-/// fazendo; embaixo de cada anel, quando ele reinicia.
+/// dos quadradinhos (2,4 pontos: 3 pixels a 125%, como no pequeno; maior, com 4, ele tomava o
+/// cartão). Embaixo dele, o que está fazendo; embaixo de cada anel, quando ele reinicia.
 const CRAB_MID_Y: f32 = 76.0;
 const CRAB_UNIT_MID: f32 = 2.4;
 const DOING_Y: f32 = 101.0;
@@ -246,6 +250,12 @@ fn presence(was: bool, will: bool, p: f32, delay: f32, dur: f32, out: f32) -> f3
     }
 }
 
+/// No médio com números, o rótulo vai no alto, no meio, entre os dois anéis (em cima do Clawd).
+fn draw_medium_label(c: &mut Canvas) {
+    let w = c.text_width(LABEL, Face::Semibold, super::LABEL_SIZE);
+    super::draw_label(c, (WIDE - w) / 2.0, super::LABEL_Y, LABEL);
+}
+
 /// O medidor `g` com o tamanho multiplicado por `s`, no mesmo centro.
 fn scaled(g: &Geom, s: f32) -> Geom {
     Geom { r: g.r * s, w: g.w * s, num: g.num * s, cy: g.cy, gauges: &[] }
@@ -261,10 +271,12 @@ enum Limit {
 }
 
 impl Limit {
+    /// O nome embaixo do número do anel: só "Diário" e "Semanal" (o rótulo do cartão já diz que
+    /// é o uso do Claude; "Uso diário" repetia a palavra em cada anel).
     fn name(self) -> &'static str {
         match self {
-            Limit::Daily => "Uso diário",
-            Limit::Weekly => "Uso semanal",
+            Limit::Daily => "Diário",
+            Limit::Weekly => "Semanal",
         }
     }
 
@@ -284,16 +296,40 @@ struct Geom {
 }
 
 const WIDE_Q: f32 = WIDE / 4.0;
-/// O título do grande (o Clawd e "Uso do Claude"): canto e tamanho da letra.
-const BRAND_X: f32 = 22.0;
+/// As barras dos dias que não são o de mais uso, no "Dias em que você mais usa" do grande.
+const OTHER_DAYS: Rgba = Rgba(255, 255, 255, 72);
+/// A altura dos algarismos da porcentagem do anel, em frações do tamanho da letra (medida na
+/// fonte dos números grandes).
+const DIGIT_H: f32 = 0.72;
+/// O espaço entre a linha de base do número e o alto do nome do anel ("Diário").
+const NAME_GAP: f32 = 6.0;
+
+/// O tamanho da letra do nome embaixo do número do anel `g`.
+fn name_size(g: &Geom) -> f32 {
+    (g.num * 0.29).clamp(10.5, 12.0)
+}
+
+/// A linha de base do número do anel `g`: o número e o nome embaixo dele formam um bloco (do alto
+/// dos algarismos ao pé do nome) com o meio no centro do círculo.
+fn number_base(g: &Geom) -> f32 {
+    g.cy + (DIGIT_H * g.num - NAME_GAP - name_size(g)) / 2.0
+}
+/// O rótulo do widget ("USO DO CLAUDE"), no mesmo lugar e na mesma letra dos rótulos dos outros
+/// widgets ("GITHUB", "SISTEMA"...), na cor do Claude.
+const LABEL: &str = "Uso do Claude";
+/// A margem de dentro do grande: um pouco maior que a dos outros widgets (`CARD_PAD`), porque o
+/// alto do cartão é aberto (o rótulo e o Clawd, sem uma lista que encoste nas bordas) e, colado
+/// no canto arredondado, o rótulo parecia apertado.
+const LARGE_INSET: f32 = 22.0;
+/// No grande, o rótulo fica no canto, na margem do cartão.
+const BRAND_X: f32 = LARGE_INSET;
 const BRAND_Y: f32 = 20.0;
-const BRAND_SIZE: f32 = 14.0;
-/// Embaixo do nome: a que distância dele e até onde vai (sem chegar ao Clawd, com folga para a
+/// Embaixo do rótulo: a que distância dele e até onde vai (sem chegar ao Clawd, com folga para a
 /// caneca do lado dele e para ele andar até a plaquinha, 4 quadradinhos à esquerda).
-const SUBTITLE_DY: f32 = 21.0;
+const SUBTITLE_DY: f32 = 16.0;
 const SUBTITLE_W: f32 = LARGE_CRAB_X - (clawd::COLS / 2.0 + 4.0) * clawd::CELL * CRAB_UNIT_MID - 10.0 - BRAND_X;
 /// O Clawd no grande: no canto de cima à direita, com o notebook de lado chegando à margem.
-const LARGE_CRAB_X: f32 = WIDE - 22.0 - (clawd::SIDE_COLS - clawd::COLS / 2.0) * clawd::CELL * CRAB_UNIT_MID;
+const LARGE_CRAB_X: f32 = WIDE - LARGE_INSET - (clawd::SIDE_COLS - clawd::COLS / 2.0) * clawd::CELL * CRAB_UNIT_MID;
 const LARGE_CRAB_Y: f32 = 36.0;
 
 fn geom(mode: Mode) -> Geom {
@@ -1044,16 +1080,14 @@ impl Claude {
             c.fill_circle(dx, dy, dot, FG);
         }
         // o número com o nome embaixo, os dois juntos no meio do círculo
-        let label = (g.num * 0.29).clamp(10.5, 12.0);
-        let cap = g.num * 0.7;
-        let base = cy + (cap - label - 8.0) / 2.0;
+        let base = number_base(g);
         match v {
             Some(v) => percent(c, cx, base, count.unwrap_or((v * 100.0).round()), g.num),
             None => {
                 c.text(cx, base, "–", NUM, g.num, FG.alpha(0.4), Anchor::MS, None);
             }
         }
-        c.text(cx, base + 6.0, limit.name(), TEXT, label, MUTED, Anchor::MA, None);
+        c.text(cx, base + NAME_GAP, limit.name(), TEXT, name_size(g), MUTED, Anchor::MA, None);
         // (sem o ícone, o Clawd ou a nota de quando reinicia está no lugar dele)
         if icon {
             gauge_icon(c, g, cx, limit);
@@ -1094,11 +1128,11 @@ impl Claude {
     /// O que só o grande tem, além dos anéis e das notas: o nome no alto (o Clawd vai à parte),
     /// de onde vêm os números, a linha, os dias da semana e o ritmo do diário.
     fn draw_large_parts(&self, c: &mut Canvas, now: f64, r: &Reveal) {
-        let pad = 22.0;
+        let pad = LARGE_INSET;
         faded(c, r.head, |c| {
-            // o nome desce um pouco enquanto aparece
+            // o rótulo desce um pouco enquanto aparece
             let y = BRAND_Y - (1.0 - r.head) * 8.0;
-            c.text(BRAND_X, y, "Uso do Claude", BOLD, BRAND_SIZE, FG, Anchor::LA, None);
+            super::draw_label(c, BRAND_X, y, LABEL);
             c.text(BRAND_X, y + SUBTITLE_DY, &self.subtitle(now), TEXT, 10.5, MUTED, Anchor::LA, Some(SUBTITLE_W));
         });
         // a linha abre do meio
@@ -1163,6 +1197,7 @@ impl Claude {
             return;
         }
         self.draw_gauges(c, Mode::M, now, None);
+        draw_medium_label(c);
         let doing = self.doing_here();
         if !doing.is_empty() {
             c.text(WIDE / 2.0, DOING_Y, doing, TEXT, 10.5, MUTED, Anchor::MA, None);
@@ -1172,11 +1207,11 @@ impl Claude {
     }
 
     fn draw_large(&self, c: &mut Canvas, now: f64) {
-        let pad = 22.0;
+        let pad = LARGE_INSET;
         self.crab(c, Mode::G);
         self.draw_gauges(c, Mode::G, now, None);
         if !self.has_data() {
-            c.text(BRAND_X, BRAND_Y, "Uso do Claude", BOLD, BRAND_SIZE, FG, Anchor::LA, None);
+            super::draw_label(c, BRAND_X, BRAND_Y, LABEL);
             let (title, text) = self.waiting_text();
             let top = 262.0;
             c.text(WIDE / 2.0, top, title, BOLD, 13.0, FG, Anchor::MA, Some(WIDE - 2.0 * pad));
@@ -1194,8 +1229,9 @@ impl Claude {
     }
 
     /// Os dias da semana em que mais se usa: uma barra por dia (o de mais uso em laranja cheio,
-    /// com a parte dele no total em cima) e o dia de hoje com o nome em branco. `bars`: quanto
-    /// cada barra já subiu (1: inteira; na troca de tamanho, sobem uma depois da outra).
+    /// com a parte dele no total em cima; os outros em cinza claro) e o dia de hoje escrito
+    /// "hoje", em branco. `bars`: quanto cada barra já subiu (1: inteira; na troca de tamanho,
+    /// sobem uma depois da outra).
     fn draw_weekdays(&self, c: &mut Canvas, x0: f32, y0: f32, x1: f32, y1: f32, bars: &[f32; 7]) {
         const NAMES: [&str; 7] = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
         let days = self.weekdays();
@@ -1221,14 +1257,17 @@ impl Claude {
                 c.fill_round_rect(bx0, bars_top, bx1, base, 6.0, WHITE.alpha(0.06));
                 if max > 0.0 && days[i] > 0.0 {
                     let h = ((base - bars_top) * (days[i] / max) as f32).max(12.0) * grow;
-                    let color = if Some(i) == top { ORANGE } else { ORANGE.mix(WHITE, 0.2).alpha(0.5) };
+                    // (os outros dias em cinza: um laranja translúcido sobre o vidro azulado virava marrom)
+                    let color = if Some(i) == top { ORANGE } else { OTHER_DAYS };
                     c.fill_round_rect(bx0, base - h, bx1, base, 6.0_f32.min(h / 2.0), color);
                     if Some(i) == top {
                         let share = format!("{}%", (days[i] / total * 100.0).round());
                         c.text(cx, base - h - 6.0, &share, TEXT, 10.5, FG, Anchor::MS, None);
                     }
                 }
-                c.text(cx, base + 7.0, name, TEXT, 10.0, if i == today { FG } else { MUTED }, Anchor::MA, None);
+                // hoje escrito por extenso: o branco sozinho parecia mais um destaque, ao lado do laranja
+                let (name, color) = if i == today { ("hoje", FG) } else { (*name, MUTED) };
+                c.text(cx, base + 7.0, name, TEXT, 10.0, color, Anchor::MA, None);
             });
         }
         if top.is_none() {
@@ -1247,18 +1286,19 @@ impl Claude {
     /// quadradinhos trocam de tamanho no alto do pulo), pousa agachado e volta ao que fazia.
     fn crab_between(&self, from: Mode, to: Mode, p: f32) -> (f32, f32, f32, clawd::Pose) {
         let ((ax, ay, au), (bx, by, bu)) = (self.crab_spot(from), self.crab_spot(to));
+        let xmas = self.crab.xmas.get();
         if p < JUMP.0 {
-            return (ax, ay, au, clawd::jump_pose(true));
+            return (ax, ay, au, clawd::jump_pose(true, xmas));
         }
         if p >= LANDED {
             return (bx, by, bu, self.crab_pose(to));
         }
         if p >= JUMP.1 {
-            return (bx, by, bu, clawd::jump_pose(true));
+            return (bx, by, bu, clawd::jump_pose(true, xmas));
         }
         let s = ease_in_out((p - JUMP.0) / (JUMP.1 - JUMP.0));
         let (x, y) = (ax + (bx - ax) * s, ay + (by - ay) * s - JUMP_H * 4.0 * s * (1.0 - s));
-        (x, y, if s < 0.5 { au } else { bu }, clawd::jump_pose(false))
+        (x, y, if s < 0.5 { au } else { bu }, clawd::jump_pose(false, xmas))
     }
 
     /// Um quadro da troca de tamanho, a `p` (0 a 1) do caminho de `from` para `to`, com tudo no
@@ -1298,7 +1338,8 @@ impl Claude {
             let xs = [mix(x0[0], x1[0]), mix(x0[1], x1[1])];
             faded(c, presence(na.is_some(), nb.is_some(), p, 0.5, 0.35, 0.25), |c| self.draw_notes(c, now, xs, mix(n0.0, n1.0), mix(n0.1, n1.1)));
         }
-        // o que ele está fazendo, embaixo dele no médio
+        // no médio: o rótulo no alto e o que ele está fazendo, embaixo dele
+        faded(c, presence(from == Mode::M, to == Mode::M, p, 0.6, 0.3, 0.2), draw_medium_label);
         let doing = self.doing_here();
         if !doing.is_empty() {
             faded(c, presence(from == Mode::M, to == Mode::M, p, 0.7, 0.3, 0.2), |c| {
@@ -1461,13 +1502,21 @@ impl Default for Claude {
 }
 
 /// A porcentagem no meio do medidor: o número `at` (de 0 a 100; quebrado, contando, com os
-/// dígitos rolando), na fonte dos números grandes dos outros widgets, centrado em `x` e apoiado na
-/// linha de base `y`, e o "%" menor logo depois dele.
+/// dígitos rolando), na fonte dos números grandes dos outros widgets, apoiado na linha de base
+/// `y`, e o "%" menor logo depois dele; os dois com o centro óptico em `x`
+/// (`super::optical_start`).
 fn percent(c: &mut Canvas, x: f32, y: f32, at: f64, size: f32) {
     let nw = c.text_width(&format!("{}", at.round()), NUM, size);
-    odometer::draw_counting(c, x - nw / 2.0, y, at, "", NUM, size, FG, Anchor::LS);
-    c.text(x + nw / 2.0 + 1.0, y, "%", NUM, size * 0.42, FG.alpha(0.7), Anchor::LS, None);
+    let pct = size * PERCENT_SIGN;
+    let x0 = super::optical_start(x, nw, SIGN_GAP + c.text_width("%", NUM, pct));
+    odometer::draw_counting(c, x0, y, at, "", NUM, size, FG, Anchor::LS);
+    c.text(x0 + nw + SIGN_GAP, y, "%", NUM, pct, FG.alpha(0.7), Anchor::LS, None);
 }
+
+/// O tamanho do "%" depois da porcentagem, em frações do tamanho do número.
+const PERCENT_SIGN: f32 = 0.42;
+/// O espaço entre o número e o "%".
+const SIGN_GAP: f32 = 1.0;
 
 /// O ícone na abertura de baixo do medidor `g` com o centro em `cx`: o sol (diário) ou o
 /// calendário (semanal).
@@ -1529,6 +1578,10 @@ fn day_and_time(epoch: f64, now: f64) -> String {
 }
 
 impl Kind for Claude {
+    /// O vermelho de perto do limite e dos avisos (o laranja do Claude segue o papel de parede).
+    fn alert_hues(&self) -> Option<(f32, f32)> {
+        Some(ALERT_HUES)
+    }
     fn key(&self) -> &'static str {
         "claude"
     }
@@ -1561,9 +1614,8 @@ impl Kind for Claude {
         if self.snowing() { clawd::SNOW_FPS } else { 0 }
     }
 
-    fn perch_from(&self, mode: Mode) -> Option<(f32, f32)> {
-        let (cx, cy, _) = self.crab_spot(mode);
-        Some((cx, cy))
+    fn perch_from(&self, mode: Mode) -> Option<(f32, f32, f32)> {
+        Some(self.crab_spot(mode))
     }
 
     fn set_perched(&mut self, on: bool) {
@@ -1893,18 +1945,20 @@ mod tests {
             g.gauges.to_vec()
         };
         // o número e o nome no meio de cada anel
-        for (_, x) in drawn {
-            let cap = g.num * 0.7;
-            let label = (g.num * 0.29).clamp(10.5, 12.0);
-            let base = g.cy + (cap - label - 8.0) / 2.0;
+        for (limit, x) in drawn {
+            let (cap, label, base) = (DIGIT_H * g.num, name_size(&g), number_base(&g));
             out.push(("número", [x - g.num * 0.85, base - cap - 1.0, x + g.num * 0.85, base + 1.0]));
-            out.push(("nome do anel", [x - label * 2.4, base + 5.0, x + label * 2.4, base + 6.0 + label * 1.2]));
+            // (cada letra do nome tem uns 0,58 do tamanho da letra de largura; sem letras que
+            // descem da linha, o pé do nome fica a um tamanho de letra do alto dele)
+            let half = label * 0.29 * limit.name().chars().count() as f32 + 1.0;
+            out.push(("nome do anel", [x - half, base + NAME_GAP - 1.0, x + half, base + NAME_GAP + label * 1.05]));
         }
         match mode {
             Mode::P if w.needs_connect() && w.view.link == Link::Off => {
                 out.push(("Uso do Claude", [32.0, 82.0, 122.0, 98.0]));
             }
             Mode::M if w.has_data() => {
+                out.push(("rótulo", [WIDE / 2.0 - 40.0, super::super::LABEL_Y - 1.0, WIDE / 2.0 + 40.0, super::super::LABEL_Y + 12.0]));
                 out.push(("o que ele faz", [WIDE / 2.0 - 40.0, DOING_Y - 1.0, WIDE / 2.0 + 40.0, DOING_Y + 14.0]));
                 for x in gauge_xs(Mode::M) {
                     out.push(("nota", [x - NOTE_W / 2.0, NOTE_Y - 1.0, x + NOTE_W / 2.0, NOTE_Y + 14.0]));
@@ -1915,7 +1969,7 @@ mod tests {
                 out.push(("texto", [170.0, 44.0, WIDE - 16.0, 88.0]));
             }
             Mode::G => {
-                out.push(("Uso do Claude", [BRAND_X, BRAND_Y - 2.0, 124.0, BRAND_Y + 16.0]));
+                out.push(("rótulo", [BRAND_X, BRAND_Y - 2.0, BRAND_X + 90.0, BRAND_Y + 12.0]));
                 out.push(("subtítulo", [BRAND_X, BRAND_Y + SUBTITLE_DY - 1.0, BRAND_X + SUBTITLE_W, BRAND_Y + SUBTITLE_DY + 14.0]));
             }
             _ => {}
@@ -2005,7 +2059,7 @@ mod tests {
         }
         let w = Claude::sample();
         let (cx, cy, unit) = w.crab_spot(Mode::M);
-        // do tamanho do pequeno: a 125%, 3 pixels por quadradinho (antes eram 2)
+        // do tamanho do pequeno: a 125%, 3 pixels por quadradinho
         let px = |u: f32| (u * 1.25).round();
         assert_eq!(px(unit), 3.0);
         assert_eq!(px(unit), px(w.crab_spot(Mode::P).2), "do mesmo tamanho que no pequeno");
@@ -2150,9 +2204,9 @@ mod tests {
                 // o Clawd agacha onde estava, sobe num arco acima dos dois lugares e pousa no novo
                 let ((ax, ay, au), (bx, by, bu)) = (w.crab_spot(from), w.crab_spot(to));
                 let (x, y, u, pose) = w.crab_between(from, to, 0.05);
-                assert!((x, y, u) == (ax, ay, au) && pose == clawd::jump_pose(true));
+                assert!((x, y, u) == (ax, ay, au) && pose == clawd::jump_pose(true, false));
                 let (x, y, _, pose) = w.crab_between(from, to, (JUMP.0 + JUMP.1) / 2.0);
-                assert!(y < (ay + by) / 2.0 - JUMP_H * 0.9 && pose == clawd::jump_pose(false), "{from:?} → {to:?}: não pula");
+                assert!(y < (ay + by) / 2.0 - JUMP_H * 0.9 && pose == clawd::jump_pose(false, false), "{from:?} → {to:?}: não pula");
                 assert!((x - (ax + bx) / 2.0).abs() < 1.0, "{from:?} → {to:?}: não vai em linha");
                 let (x, y, u, _) = w.crab_between(from, to, 0.85);
                 assert_eq!((x, y, u), (bx, by, bu));
@@ -2399,6 +2453,50 @@ mod tests {
         assert!(matches!(act(&mut w, PERCH_TOGGLE)[..], [Request::Perch(true)]));
     }
 
+    /// Com a cor do papel de parede (azul, aqui), o laranja dos anéis vira azul, mas o Clawd fica
+    /// com as cores dele, igual pixel a pixel.
+    #[test]
+    fn the_wallpaper_color_tints_the_rings_but_not_the_crab() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let blue = crate::gfx::wallcolor::WallColor::of_pixels(&[40, 90, 220].repeat(64));
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        let s = 1.25;
+        let w = Claude::sample_busy();
+        for mode in Mode::ALL {
+            let l = super::super::Layout::of(mode);
+            let paint = |wall| {
+                let mut canvas = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
+                canvas.wall_color = wall;
+                w.draw(&mut canvas, mode, &env);
+                canvas.finish()
+            };
+            let (plain, tinted) = (paint(None), paint(Some(blue)));
+            // o Clawd (a caixa dele): o mesmo desenho
+            let (cx, cy, unit) = w.crab_spot(mode);
+            let (x0, y0) = (((cx - 7.0 * unit) * s).max(0.0) as u32, ((cy - 4.0 * unit) * s).max(0.0) as u32);
+            let (x1, y1) = ((((cx + 7.0 * unit) * s) as u32).min(plain.w), (((cy + 4.0 * unit) * s) as u32).min(plain.h));
+            let inside = |x: u32, y: u32| (x0..x1).contains(&x) && (y0..y1).contains(&y);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y * plain.w + x) * 4) as usize;
+                    assert_eq!(plain.px[i..i + 4], tinted.px[i..i + 4], "{mode:?}: o Clawd mudou de cor em ({x}, {y})");
+                }
+            }
+            // fora dele, o laranja dos anéis (BGRA) some
+            let orange = |img: &crate::gfx::Image| {
+                (0..img.h).flat_map(|y| (0..img.w).map(move |x| (x, y))).filter(|&(x, y)| !inside(x, y)).filter(|&(x, y)| {
+                    let p = &img.px[((y * img.w + x) * 4) as usize..][..4];
+                    p[2] > 220 && (120..165).contains(&p[1]) && p[0] < 70
+                }).count()
+            };
+            assert!(orange(&plain) > 100, "{mode:?}: sem o laranja dos anéis ({})", orange(&plain));
+            assert_eq!(orange(&tinted), 0, "{mode:?}: o laranja ficou");
+        }
+    }
+
     #[test]
     fn the_spot_stays_empty_while_the_crab_is_on_the_taskbar() {
         unsafe {
@@ -2573,6 +2671,11 @@ mod tests {
         let mut canvas = Canvas::new(400, 200, 1.0);
         Kind::draw(&w, &mut canvas, Mode::M, &Env { cfg: &c, key: "claude" });
         assert!(w.crab_pose(Mode::M).xmas);
+        // pulando na troca de tamanho, continua de gorro (agachado, no ar e ao pousar)
+        for p in [0.05, (JUMP.0 + JUMP.1) / 2.0, 0.85] {
+            assert!(w.crab_between(Mode::M, Mode::G, p).3.xmas, "o gorro some no pulo em {p}");
+        }
+        assert!(clawd::cells(&clawd::jump_pose(false, true)) != clawd::cells(&clawd::jump_pose(false, false)), "o gorro não aparece no pulo");
         // a neve cai na camada animada, a 30 quadros por segundo (na barra de tarefas, não)
         let mut w = w;
         assert_eq!(Kind::overlay_fps(&w), clawd::SNOW_FPS);
@@ -2727,6 +2830,40 @@ mod tests {
         let p = (0.9 - 0.5) / (0.95 - 0.5);
         let cross = 1.0 - (1.0f64 - p).cbrt();
         assert!((0.5 + 0.45 * ease(cross) - 0.9).abs() < 1e-9);
+    }
+
+    /// O número de cada anel fica no meio dele, medido na tinta das letras: na horizontal, no
+    /// centro óptico (o número com o "%" um quarto do "%" à direita do centro; só o número no
+    /// centro deixava tudo uns 7 pt para a direita) e, na vertical, o bloco do número com o nome
+    /// embaixo no meio.
+    #[test]
+    fn numbers_sit_in_the_middle_of_the_rings() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = cfg();
+        let env = Env { cfg: &c, key: "claude" };
+        let s = 1.25;
+        for (name, w) in [("normal", Claude::sample()), ("no limite", Claude::sample_limit())] {
+            for mode in Mode::ALL {
+                let l = super::super::Layout::of(mode);
+                let mut canvas = Canvas::new((l.w * s) as u32, (l.h * s) as u32, s);
+                w.draw(&mut canvas, mode, &env);
+                let g = geom(mode);
+                let sign = SIGN_GAP + canvas.text_width("%", NUM, g.num * PERCENT_SIGN);
+                let optical = (1.0 - super::super::PERCENT_SIGN_WEIGHT) * sign / 2.0;
+                let img = canvas.finish();
+                for &(limit, cx) in g.gauges {
+                    // (acima do ícone da abertura de baixo)
+                    let bands = crate::testes::ink_bands(&img, s, (cx, g.cy), g.r - g.w / 2.0 - 1.0, g.cy + 0.62 * g.r);
+                    let [number, label] = bands[..] else { panic!("{name} {mode:?} {}: {} faixas de tinta, e não o número e o nome", limit.name(), bands.len()) };
+                    let dx = (number[0] + number[2]) / 2.0 - cx - optical;
+                    let dy = (number[1] + label[3]) / 2.0 - g.cy;
+                    // (um pixel a 125% é 0,8 pt, e os algarismos têm um respiro diferente de cada lado)
+                    assert!(dx.abs() <= 1.5 && dy.abs() <= 1.0, "{name} {mode:?} {}: o número está {dx:+.1}, {dy:+.1} pt fora do meio", limit.name());
+                }
+            }
+        }
     }
 
     #[test]

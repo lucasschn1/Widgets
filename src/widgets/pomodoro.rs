@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::odometer::{Odometer, ROLL_MS};
+use super::odometer::Odometer;
 use super::island_ui::{self as iu, SOFT};
 use super::{Ctx, Env, Hot, IslandForm, IslandItem, Kind, MenuItem, Mode, NotifyAction, Rect4, LARGE_H, MEDIUM_H, SMALL, WIDE};
 use crate::data::config::Get;
@@ -78,7 +78,6 @@ const PHASES: [Phase; 3] = [Phase::Foco, Phase::Pausa, Phase::Longa];
 pub const TOGGLE: u32 = 1;
 pub const RESET: u32 = 2;
 pub const SKIP: u32 = 3;
-const OPEN_CLOCK: u32 = 4;
 pub const RESET_DAY: u32 = 5;
 pub const START_IF_IDLE: u32 = 6;
 const TOGGLE_AUTO: u32 = 7;
@@ -100,12 +99,14 @@ struct RingGeom {
 
 const C_RING: RingGeom = RingGeom { cx: SMALL / 2.0, cy: 62.0, diameter: 104.0, thickness: 9.0 };
 const M_RING: RingGeom = RingGeom { cx: 77.0, cy: MEDIUM_H / 2.0, diameter: 110.0, thickness: 8.0 };
-const M_COL_X: f32 = 150.0; // coluna da direita (relógio e botões)
+const M_COL_X: f32 = 150.0; // coluna da direita (o que está acontecendo e os botões)
 const M_CTRL_Y: f32 = 120.0;
 const M_DOTS_Y: f32 = 86.0;
-/// médio: a hora e a data, embaixo do rótulo "POMODORO"
-const M_CLOCK_Y: f32 = 22.0;
-const M_DATE_Y: f32 = 60.0;
+/// médio: embaixo do rótulo "POMODORO", o que está acontecendo (`headline`) e o total do dia
+const M_HEAD_Y: f32 = 30.0;
+const M_SUB_Y: f32 = 54.0;
+/// grande: o que está acontecendo, embaixo do rótulo
+const G_HEAD_Y: f32 = 34.0;
 const M_PLAY_D: f32 = 34.0;
 // grande: cabeçalho, o anel grande no meio, os ciclos, os botões e, no pé, a próxima fase
 const G_HEAD_LINE: f32 = 92.0;
@@ -179,9 +180,8 @@ pub struct Pomodoro {
     pub end: Option<f64>,
     /// próximo `tick` (guardado: calcular na hora da pergunta empurraria o horário para sempre)
     next: Instant,
-    /// o tempo que falta e o relógio, rolando como num hodômetro a cada segundo (e minuto)
+    /// o tempo que falta, rolando como num hodômetro a cada segundo
     timer_roll: Odometer,
-    clock_roll: Odometer,
     /// próximo quadro enquanto os dígitos rolam (guardado, pelo mesmo motivo)
     frame_at: Cell<Instant>,
 }
@@ -205,14 +205,14 @@ impl Pomodoro {
             end: state.f64_of("fim"),
             next: Instant::now(),
             timer_roll: Odometer::new(TIMER_ROLL_MS),
-            clock_roll: Odometer::new(ROLL_MS),
             frame_at: Cell::new(Instant::now()),
         };
         pomodoro.schedule();
         pomodoro
     }
 
-    /// Correndo: na próxima virada de segundo; parado: na próxima virada de minuto (só o relógio muda).
+    /// Correndo: na próxima virada de segundo; parado: na próxima virada de minuto (o dia pode
+    /// virar, e o total de hoje volta a zero).
     fn schedule(&mut self) {
         let now = win::now();
         let delay = match self.end {
@@ -227,28 +227,33 @@ impl Pomodoro {
 
     /// Os dígitos estão rolando (precisa de quadros)?
     fn rolling(&self) -> bool {
-        self.timer_roll.animating() || self.clock_roll.animating()
+        self.timer_roll.animating()
     }
 
-    /// O tempo que falta e o relógio acabaram de mudar: os dígitos parados a `at` (0 a 1) do
-    /// caminho.
+    /// O tempo que falta acabou de mudar: os dígitos parados a `at` (0 a 1) do caminho.
     #[cfg(test)]
     pub fn sample_rolling(cfg: &Value, at: f32) -> Pomodoro {
         let mut pomodoro = Pomodoro::new(cfg);
-        let ((timer_before, timer_now), (clock_before, clock_now)) = pomodoro.last_changes();
+        let (timer_before, timer_now) = pomodoro.last_change();
         pomodoro.timer_roll = Odometer::frozen(&timer_before, &timer_now, at);
-        pomodoro.clock_roll = Odometer::frozen(&clock_before, &clock_now, at);
         pomodoro
     }
 
-    /// O tempo que falta e o relógio de agora, cada um com o de um passo antes (para os exemplos
-    /// rolando).
+    /// O tempo que falta agora e um segundo antes (para os exemplos rolando).
     #[cfg(test)]
-    fn last_changes(&self) -> ((String, String), (String, String)) {
-        let local = win::local_time();
-        let clock = format!("{:02}:{:02}", local.hour, local.minute);
-        let before = format!("{:02}:{:02}", local.hour, (local.minute + 59) % 60);
-        ((fmt_timer(self.left() + 1.0), fmt_timer(self.left())), (before, clock))
+    fn last_change(&self) -> (String, String) {
+        (fmt_timer(self.left() + 1.0), fmt_timer(self.left()))
+    }
+
+    /// O que está acontecendo, em poucas palavras (no médio e no grande, no lugar da hora, que o
+    /// relógio do Windows já mostra): até quando vai a fase, se está pausado, ou o que vem.
+    fn headline(&self) -> String {
+        match self.end {
+            Some(end) => format!("Até {}", win::clock_at(end)),
+            None if self.started() => "Pausado".into(),
+            None if self.phase == Phase::Foco => "Pronto para focar".into(),
+            None => "Hora da pausa".into(),
+        }
     }
 
     /// O tempo está correndo?
@@ -447,20 +452,6 @@ impl Pomodoro {
         ((x - ring.cx).powi(2) + (y - ring.cy).powi(2)).sqrt() <= ring.diameter / 2.0 + 2.0
     }
 
-    /// Onde fica o relógio (que abre o Relógio do Windows).
-    fn clock_rect(mode: Mode) -> (f32, f32, f32, f32) {
-        match mode {
-            Mode::P => (6.0, 120.0, SMALL - 6.0, SMALL - 6.0),
-            Mode::M => (M_COL_X - 6.0, 8.0, W - 8.0, 72.0),
-            Mode::G => (PAD - 6.0, 30.0, 150.0, 86.0),
-        }
-    }
-
-    /// Sobre o relógio (que abre o Relógio do Windows)? O pequeno não tem relógio.
-    fn on_clock(x: f32, y: f32, mode: Mode) -> bool {
-        let (x0, y0, x1, y1) = Self::clock_rect(mode);
-        mode != Mode::P && (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
-    }
 }
 
 /// A duração escolhida para uma fase, em minutos.
@@ -476,6 +467,14 @@ fn today(cfg: &Value, _for_write: bool) -> DayStats {
         DayStats { date, pomodoros: stats.i64_of("pomodoros").unwrap_or(0), minutes: stats.i64_of("minutos").unwrap_or(0) }
     } else {
         DayStats { date, pomodoros: 0, minutes: 0 }
+    }
+}
+
+/// O total do dia numa linha: "2 pomodoros · 50 min" (ou "Nenhum pomodoro hoje").
+fn day_total(stats: &DayStats) -> String {
+    match stats.pomodoros {
+        0 => "Nenhum pomodoro hoje".into(),
+        done => format!("{done} pomodoro{} · {}", if done != 1 { "s" } else { "" }, fmt_minutes(stats.minutes as f64)),
     }
 }
 
@@ -528,7 +527,6 @@ impl Kind for Pomodoro {
         let frac = if self.total > 0.0 { (self.left() / self.total) as f32 } else { 0.0 };
         drawing::ring(c, cx, cy, diameter, thickness, frac, color);
         let local = win::local_time();
-        let clock = format!("{:02}:{:02}", local.hour, local.minute);
         let timer = fmt_timer(self.left());
         let every = Self::every(wcfg);
 
@@ -542,9 +540,9 @@ impl Kind for Pomodoro {
             } else {
                 drawing::play(c, cx, cy - 22.0, 8.0, MUTED);
             }
-            self.timer_roll.draw(c, cx, cy + 4.0, &timer, Face::Light, 24.0, if paused { MUTED } else { FG }, Anchor::MM, None);
+            self.timer_roll.draw(c, cx, cy + 4.0, &timer, super::HERO, 24.0, if paused { MUTED } else { FG }, Anchor::MM, None);
             let foot = match self.end.filter(|_| self.running()) {
-                Some(end) => format!("até {}", win::clock_at(end)),
+                Some(end) => format!("Até {}", win::clock_at(end)),
                 None => format!("hoje: {}", today(env.cfg, false).pomodoros),
             };
             c.text(14.0, 136.0, &foot, Face::Semibold, 12.0, FG, Anchor::LM, Some(62.0));
@@ -597,19 +595,20 @@ impl Kind for Pomodoro {
                 c.text(cx, cy - 27.0, "PAUSADO", Face::Semibold, 8.5, MUTED, Anchor::MM, None);
             }
             let size = if timer.len() <= 5 { 25.0 } else { 19.0 };
-            self.timer_roll.draw(c, cx, cy - 4.0, &timer, Face::Light, size, digits, Anchor::MM, None);
+            self.timer_roll.draw(c, cx, cy - 4.0, &timer, super::HERO, size, digits, Anchor::MM, None);
             c.text(cx, cy + 20.0, label, Face::Semibold, 10.5, color, Anchor::MM, Some(diameter - 24.0));
-            // a coluna da direita: o rótulo, a hora e a data (os anéis ocupam a altura toda)
-            super::draw_label(c, M_COL_X, super::LABEL_Y, "POMODORO", focus);
-            self.clock_roll.draw(c, M_COL_X - 2.0, M_CLOCK_Y, &clock, Face::Light, 30.0, FG, Anchor::LA, None);
-            c.text(M_COL_X, M_DATE_Y, &util::short_date(&local), Face::Regular, 11.0, MUTED, Anchor::LA, None);
-            c.text(W - 16.0, M_DOTS_Y, &format!("hoje: {}", stats.pomodoros), Face::Regular, 10.5, MUTED, Anchor::RM, None);
+            // a coluna da direita: o rótulo, o que está acontecendo e o total do dia (o tempo no
+            // anel é o único número grande)
+            let col_w = W - PAD - M_COL_X;
+            super::draw_label(c, M_COL_X, super::LABEL_Y, "Pomodoro");
+            c.text(M_COL_X, M_HEAD_Y, &self.headline(), Face::Semibold, 15.0, FG, Anchor::LA, Some(col_w));
+            c.text(M_COL_X, M_SUB_Y, &day_total(&stats), Face::Regular, 11.0, MUTED, Anchor::LA, Some(col_w));
             return;
         }
 
-        super::draw_label(c, PAD, super::LABEL_Y, "POMODORO", focus);
+        super::draw_label(c, PAD, super::LABEL_Y, "Pomodoro");
         c.text(W - PAD, super::LABEL_Y, &util::long_date(&local), Face::Regular, 10.5, MUTED, Anchor::RA, Some(190.0));
-        self.clock_roll.draw(c, PAD - 2.0, 32.0, &clock, Face::Light, 40.0, FG, Anchor::LA, None);
+        c.text(PAD, G_HEAD_Y, &self.headline(), Face::Semibold, 20.0, FG, Anchor::LA, Some(W / 2.0 - PAD));
         let done = stats.pomodoros;
         c.text(W - PAD, 46.0, &format!("{done} pomodoro{} hoje", if done != 1 { "s" } else { "" }), Face::Semibold, 13.0, FG, Anchor::RA, None);
         c.text(W - PAD, 66.0, &format!("{} de foco", fmt_minutes(stats.minutes as f64)), Face::Regular, 11.0, MUTED, Anchor::RA, None);
@@ -618,7 +617,7 @@ impl Kind for Pomodoro {
             c.text(cx, cy - 40.0, "PAUSADO", Face::Semibold, 9.5, MUTED, Anchor::MM, None);
         }
         let size = if timer.len() <= 5 { 42.0 } else { 32.0 };
-        self.timer_roll.draw(c, cx, cy - 6.0, &timer, Face::Light, size, digits, Anchor::MM, None);
+        self.timer_roll.draw(c, cx, cy - 6.0, &timer, super::HERO, size, digits, Anchor::MM, None);
         c.text(cx, cy + 30.0, label, Face::Semibold, 12.5, color, Anchor::MM, Some(diameter - 40.0));
         // no pé: o que vem depois desta fase
         let next = self.upcoming(wcfg);
@@ -629,7 +628,7 @@ impl Kind for Pomodoro {
         c.text(W / 2.0 + 5.0, G_FOOT_Y, &text, Face::Regular, 11.5, MUTED, Anchor::MM, None);
     }
 
-    fn hit(&self, x: f32, y: f32, mode: Mode, env: &Env) -> Option<u32> {
+    fn hit(&self, x: f32, y: f32, mode: Mode, _env: &Env) -> Option<u32> {
         if let Some(Button { control, .. }) = self.control_at(x, y, mode) {
             return Some(match control {
                 Control::Restart => RESET,
@@ -640,9 +639,7 @@ impl Kind for Pomodoro {
         if Self::on_ring(x, y, mode) {
             return Some(TOGGLE);
         }
-        if Self::on_clock(x, y, mode) && env.shortcuts() {
-            return Some(OPEN_CLOCK);
-        }
+
         None
     }
 
@@ -651,7 +648,6 @@ impl Kind for Pomodoro {
             TOGGLE => self.toggle(ctx),
             RESET => self.reset(ctx),
             SKIP => self.skip(ctx),
-            OPEN_CLOCK => ctx.open("ms-clock:"),
             RESET_DAY => self.reset_day(ctx),
             START_IF_IDLE => {
                 if !self.running() {
@@ -683,10 +679,7 @@ impl Kind for Pomodoro {
             let r = diameter / 2.0 + 5.0;
             return Some((cx - r, cy - r, cx + r, cy + r, r));
         }
-        if Self::on_clock(x, y, mode) {
-            let (x0, y0, x1, y1) = Self::clock_rect(mode);
-            return Some((x0, y0, x1, y1, 12.0));
-        }
+
         None
     }
 
@@ -814,7 +807,7 @@ mod tests {
         let cfg = json!({"pomodoro": {"estado": {"fase": "foco", "fim": win::now() + 600.0, "total": 1500.0}}, "app": {}});
         let rolled = |ms: f32| {
             let mut p = Pomodoro::new(&cfg);
-            let ((t0, t1), _) = p.last_changes();
+            let (t0, t1) = p.last_change();
             p.timer_roll = Odometer::rolled(&t0, &t1, ms);
             p
         };
@@ -847,7 +840,7 @@ mod tests {
         let RingGeom { cx, cy, .. } = Pomodoro::ring(Mode::P);
         let running = serde_json::json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 0, "total": 1500.0, "fim": win::now() + 600.0}}});
         let p = Pomodoro::new(&running);
-        let end = format!("até {}", win::clock_at(p.end.unwrap()));
+        let end = format!("Até {}", win::clock_at(p.end.unwrap()));
         assert!(texts(&p, &running).contains(&end), "{:?}", texts(&p, &running));
         let env = Env { cfg: &running, key: "pomodoro" };
         assert!(p.tooltip(cx, cy, Mode::P, &env).unwrap().starts_with("Pausar · termina às"));
@@ -855,9 +848,44 @@ mod tests {
         let p = Pomodoro::new(&stopped);
         assert!(texts(&p, &stopped).iter().any(|t| t.starts_with("hoje: ")), "{:?}", texts(&p, &stopped));
         assert_eq!(p.tooltip(cx, cy, Mode::P, &Env { cfg: &stopped, key: "pomodoro" }).as_deref(), Some("Começar"));
-        // nada no pé do pequeno abre o Relógio do Windows
-        let (x0, y0, x1, y1) = Pomodoro::clock_rect(Mode::P);
-        assert!(!Pomodoro::on_clock((x0 + x1) / 2.0, (y0 + y1) / 2.0, Mode::P));
+    }
+
+    /// O médio e o grande também não repetem a hora do Windows: o tempo no anel é o único número
+    /// grande; ao lado, o que está acontecendo e o total do dia.
+    #[test]
+    fn medium_and_large_say_what_is_happening_instead_of_the_clock() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let texts = |p: &Pomodoro, cfg: &Value, mode: Mode| -> Vec<String> {
+            let env = Env { cfg, key: "pomodoro" };
+            crate::card::morph::record(p, mode, 1.0, 1.0, &env)
+                .ops
+                .into_iter()
+                .filter_map(|r| match r.op {
+                    crate::gfx::Op::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let local = win::local_time();
+        let clock = format!("{:02}:{:02}", local.hour, local.minute);
+        let today = win::now();
+        let date = win::local_time().iso_date();
+        let running = json!({"pomodoro": {"estado": {"fase": "foco", "ciclo": 0, "total": 1500.0, "fim": today + 600.0},
+            "hoje": {"data": date, "pomodoros": 2, "minutos": 50}}});
+        let p = Pomodoro::new(&running);
+        let end = format!("Até {}", win::clock_at(p.end.unwrap()));
+        for mode in [Mode::M, Mode::G] {
+            let shown = texts(&p, &running, mode);
+            assert!(shown.contains(&end), "{mode:?}: {shown:?}");
+            assert!(!shown.contains(&clock), "{mode:?}: a hora do Windows de novo ({shown:?})");
+        }
+        assert!(texts(&p, &running, Mode::M).iter().any(|t| t.starts_with("2 pomodoros")), "o total do dia no médio");
+        let stopped = json!({"pomodoro": {}});
+        assert_eq!(Pomodoro::new(&stopped).headline(), "Pronto para focar");
+        let paused = json!({"pomodoro": {"estado": {"fase": "foco", "total": 1500.0, "restante": 900.0}}});
+        assert_eq!(Pomodoro::new(&paused).headline(), "Pausado");
     }
 }
 

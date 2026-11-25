@@ -13,11 +13,6 @@ pub fn long_date(date: &LocalTime) -> String {
     format!("{}, {} de {}", WEEKDAYS_LONG[date.weekday as usize], date.day, MONTHS_LONG[date.month as usize - 1])
 }
 
-/// "sáb, 31 de out"
-pub fn short_date(date: &LocalTime) -> String {
-    format!("{}, {} de {}", WEEKDAYS[date.weekday as usize], date.day, MONTHS[date.month as usize - 1])
-}
-
 /// "agora", "há 5 min", "há 3 h", "ontem", "há 4 dias", "12 out".
 pub fn time_ago(epoch: f64) -> String {
     let seconds = win::now() - epoch;
@@ -112,8 +107,13 @@ pub fn fetch_json_with(url: &str, headers: &[(&str, &str)]) -> Result<serde_json
     serde_json::from_str(&text).map_err(|error| error.to_string())
 }
 
-/// Pedido GET já com a configuração de rede do app.
-fn get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::http::Response<ureq::Body>, String> {
+/// Quanto um pedido pode levar, do começo ao fim (as buscas de dados, pequenas).
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Quanto um download de arquivo grande pode levar (o Widgets.exe da atualização, numa conexão lenta).
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Pedido GET já com a configuração de rede do app, com o tempo limite `timeout`.
+fn get(url: &str, headers: &[(&str, &str)], timeout: std::time::Duration) -> Result<ureq::http::Response<ureq::Body>, String> {
     // TLS do próprio Windows (Schannel): executável menor e usa os certificados do sistema (sem
     // PlatformVerifier, o ureq usaria só a lista da Mozilla, e sites como o YouTube, cuja cadeia o
     // Windows monta por outra raiz, falhariam)
@@ -122,7 +122,7 @@ fn get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::http::Response<ureq:
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .timeout_global(Some(timeout))
         .tls_config(tls)
         .http_status_as_error(false)
         .build()
@@ -136,7 +136,7 @@ fn get(url: &str, headers: &[(&str, &str)]) -> Result<ureq::http::Response<ureq:
 
 /// Baixa uma página: (código HTTP, texto). Erros de rede viram Err.
 pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), String> {
-    let mut resp = get(url, headers)?;
+    let mut resp = get(url, headers, FETCH_TIMEOUT)?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().with_config().limit(20 * 1024 * 1024).read_to_string().map_err(|error| error.to_string())?;
     Ok((status, text))
@@ -144,9 +144,18 @@ pub fn fetch_text(url: &str, headers: &[(&str, &str)]) -> Result<(u16, String), 
 
 /// Baixa um arquivo (ex.: uma imagem): (código HTTP, bytes).
 pub fn fetch_bytes(url: &str) -> Result<(u16, Vec<u8>), String> {
-    let mut resp = get(url, &[])?;
+    let mut resp = get(url, &[], FETCH_TIMEOUT)?;
     let status = resp.status().as_u16();
     let bytes = resp.body_mut().with_config().limit(10 * 1024 * 1024).read_to_vec().map_err(|error| error.to_string())?;
+    Ok((status, bytes))
+}
+
+/// Baixa um arquivo grande, de até `max_bytes`, com mais tempo que as buscas (o Widgets.exe da
+/// atualização): (código HTTP, bytes). Chamar fora da thread da interface.
+pub fn download(url: &str, max_bytes: u64) -> Result<(u16, Vec<u8>), String> {
+    let mut resp = get(url, &[], DOWNLOAD_TIMEOUT)?;
+    let status = resp.status().as_u16();
+    let bytes = resp.body_mut().with_config().limit(max_bytes).read_to_vec().map_err(|error| error.to_string())?;
     Ok((status, bytes))
 }
 
