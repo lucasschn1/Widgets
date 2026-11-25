@@ -383,7 +383,7 @@ impl App {
             let area = win::work_areas()[0];
             (area.2 - 200, area.1 + 100)
         });
-        let s = win::scale_at(anchor.0 + 150, anchor.1 + 100);
+        let s = win::widget_scale_at(anchor.0 + 150, anchor.1 + 100);
         let mut card = Card::new(kind, hwnd, mode, s);
         if gpu {
             card.out = crate::gfx::output::Output::gpu(hwnd);
@@ -394,7 +394,7 @@ impl App {
         };
         // está num monitor com outra escala?
         let (x0, y0, x1, y1) = card.card_rect();
-        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        let scale = win::widget_scale_at((x0 + x1) / 2, (y0 + y1) / 2);
         if (scale - card.s).abs() > 0.01 {
             card.set_scale(scale);
         }
@@ -640,7 +640,7 @@ impl App {
         self.sh.save();
         self.send_to_back(i);
         let (x0, y0, x1, y1) = self.cards[i].card_rect();
-        let scale = win::scale_at((x0 + x1) / 2, (y0 + y1) / 2);
+        let scale = win::widget_scale_at((x0 + x1) / 2, (y0 + y1) / 2);
         if (scale - self.cards[i].s).abs() > 0.01 {
             self.cards[i].set_scale(scale);
             self.cards[i].refresh(&self.sh);

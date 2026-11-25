@@ -22,7 +22,7 @@ const KEEP: usize = 10;
 
 /// Nome curto da combinação de monitores (aparelhos, posições e escalas).
 pub fn signature(mons: &[Monitor]) -> String {
-    let mut parts: Vec<String> = mons.iter().map(|m| format!("{}@{:?}@{}", m.id, m.screen, (m.scale * 100.0).round() as i32)).collect();
+    let mut parts: Vec<String> = mons.iter().map(screen_part).collect();
     parts.sort();
     // FNV-1a (um resumo de 64 bits do texto): só para a chave ficar curta no config.json
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -33,10 +33,24 @@ pub fn signature(mons: &[Monitor]) -> String {
     format!("{hash:016x}")
 }
 
+/// O pedaço de um monitor no nome da combinação. A escala dos widgets só entra quando difere da
+/// do Windows (num monitor grande): assim, nos outros, o nome é o mesmo de antes dela existir, e
+/// num monitor grande o nome muda uma vez, ao atualizar, e os widgets guardados na escala antiga
+/// são levados para o lugar certo na nova (pela mesma conta de quando os monitores mudam).
+fn screen_part(m: &Monitor) -> String {
+    let pct = |scale: f32| (scale * 100.0).round() as i32;
+    let mut part = format!("{}@{:?}@{}", m.id, m.screen, pct(m.scale));
+    if pct(m.widgets) != pct(m.scale) {
+        part.push_str(&format!("@w{}", pct(m.widgets)));
+    }
+    part
+}
+
 /// Os monitores no formato do config.json (para lembrar a combinação).
 pub fn monitors_to_json(mons: &[Monitor]) -> Value {
     let rect_json = |r: Rect| json!([r.0, r.1, r.2, r.3]);
-    Value::Array(mons.iter().map(|m| json!({"id": m.id, "tela": rect_json(m.screen), "area": rect_json(m.work), "escala": m.scale})).collect())
+    let one = |m: &Monitor| json!({"id": m.id, "tela": rect_json(m.screen), "area": rect_json(m.work), "escala": m.scale, "escala_widgets": m.widgets});
+    Value::Array(mons.iter().map(one).collect())
 }
 
 /// Os monitores lidos do config.json (os que estiverem incompletos ficam de fora).
@@ -46,11 +60,14 @@ pub fn monitors_from_json(v: &Value) -> Vec<Monitor> {
         (nums.len() == 4).then(|| (nums[0], nums[1], nums[2], nums[3]))
     };
     let one = |entry: &Value| -> Option<Monitor> {
+        let scale = entry.get("escala")?.as_f64()? as f32;
         Some(Monitor {
             id: entry.get("id")?.as_str()?.to_string(),
             screen: rect(entry.get("tela")?)?,
             work: rect(entry.get("area")?)?,
-            scale: entry.get("escala")?.as_f64()? as f32,
+            scale,
+            // guardado antes da escala dos widgets: as posições são da escala do Windows
+            widgets: entry.get("escala_widgets").and_then(Value::as_f64).map_or(scale, |widgets| widgets as f32),
         })
     };
     v.as_array().map(|list| list.iter().filter_map(one).collect()).unwrap_or_default()
@@ -195,7 +212,7 @@ pub fn plan(spots: &[Spot], keys: &[&str], old: &[Monitor], new: &[Monitor], sav
 fn saved_place(spot: &Spot, keys: &[&str], new: &[Monitor], saved: Option<&Map<String, Value>>) -> Option<(usize, (i32, i32), f32, Rect)> {
     let pos = saved?.get(keys[spot.card]).and_then(pair)?;
     let monitor = holder(new, rect_at(pos, spot.size, 1.0))?;
-    let scale = new[monitor].scale;
+    let scale = new[monitor].widgets;
     let rect = rect_at(pos, spot.size, scale);
     let (visible_w, visible_h) = win::overlap(rect, new[monitor].screen);
     (visible_w.min(visible_h) >= (60.0 * scale) as i32).then_some((monitor, pos, scale, rect))
@@ -208,7 +225,7 @@ fn saved_place(spot: &Spot, keys: &[&str], new: &[Monitor], saved: Option<&Map<S
 fn move_group(group: &[&Spot], old_mon: &Monitor, new: &[Monitor], taken: &mut Vec<(usize, Rect)>) -> Vec<(usize, (i32, i32), f32)> {
     let new_index = new.iter().position(|m| m.id == old_mon.id).unwrap_or(0);
     let new_mon = &new[new_index];
-    let (old_scale, new_scale) = (old_mon.scale, new_mon.scale);
+    let (old_scale, new_scale) = (old_mon.widgets, new_mon.widgets);
     let rects: Vec<Rect> = group.iter().map(|spot| rect_at(spot.pos, spot.size, old_scale)).collect();
     let group_box = bbox(&rects);
     let (old_work, new_work) = (old_mon.work, new_mon.work);
@@ -602,7 +619,7 @@ mod tests {
 
     fn mon(id: &str, screen: Rect, scale: f32) -> Monitor {
         // barra de tarefas de 48 px embaixo
-        Monitor { id: id.into(), screen, work: (screen.0, screen.1, screen.2, screen.3 - 48), scale }
+        Monitor { id: id.into(), screen, work: (screen.0, screen.1, screen.2, screen.3 - 48), scale, widgets: win::widget_scale(scale, screen) }
     }
 
     fn card_rect(m: &(usize, (i32, i32), f32), size: (f32, f32)) -> Rect {
@@ -614,7 +631,7 @@ mod tests {
     /// notebook sozinho (150%) e notebook à direita de um externo principal (100%)
     fn setups() -> (Vec<Monitor>, Vec<Monitor>) {
         let alone = vec![mon("note", (0, 0, 1920, 1200), 1.5)];
-        let docked = vec![mon("ext", (0, 0, 2560, 1440), 1.0), mon("note", (2560, 0, 4480, 1200), 1.5)];
+        let docked = vec![mon("ext", (0, 0, 1920, 1080), 1.0), mon("note", (1920, 0, 3840, 1200), 1.5)];
         (alone, docked)
     }
 
@@ -635,15 +652,15 @@ mod tests {
         let out = plan(&[Spot { card: 0, pos, size: SIZE }], &["a"], &alone, &docked, None);
         let nr = card_rect(&out[0], SIZE);
         assert_eq!(out[0].2, 1.5);
-        assert_eq!(nr, (4480 - 36 - 480, 36, 4480 - 36, 276), "continua no canto do notebook");
+        assert_eq!(nr, (3840 - 36 - 480, 36, 3840 - 36, 276), "continua no canto do notebook");
     }
 
     #[test]
     fn vanished_monitor_moves_group_and_scale() {
         let (alone, docked) = setups();
         // dois widgets empilhados no canto direito do externo (100%)
-        let a = (2560 - 24 - 320, 24);
-        let b = (2560 - 24 - 320, 24 + 160 + 12);
+        let a = (1920 - 24 - 320, 24);
+        let b = (1920 - 24 - 320, 24 + 160 + 12);
         let spots = [Spot { card: 0, pos: (a.0 - 8, a.1 - 8), size: SIZE }, Spot { card: 1, pos: (b.0 - 8, b.1 - 8), size: SIZE }];
         let out = plan(&spots, &["a", "b"], &docked, &alone, None);
         let (ra, rb) = (card_rect(&out[0], SIZE), card_rect(&out[1], SIZE));
@@ -657,8 +674,8 @@ mod tests {
     fn vanished_monitor_avoids_widgets_already_there() {
         let (alone, docked) = setups();
         // um no canto direito do externo e outro no mesmo canto do notebook
-        let ext = (2560 - 24 - 320 - 8, 24 - 8);
-        let note = (4480 - 36 - 480 - 12, 36 - 12);
+        let ext = (1920 - 24 - 320 - 8, 24 - 8);
+        let note = (3840 - 36 - 480 - 12, 36 - 12);
         let spots = [Spot { card: 0, pos: ext, size: SIZE }, Spot { card: 1, pos: note, size: SIZE }];
         let out = plan(&spots, &["a", "b"], &docked, &alone, None);
         let get = |i| card_rect(out.iter().find(|m| m.0 == i).unwrap(), SIZE);
@@ -677,6 +694,55 @@ mod tests {
         assert_eq!(out, vec![(0, (100, 200), 1.0)]);
     }
 
+    /// Num monitor grande a 100% (1440p), os widgets crescem um terço, voltando a um lugar guardado
+    /// ou mudando para lá; e voltam ao tamanho do notebook quando o grande sai.
+    #[test]
+    fn big_monitor_grows_widgets() {
+        let (alone, _) = setups();
+        let big = vec![mon("ext", (0, 0, 2560, 1440), 1.0), mon("note", (2560, 0, 4480, 1200), 1.5)];
+        let mut saved = Map::new();
+        saved.insert("a".into(), json!([100, 200]));
+        let out = plan(&[Spot { card: 0, pos: (50, 50), size: SIZE }], &["a"], &alone, &big, Some(&saved));
+        assert_eq!(out, vec![(0, (100, 200), 1.33)], "lugar guardado no grande");
+        // um no canto direito do grande, com a escala dele, vai para o notebook sozinho
+        let card_w = (SIZE.0 * 1.33).round() as i32;
+        let spots = [Spot { card: 0, pos: (2560 - 32 - card_w - 11, 32 - 11), size: SIZE }];
+        let out = plan(&spots, &["a"], &big, &alone, None);
+        assert_eq!(out[0].2, 1.5, "pega a escala do notebook");
+        assert!(inside(card_rect(&out[0], SIZE), alone[0].work));
+    }
+
+    /// Ao atualizar para a escala dos widgets: num 1080p nada muda (a mesma combinação); num
+    /// monitor grande, a combinação guardada (sem `escala_widgets`) vira outra, e os widgets
+    /// encostados na borda direita crescem sem sair da tela nem se cobrir.
+    #[test]
+    fn widgets_saved_before_widget_scale_are_moved_once() {
+        let saved_before = |mons: &[Monitor]| {
+            let mut stored = monitors_to_json(mons);
+            for entry in stored.as_array_mut().unwrap() {
+                entry.as_object_mut().unwrap().remove("escala_widgets");
+            }
+            monitors_from_json(&stored)
+        };
+        let small = vec![mon("ext", (0, 0, 1920, 1080), 1.0)];
+        assert_eq!(signature(&saved_before(&small)), signature(&small), "1080p: a mesma combinação");
+        let big = vec![mon("ext", (0, 0, 2560, 1440), 1.0)];
+        let old = saved_before(&big);
+        assert_eq!(old[0].widgets, 1.0, "guardados na escala do Windows");
+        assert_ne!(signature(&old), signature(&big), "monitor grande: arruma uma vez");
+        assert_eq!(monitors_from_json(&monitors_to_json(&big)), big, "depois, lembra a escala nova");
+        // dois empilhados no canto de cima à direita, na escala antiga
+        let a = (2560 - 24 - 320 - 8, 24 - 8);
+        let b = (2560 - 24 - 320 - 8, 24 + 160 + 12 - 8);
+        let spots = [Spot { card: 0, pos: a, size: SIZE }, Spot { card: 1, pos: b, size: SIZE }];
+        let out = plan(&spots, &["a", "b"], &old, &big, None);
+        let (ra, rb) = (card_rect(&out[0], SIZE), card_rect(&out[1], SIZE));
+        assert!(out.iter().all(|m| m.2 == 1.33), "{out:?}");
+        assert!(inside(ra, big[0].work) && inside(rb, big[0].work), "{ra:?} {rb:?}");
+        assert!(!hits(ra, rb));
+        assert_eq!(ra.2, 2560 - 32, "a mesma distância da borda, na escala nova");
+    }
+
     #[test]
     fn saved_position_off_screen_is_ignored() {
         let (alone, docked) = setups();
@@ -691,15 +757,15 @@ mod tests {
         let (alone, docked) = setups();
         // coluna cheia no externo e outra no notebook: no notebook sozinho não cabe tudo junto
         let mut spots = Vec::new();
-        for k in 0..6 {
-            spots.push(Spot { card: k, pos: (2560 - 24 - 320 - 8, 24 + k as i32 * 172 - 8), size: SIZE });
+        for k in 0..5 {
+            spots.push(Spot { card: k, pos: (1920 - 24 - 320 - 8, 24 + k as i32 * 172 - 8), size: SIZE });
         }
         for k in 0..4 {
-            spots.push(Spot { card: 6 + k, pos: (4480 - 36 - 480 - 12, 36 + k as i32 * 258 - 12), size: SIZE });
+            spots.push(Spot { card: 5 + k, pos: (3840 - 36 - 480 - 12, 36 + k as i32 * 258 - 12), size: SIZE });
         }
-        let keys = ["a"; 10];
+        let keys = ["a"; 9];
         let out = plan(&spots, &keys, &docked, &alone, None);
-        assert_eq!(out.len(), 10);
+        assert_eq!(out.len(), 9);
         for m in &out {
             assert!(inside(card_rect(m, SIZE), alone[0].work), "{m:?}");
         }
