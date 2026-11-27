@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "widgets"
-version = "3.23.0"
+version = "3.24.0"
 dependencies = [
  "serde_json",
  "sgp4",
