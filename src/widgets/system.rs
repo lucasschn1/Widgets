@@ -20,7 +20,8 @@ use crate::platform::win;
 
 const W: f32 = WIDE;
 const PAD: f32 = super::CARD_PAD;
-const ROW_H: f32 = 38.0;
+/// as linhas da lista do grande
+const ROW_H: f32 = 34.0;
 const LIST_N: usize = 5;
 /// médio virado: linhas mais baixas, para caber 3 embaixo do cabeçalho
 const BACK_ROW_H: f32 = 34.0;
@@ -34,7 +35,8 @@ const M_TOP: f32 = 12.0;
 const SEG_Y: f32 = 150.0 + G_TOP;
 const G_LIST_Y: f32 = 194.0 + G_TOP;
 /// rodapé (rede e tempo ligado) no pé do cartão, logo depois da lista
-const G_FOOT_Y: f32 = LARGE_H - 34.0;
+/// (a linha de cima do rodapé; o texto embaixo dela termina na margem de baixo)
+const G_FOOT_Y: f32 = LARGE_H - 38.0;
 const _: () = assert!(G_LIST_Y + ROW_H * LIST_N as f32 + 6.0 <= G_FOOT_Y, "a lista não cabe no grande");
 
 const EVERY: Duration = Duration::from_secs(2);
@@ -179,6 +181,9 @@ fn ring_tip_shadow(c: &mut Canvas, cx: f32, cy: f32, r: f32, end: f32, thickness
 
 /// espaço entre o nome e a porcentagem no título do pequeno virado
 const BACK_P_GAP: f32 = 4.0;
+/// pequeno: o alto das colunas de porcentagem e nome, embaixo do anel (o nome termina na margem
+/// de baixo)
+const P_METRICS_Y: f32 = 110.0;
 /// onde o título do pequeno virado começa (depois da bolinha da cor) e o respiro até a área do ✕
 /// (que é maior que o desenho dele)
 const BACK_P_TITLE_X: f32 = 26.0;
@@ -519,7 +524,8 @@ impl System {
     /// Onde ficam os anéis neste tamanho.
     fn rings_geom(mode: Mode) -> RingsGeom {
         let (cx, cy, diameter, thickness, step) = match mode {
-            Mode::P => (SMALL / 2.0, 62.0, 100.0, 10.5, 24.0),
+            // (no pequeno, o anel de fora começa na margem de cima)
+            Mode::P => (SMALL / 2.0, PAD + 44.0, 88.0, 9.5, 21.0),
             Mode::M => (PAD + 60.0, 75.0, 120.0, 13.0, 30.0),
             Mode::G => (PAD + 60.0, 75.0 + G_TOP, 120.0, 13.0, 30.0),
         };
@@ -542,7 +548,7 @@ impl System {
     fn metric_rect(mode: Mode, i: usize) -> (f32, f32, f32, f32) {
         if mode == Mode::P {
             let col = (SMALL - 16.0) / 3.0;
-            (8.0 + col * i as f32, 118.0, 8.0 + col * (i + 1) as f32, SMALL - 6.0)
+            (8.0 + col * i as f32, P_METRICS_Y, 8.0 + col * (i + 1) as f32, SMALL - 6.0)
         } else {
             let top = if mode == Mode::G { G_TOP } else { M_TOP };
             let y = 22.0 + top + 36.0 * i as f32;
@@ -691,12 +697,12 @@ impl System {
             let text = if dim { MUTED } else { FG };
             if mode == Mode::P {
                 let cx = (x0 + x1) / 2.0;
-                draw_counting(c, cx, y0 + 8.0, pct, "%", Face::Semibold, 13.5, color(i), Anchor::MM);
+                draw_counting(c, cx, y0 + 8.0, pct, "%", super::VALUE, 13.5, color(i), Anchor::MM);
                 c.text(cx, y0 + 23.0, NAMES[i], Face::Regular, 10.0, MUTED, Anchor::MM, Some(x1 - x0 - 2.0));
             } else {
                 let y = y0 + 6.0;
                 c.fill_circle(x0 + 4.0, y + 7.0, 3.5, color(i));
-                let pw = draw_counting(c, x1 - 6.0, y + 7.0, pct, "%", Face::Semibold, 13.5, text, Anchor::RM);
+                let pw = draw_counting(c, x1 - 6.0, y + 7.0, pct, "%", super::VALUE, 13.5, text, Anchor::RM);
                 // quanto está em uso agora, antes da porcentagem (menor, só a parte usada, ou
                 // nenhum, se o nome não couber inteiro: "Mem…" não diz o que é)
                 let amount_x = x1 - 6.0 - pw - 7.0;
@@ -806,11 +812,11 @@ impl System {
         for (index, row) in rows.iter().take(BACK_N).enumerate() {
             // as linhas sobem e aparecem uma depois da outra
             let appear = ease_out((since - index as f32 * BACK_P_STAGGER_MS) / BACK_P_RISE_MS);
-            let y = 44.0 + 36.0 * index as f32 + (1.0 - appear) * 8.0;
+            let y = 42.0 + 34.0 * index as f32 + (1.0 - appear) * 8.0;
             let icon = 22.0;
-            app_icon(c, row.icon.as_deref(), &row.name, 12.0, y + 3.0, icon, appear);
-            let tx = 12.0 + icon + 8.0;
-            let w = SMALL - tx - 10.0;
+            app_icon(c, row.icon.as_deref(), &row.name, PAD, y + 3.0, icon, appear);
+            let tx = PAD + icon + 8.0;
+            let w = SMALL - tx - PAD;
             c.text(tx, y + 2.0, &row.name, Face::Regular, 11.5, FG.alpha(appear), Anchor::LA, Some(w));
             c.text(tx, y + 17.0, &row.value, Face::Regular, 10.5, MUTED.alpha(0.66 * appear), Anchor::LA, Some(w));
         }
@@ -833,8 +839,8 @@ impl System {
         let y = G_FOOT_Y;
         c.hline_px(PAD, W - PAD, y, DIVIDER);
         let net = format!("↓ {}   ↑ {}", sysinfo::fmt_rate(self.rates.0), sysinfo::fmt_rate(self.rates.1));
-        c.text(PAD, y + 17.0, &net, Face::Regular, 11.5, MUTED, Anchor::LM, None);
-        c.text(W - PAD, y + 17.0, &format!("Ligado há {}", sysinfo::fmt_uptime(sysinfo::uptime())), Face::Regular, 11.5, MUTED, Anchor::RM, None);
+        c.text(PAD, y + 16.0, &net, Face::Regular, 11.5, MUTED, Anchor::LM, None);
+        c.text(W - PAD, y + 16.0, &format!("Ligado há {}", sysinfo::fmt_uptime(sysinfo::uptime())), Face::Regular, 11.5, MUTED, Anchor::RM, None);
     }
 }
 

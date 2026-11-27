@@ -1148,7 +1148,9 @@ impl App {
         let (s, margin) = (card.s, card.margin);
         let (w, h) = card.card_size();
         let (x, y) = (pos.0 + margin, pos.1 + margin);
-        let (gap, edge, reach) = (WIDGET_GAP * s, EDGE_GAP * s, SNAP_DIST * s);
+        // (o espaço entre widgets e até a borda arredondados como na arrumação: encaixados à mão
+        // ou arrumados, ficam à mesma distância)
+        let (gap, edge, reach) = ((WIDGET_GAP * s).round(), (EDGE_GAP * s).round(), SNAP_DIST * s);
         // candidatos: (posição do canto do cartão, linha-guia, retângulo de referência)
         let mut xs: Vec<(f32, Option<f32>, Rect)> = Vec::new();
         let mut ys: Vec<(f32, Option<f32>, Rect)> = Vec::new();

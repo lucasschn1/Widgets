@@ -398,7 +398,7 @@ impl Control {
                 ui.switch(id, rx - 40.0, cy - 11.0, *on, action.clone(), Some(row));
             }
             Control::Slider(id, value, lo, hi, step, label) => {
-                ui.text(rx, cy, label, 12.0, MUTED, Face::Regular, Anchor::RM, None);
+                ui.text(rx, cy, label, 12.0, MUTED, Face::UiRegular, Anchor::RM, None);
                 ui.slider(id, rx - SLIDER_VALUE - SLIDER_W, cy, SLIDER_W, *value, *lo, *hi, *step);
             }
             Control::Seg(id, options, current) => {
@@ -426,7 +426,7 @@ pub struct Row(pub String, pub Option<String>, pub Control);
 /// alinhado com o texto das linhas do cartão logo abaixo. Devolve o y do cartão.
 fn section(ui: &mut Ui, x: f32, y: f32, title: &str) -> f32 {
     PAINTING.with(|p| p.borrow_mut().section = title.to_string());
-    ui.text(x + ROW_TEXT_X, y, title, 13.0, FG.alpha(0.92), Face::Semibold, Anchor::LA, None);
+    ui.text(x + ROW_TEXT_X, y, title, 13.0, FG.alpha(0.92), Face::UiSemibold, Anchor::LA, None);
     #[cfg(test)]
     tests::placed(x, y, y + 18.0);
     y + 28.0
@@ -446,7 +446,7 @@ fn notes(ui: &mut Ui, x: f32, y: f32, w: f32, notes: &[&str]) -> f32 {
         let lines = ui.wrap(note, 11.5, text_w, NOTE_MAX_LINES);
         ui.icon(x + ROW_TEXT_X + 6.0, line_y + 8.5, "dicas", 12.0, FAINT);
         for (j, line) in lines.iter().enumerate() {
-            ui.text(text_x, line_y + NOTE_LINE * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(text_w));
+            ui.text(text_x, line_y + NOTE_LINE * j as f32, line, 11.5, MUTED, Face::UiRegular, Anchor::LA, Some(text_w));
         }
         line_y += NOTE_LINE * lines.len() as f32 + NOTE_GAP;
     }
@@ -635,19 +635,19 @@ fn rows(ui: &mut Ui, x: f32, y: f32, w: f32, rows: Vec<Row>) -> f32 {
             ui.circle(text_x + CHANGED_DOT, title_y, CHANGED_DOT, ACCENT);
             text_x += CHANGED_GAP;
         }
-        let tw = ui.text(text_x, title_y, title, 13.0, FG, Face::Regular, Anchor::LM, Some(text_w - (text_x - x - ROW_TEXT_X - ROW_ICON_SPACE)));
+        let tw = ui.text(text_x, title_y, title, 13.0, FG, Face::UiRegular, Anchor::LM, Some(text_w - (text_x - x - ROW_TEXT_X - ROW_ICON_SPACE)));
         if let Some(action) = undo {
             let id = format!("desfazer:{}:{top}", title);
             let ux = text_x + tw + 10.0;
-            let uw = ui.text_width("Desfazer", 11.5, Face::Semibold);
+            let uw = ui.text_width("Desfazer", 11.5, Face::UiSemibold);
             let hot = ui.hot(&id);
-            ui.text(ux, title_y, "Desfazer", 11.5, if hot { ACCENT_HOVER } else { ACCENT }, Face::Semibold, Anchor::LM, None);
+            ui.text(ux, title_y, "Desfazer", 11.5, if hot { ACCENT_HOVER } else { ACCENT }, Face::UiSemibold, Anchor::LM, None);
             ui.region(&id, ux - 4.0, title_y - 10.0, ux + uw + 4.0, title_y + 10.0, action.clone(), Cursor::Hand);
             PAINTING.with(|p| p.borrow_mut().undo.push(action));
         }
         let desc_x = x + ROW_TEXT_X + ROW_ICON_SPACE;
         for (j, line) in ls.iter().enumerate() {
-            ui.text(desc_x, top + 36.0 + 17.0 * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(text_w));
+            ui.text(desc_x, top + 36.0 + 17.0 * j as f32, line, 11.5, MUTED, Face::UiRegular, Anchor::LA, Some(text_w));
         }
         top += h;
     }
@@ -775,8 +775,8 @@ fn page_results(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
     let index = st.index.clone().unwrap_or_default();
     let found = search_results(&index, &st.search);
     if found.is_empty() {
-        ui.text(x + w / 2.0, 60.0, &format!("Nenhuma opção com “{}”", st.search.trim()), 14.0, FG, Face::Semibold, Anchor::MM, Some(w));
-        ui.text(x + w / 2.0, 86.0, "Tente “chuva”, “bateria”, “vidro” ou “ilha”", 12.0, MUTED, Face::Regular, Anchor::MM, Some(w));
+        ui.text(x + w / 2.0, 60.0, &format!("Nenhuma opção com “{}”", st.search.trim()), 14.0, FG, Face::UiSemibold, Anchor::MM, Some(w));
+        ui.text(x + w / 2.0, 86.0, "Tente “chuva”, “bateria”, “vidro” ou “ilha”", 12.0, MUTED, Face::UiRegular, Anchor::MM, Some(w));
         return 120.0;
     }
     let mut y = 4.0;
@@ -804,9 +804,9 @@ fn page_results(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
             }
             ui.tile(x + ROW_TEXT_X, top + RESULT_H / 2.0 - ROW_ICON / 2.0, ROW_ICON, page_color(page), page_icon(page), false);
             let text_x = x + ROW_TEXT_X + ROW_ICON_SPACE;
-            let crumb_w = ui.text(x + w - 18.0, top + 21.0, &item.section, 11.0, FAINT, Face::Regular, Anchor::RM, Some(w * 0.3));
-            ui.text(text_x, top + 21.0, &item.title, 13.0, FG, Face::Regular, Anchor::LM, Some(x + w - 18.0 - crumb_w - 16.0 - text_x));
-            ui.text(text_x, top + 34.0, &item.desc, 11.5, MUTED, Face::Regular, Anchor::LA, Some(x + w - 18.0 - text_x));
+            let crumb_w = ui.text(x + w - 18.0, top + 21.0, &item.section, 11.0, FAINT, Face::UiRegular, Anchor::RM, Some(w * 0.3));
+            ui.text(text_x, top + 21.0, &item.title, 13.0, FG, Face::UiRegular, Anchor::LM, Some(x + w - 18.0 - crumb_w - 16.0 - text_x));
+            ui.text(text_x, top + 34.0, &item.desc, 11.5, MUTED, Face::UiRegular, Anchor::LA, Some(x + w - 18.0 - text_x));
             ui.region(&id, x, top, x + w, top + RESULT_H, Action::Find(page, item.y), Cursor::Hand);
         }
         y += h + 26.0;
@@ -824,8 +824,8 @@ fn draw_sidebar(st: &SettingsState, ui: &mut Ui, v: &View) {
     let icon = crate::ui::tray::icon_image((NAV_ICON * ui.s()).round() as u32);
     ui.image(&icon, x0 + NAV_TILE_X - 3.0, HEADER_CY - NAV_ICON / 2.0);
     let text_x = x0 + NAV_TEXT_X;
-    ui.text(text_x, HEADER_CY - 1.0, "Widgets", 15.0, FG, Face::Semibold, Anchor::LS, None);
-    ui.text(text_x, HEADER_CY + 2.0, "Configurações", 11.0, MUTED, Face::Regular, Anchor::LA, None);
+    ui.text(text_x, HEADER_CY - 1.0, "Widgets", 15.0, FG, Face::UiSemibold, Anchor::LS, None);
+    ui.text(text_x, HEADER_CY + 2.0, "Configurações", 11.0, MUTED, Face::UiRegular, Anchor::LA, None);
     // a busca: digite "chuva" ou "bateria" e a página mostra as opções de qualquer página
     ui.entry(SEARCH_ID, x0 + NAV_PILL_X, SEARCH_TOP, x1 - NAV_PILL_X, SEARCH_TOP + SEARCH_H, &st.search, "Buscar uma opção", false);
     draw_nav_list(st, ui, v, x0, x1);
@@ -859,7 +859,7 @@ fn draw_nav_list(st: &SettingsState, ui: &mut Ui, v: &View, x0: f32, x1: f32) {
             if label.is_empty() {
                 ui.fill(x0 + 18.0, y + 8.0, x1 - 18.0, y + 9.0, 0.0, WHITE.with_a(16));
             } else {
-                ui.text(x0 + NAV_TILE_X, y + 13.0, &label, 9.5, FAINT, Face::Semibold, Anchor::LA, None);
+                ui.text(x0 + NAV_TILE_X, y + 13.0, &label, 9.5, FAINT, Face::UiSemibold, Anchor::LA, None);
             }
             continue;
         }
@@ -871,14 +871,14 @@ fn draw_nav_list(st: &SettingsState, ui: &mut Ui, v: &View, x0: f32, x1: f32) {
         let hidden = widgets::KEYS.contains(&page) && !v.visible.contains(&page);
         ui.tile(x0 + NAV_TILE_X, y + (NAV_ITEM - NAV_TILE) / 2.0, NAV_TILE, page_color(page), icon, hidden);
         let color = if hidden { FAINT } else { FG };
-        let face = if active { Face::Semibold } else { Face::Regular };
-        let tag_w = if hidden { ui.text_width("oculto", 9.5, Face::Semibold) + 12.0 } else { 0.0 };
+        let face = if active { Face::UiSemibold } else { Face::UiRegular };
+        let tag_w = if hidden { ui.text_width("oculto", 9.5, Face::UiSemibold) + 12.0 } else { 0.0 };
         ui.text(x0 + NAV_TEXT_X, y + NAV_ITEM / 2.0, &label, 12.5, color, face, Anchor::LM, Some(x1 - x0 - NAV_TEXT_X - 20.0 - tag_w));
         if hidden {
             // a etiqueta "oculto": o widget existe, mas não está na área de trabalho
             let (tag_x1, cy) = (x1 - 16.0, y + NAV_ITEM / 2.0);
             ui.fill(tag_x1 - tag_w, cy - 8.0, tag_x1, cy + 8.0, 8.0, WHITE.with_a(18));
-            ui.text(tag_x1 - tag_w / 2.0, cy, "oculto", 9.5, FAINT, Face::Semibold, Anchor::MM, None);
+            ui.text(tag_x1 - tag_w / 2.0, cy, "oculto", 9.5, FAINT, Face::UiSemibold, Anchor::MM, None);
         }
         ui.region(&id, pill_x0, y, pill_x1, y + NAV_ITEM, Action::Go(page), Cursor::Hand);
     }
@@ -908,7 +908,7 @@ fn draw_page_title(st: &SettingsState, ui: &mut Ui, v: &View, undo: Vec<Action>)
             // o widget na área de trabalho: o interruptor no título, como o de um app nos Ajustes
             let visible = v.visible.contains(&st.page);
             ui.switch("ver:hero", right - 40.0, HEADER_CY - 11.0, visible, Action::Visible(st.page, !visible), None);
-            let lw = ui.text(right - 52.0, HEADER_CY, "Na área de trabalho", 12.5, FG, Face::Regular, Anchor::RM, None);
+            let lw = ui.text(right - 52.0, HEADER_CY, "Na área de trabalho", 12.5, FG, Face::UiRegular, Anchor::RM, None);
             ui.region("ver:hero:texto", right - 56.0 - lw, HEADER_CY - 12.0, right - 44.0, HEADER_CY + 12.0, Action::Visible(st.page, !visible), Cursor::Hand);
             right -= 56.0 + lw + 22.0;
         }
@@ -922,7 +922,7 @@ fn draw_page_title(st: &SettingsState, ui: &mut Ui, v: &View, undo: Vec<Action>)
                 _ => Action::Many(undo),
             };
             let bw = ui.button("restaurar:tudo", right, HEADER_CY - 16.0, "Restaurar tudo", action, "ghost", 'r', None, Some("undo"));
-            let lw = ui.text(right - bw - 6.0, HEADER_CY, &label, 11.5, MUTED, Face::Regular, Anchor::RM, None);
+            let lw = ui.text(right - bw - 6.0, HEADER_CY, &label, 11.5, MUTED, Face::UiRegular, Anchor::RM, None);
             ui.circle(right - bw - 14.0 - lw, HEADER_CY, CHANGED_DOT, ACCENT);
             right -= bw + 24.0 + lw;
         }
@@ -931,11 +931,11 @@ fn draw_page_title(st: &SettingsState, ui: &mut Ui, v: &View, undo: Vec<Action>)
     let room = right - tx - 12.0;
     match subtitle {
         Some(sub) => {
-            ui.text(tx, HEADER_CY - 1.0, &title, 21.0, FG, Face::Semibold, Anchor::LS, Some(room));
-            ui.text(tx, HEADER_CY + 3.0, &sub, 11.5, MUTED, Face::Regular, Anchor::LA, Some(room));
+            ui.text(tx, HEADER_CY - 1.0, &title, 21.0, FG, Face::UiSemibold, Anchor::LS, Some(room));
+            ui.text(tx, HEADER_CY + 3.0, &sub, 11.5, MUTED, Face::UiRegular, Anchor::LA, Some(room));
         }
         None => {
-            ui.text(tx, HEADER_CY, &title, 21.0, FG, Face::Semibold, Anchor::LM, Some(room));
+            ui.text(tx, HEADER_CY, &title, 21.0, FG, Face::UiSemibold, Anchor::LM, Some(room));
         }
     }
 }
@@ -1270,13 +1270,13 @@ fn draw_preview(st: &mut SettingsState, ui: &mut Ui, x: f32, y: f32, w: f32, h: 
         ui.image(&img, x, y);
     }
     ui.rect(x, y, x + w, y + h, 12.0, None, Some(WHITE.with_a(30)), 1.0);
-    ui.text(x + 14.0, y + h - 10.0, "Prévia ao vivo", 10.5, WHITE.with_a(200), Face::Semibold, Anchor::LS, None);
+    ui.text(x + 14.0, y + h - 10.0, "Prévia ao vivo", 10.5, WHITE.with_a(200), Face::UiSemibold, Anchor::LS, None);
 }
 
 fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     let bw = ui.button("editar", x, 4.0, "Editar widgets", Action::Edit, "primary", 'l', None, Some("edit"));
     ui.button("organizar", x + bw + 8.0, 4.0, "Organizar", Action::Arrange, "secondary", 'l', None, Some("refresh"));
-    ui.text(x + w, 20.0, "Clique direito num widget para mais opções", 11.0, MUTED, Face::Regular, Anchor::RM, None);
+    ui.text(x + w, 20.0, "Clique direito num widget para mais opções", 11.0, MUTED, Face::UiRegular, Anchor::RM, None);
     let y = 56.0;
     let gap = 16.0;
     let (tile_w, tile_h, stage_h) = ((w - gap) / 2.0, 262.0, 146.0);
@@ -1302,10 +1302,10 @@ fn page_widgets(st: &mut SettingsState, ui: &mut Ui, x: f32, w: f32, v: &View) -
             ui.image(&img, tx + 8.0 + (tile_w - 16.0 - img.w as f32 / s) / 2.0, ty + 8.0 + (stage_h - img.h as f32 / s) / 2.0);
         }
         let ny = ty + stage_h + 22.0;
-        ui.text(tx + 16.0, ny, widgets::title(key), 14.0, FG, Face::Semibold, Anchor::LM, Some(tile_w - 90.0));
+        ui.text(tx + 16.0, ny, widgets::title(key), 14.0, FG, Face::UiSemibold, Anchor::LM, Some(tile_w - 90.0));
         ui.switch(&format!("ver:{key}"), tx + tile_w - 56.0, ny - 11.0, visible, Action::Visible(key, !visible), None);
         for (j, line) in ui.wrap(widgets::description(key), 11.5, tile_w - 32.0, 2).iter().enumerate() {
-            ui.text(tx + 16.0, ny + 18.0 + j as f32 * 17.0, line, 11.5, MUTED, Face::Regular, Anchor::LA, Some(tile_w - 32.0));
+            ui.text(tx + 16.0, ny + 18.0 + j as f32 * 17.0, line, 11.5, MUTED, Face::UiRegular, Anchor::LA, Some(tile_w - 32.0));
         }
         ui.button(&format!("opcoes:{key}"), tx + 10.0, ty + tile_h - 40.0, "Opções", Action::Go(key), "ghost", 'l', None, None);
     }
@@ -1554,11 +1554,11 @@ fn hero_actions(key: &str, visible: bool) -> Vec<(&'static str, &'static str, Ac
 /// Um atalho no palco: uma pílula escura translúcida com o ícone de atualizar e o rótulo, com a
 /// borda direita em `right`. Devolve a largura.
 fn chip(ui: &mut Ui, id: &str, right: f32, y: f32, label: &str, action: Action) -> f32 {
-    let w = ui.text_width(label, 11.5, Face::Semibold) + 42.0;
+    let w = ui.text_width(label, 11.5, Face::UiSemibold) + 42.0;
     let hot = ui.hot(id);
     ui.rect(right - w, y, right, y + CHIP_H, CHIP_H / 2.0, Some(Rgba(0, 0, 0, if hot { 150 } else { 110 })), Some(WHITE.with_a(40)), 1.0);
     ui.icon(right - w + 17.0, y + CHIP_H / 2.0, "refresh", 12.0, WHITE);
-    ui.text(right - w + 29.0, y + CHIP_H / 2.0, label, 11.5, WHITE, Face::Semibold, Anchor::LM, None);
+    ui.text(right - w + 29.0, y + CHIP_H / 2.0, label, 11.5, WHITE, Face::UiSemibold, Anchor::LM, None);
     ui.region(id, right - w, y, right, y + CHIP_H, action, Cursor::Hand);
     w
 }
@@ -1606,7 +1606,7 @@ fn size_bar(ui: &mut Ui, key: &str, cx: f32, y: f32, current: Mode) {
         let l = widgets::Layout::of(m);
         (SIZE_SHAPE_BOX.0 / l.w).min(SIZE_SHAPE_BOX.1 / l.h)
     }).fold(f32::INFINITY, f32::min);
-    let widths: Vec<f32> = Mode::ALL.iter().map(|m| ui.text_width(m.name(), 11.5, Face::Semibold) + SIZE_SHAPE_BOX.0 + 30.0).collect();
+    let widths: Vec<f32> = Mode::ALL.iter().map(|m| ui.text_width(m.name(), 11.5, Face::UiSemibold) + SIZE_SHAPE_BOX.0 + 30.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
     let x0 = cx - total / 2.0;
     ui.rect(x0, y, x0 + total, y + SIZE_BAR_H, SIZE_BAR_H / 2.0, Some(Rgba(0, 0, 0, 120)), Some(WHITE.with_a(40)), 1.0);
@@ -1625,7 +1625,7 @@ fn size_bar(ui: &mut Ui, key: &str, cx: f32, y: f32, current: Mode) {
         let shape_cx = ox + 12.0 + SIZE_SHAPE_BOX.0 / 2.0;
         let cy = y + SIZE_BAR_H / 2.0;
         ui.fill(shape_cx - shape_w / 2.0, cy - shape_h / 2.0, shape_cx + shape_w / 2.0, cy + shape_h / 2.0, 2.0, ink);
-        ui.text(ox + 18.0 + SIZE_SHAPE_BOX.0, cy, mode.name(), 11.5, ink, Face::Semibold, Anchor::LM, None);
+        ui.text(ox + 18.0 + SIZE_SHAPE_BOX.0, cy, mode.name(), 11.5, ink, Face::UiSemibold, Anchor::LM, None);
         ui.region(&option, ox, y, ox + bw, y + SIZE_BAR_H, Action::Seg(id, mode.code().to_string()), Cursor::Hand);
         ox += bw;
     }
@@ -1670,8 +1670,8 @@ fn page_dicas(ui: &mut Ui, x: f32, w: f32) -> f32 {
 fn page_sobre(ui: &mut Ui, x: f32, w: f32, v: &View) -> f32 {
     let icon = crate::ui::tray::icon_image((56.0 * ui.s()).round() as u32);
     ui.image(&icon, x, 4.0);
-    ui.text(x + 74.0, 12.0, "Widgets da área de trabalho", 18.0, FG, Face::Semibold, Anchor::LA, None);
-    ui.text(x + 74.0, 40.0, &format!("Versão {VERSION}  ·  feito em Rust, com Direct2D"), 12.0, MUTED, Face::Regular, Anchor::LA, None);
+    ui.text(x + 74.0, 12.0, "Widgets da área de trabalho", 18.0, FG, Face::UiSemibold, Anchor::LA, None);
+    ui.text(x + 74.0, 40.0, &format!("Versão {VERSION}  ·  feito em Rust, com Direct2D"), 12.0, MUTED, Face::UiRegular, Anchor::LA, None);
     let update = match &v.update_version {
         Some(ver) => Control::Button("atualizar", format!("Atualizar para {ver}"), Action::Widget("app", 1), "primary", Some("refresh")),
         None => Control::Button("procurar", "Procurar agora".into(), Action::Widget("app", 2), "secondary", Some("refresh")),

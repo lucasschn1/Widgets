@@ -56,6 +56,24 @@ fn source_label(kind: &str) -> &'static str {
     }
 }
 
+/// O verde do logo do Spotify e o vermelho do logo do YouTube.
+const SPOTIFY_GREEN: Rgba = Rgba::rgb(30, 215, 96);
+const YOUTUBE_RED: Rgba = Rgba::rgb(255, 0, 51);
+
+/// A cor do título: a do logo de quem está tocando (o "Mídia", sem player, fica branco).
+pub(crate) fn source_color(kind: &str) -> Rgba {
+    match kind {
+        "spotify" => SPOTIFY_GREEN,
+        "youtube" => YOUTUBE_RED,
+        _ => FG,
+    }
+}
+
+/// Escreve o título do widget (de onde vem o som), na cor do logo do player.
+fn draw_source(c: &mut Canvas, x: f32, y: f32, kind: &str) {
+    super::draw_label_in(c, x, y, source_label(kind), source_color(kind));
+}
+
 /// O Spotify está instalado (o endereço "spotify:" abre o app)?
 fn spotify_installed() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -574,9 +592,10 @@ fn watch(rx: std::sync::mpsc::Receiver<Cmd>, snapshot: Arc<Mutex<Option<Snapshot
 
 const W: f32 = WIDE;
 // grande: a capa grande em cima; embaixo, a fonte, título e
-// artista, a barra, aleatório/controles/repetir numa linha só e o volume do app no pé
-const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, 240.0, 18.0); // x, y, largura, altura, raio
-const G_TEXT_Y: f32 = 266.0;
+// artista, a barra, aleatório/controles/repetir numa linha só e o volume do app no pé (tudo
+// medido de baixo para cima: a capa fica com a altura que sobra)
+const G_ART: (f32, f32, f32, f32, f32) = (16.0, 16.0, W - 32.0, LARGE_H - 208.0, 18.0); // x, y, largura, altura, raio
+const G_TEXT_Y: f32 = LARGE_H - 182.0;
 const G_VOL_Y: f32 = LARGE_H - 26.0;
 /// aleatório e repetir: nas pontas da linha dos controles
 const G_TOG_X: f32 = 34.0;
@@ -586,8 +605,8 @@ const ART_RADIUS: f32 = 14.0;
 const ART_XY: (f32, f32) = (CARD_PAD, CARD_PAD);
 const TEXT_X: f32 = CARD_PAD;
 const TEXT_W: f32 = W - 2.0 * CARD_PAD;
-const BAR_Y: f32 = 328.0;
-const CTRL_Y: f32 = 372.0;
+const BAR_Y: f32 = LARGE_H - 120.0;
+const CTRL_Y: f32 = LARGE_H - 76.0;
 const PLAY_D: f32 = 44.0;
 /// grande sem nada tocando: não há barra, controles nem volume, então a área da capa cresce e o
 /// texto e o botão descem, até o botão fechar o pé do cartão (sem um vão vazio embaixo)
@@ -604,7 +623,8 @@ const C_PLAY_D: f32 = 34.0;
 /// o avançar do pequeno (embaixo do tocar) e o espaço entre os dois
 const C_NEXT: f32 = 13.0;
 const C_CTRL_GAP: f32 = 10.0;
-const C_BAR_Y: f32 = 138.0;
+/// pequeno: a barra de progresso termina na margem de baixo
+const C_BAR_Y: f32 = SMALL - CARD_PAD - 3.0;
 const C_IDLE_BOX: (f32, f32, f32, f32) = (CARD_PAD + 12.0, CARD_PAD + 12.0, 40.0, 40.0); // equalizador no lugar da capa
 
 // médio: a capa na altura toda à esquerda; à direita, fonte, título e artista, os controles e
@@ -968,7 +988,7 @@ impl Media {
     /// (x0, x1, y, espessura) da barra de progresso.
     fn bar_geom(&self, mode: Mode) -> Option<(f32, f32, f32, f32)> {
         match mode {
-            Mode::P => Some((14.0, SMALL - 14.0, C_BAR_Y, 3.0)),
+            Mode::P => Some((CARD_PAD, SMALL - CARD_PAD, C_BAR_Y, 3.0)),
             Mode::M => Some((M_TEXT_X, W - 16.0, M_BAR_Y, 3.0)),
             Mode::G => Some((18.0, W - 18.0, BAR_Y, 4.0)),
         }
@@ -1281,8 +1301,8 @@ impl Media {
         if mode == Mode::G {
             let pos = self.position();
             let ty = y + h + 6.0;
-            c.text(x0, ty, &fmt_time(pos), Face::Regular, 10.0, MUTED, Anchor::LA, None);
-            c.text(x1, ty, &format!("-{}", fmt_time(track.duration - pos)), Face::Regular, 10.0, MUTED, Anchor::RA, None);
+            c.text(x0, ty, &fmt_time(pos), Face::Numbers, 10.0, MUTED, Anchor::LA, None);
+            c.text(x1, ty, &format!("-{}", fmt_time(track.duration - pos)), Face::Numbers, 10.0, MUTED, Anchor::RA, None);
         }
     }
 
@@ -1455,7 +1475,7 @@ impl Media {
     fn draw_medium_playing(&self, c: &mut Canvas, track: &Snapshot, has_bg: bool) {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         self.draw_art_or_note(c, Mode::M, 28.0);
-        super::draw_label(c, x, super::LABEL_Y, source_label(track.kind));
+        draw_source(c, x, super::LABEL_Y, track.kind);
         self.draw_title(c, track, Mode::M, has_bg);
         c.text(x, 50.0, &track.artist, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
     }
@@ -1465,7 +1485,7 @@ impl Media {
         let (x, w) = (M_TEXT_X, M_TEXT_W);
         let (title, sub) = self.idle_message();
         let kind = self.pref();
-        super::draw_label(c, x, super::LABEL_Y, source_label(&kind));
+        draw_source(c, x, super::LABEL_Y, &kind);
         c.text(x, 30.0, &title, Face::Semibold, 13.5, FG, Anchor::LA, Some(w));
         for (i, line) in c.wrap_balanced(&sub, Face::Regular, 11.5, w, 2).iter().enumerate() {
             c.text(x, 50.0 + 16.0 * i as f32, line, Face::Regular, 11.5, MUTED, Anchor::LA, Some(w));
@@ -1479,7 +1499,7 @@ impl Media {
         let (x, w) = (TEXT_X, TEXT_W);
         let kind = track.map(|track| track.kind.to_string()).unwrap_or_else(|| self.pref());
         let y = if track.is_some() { G_TEXT_Y } else { G_TEXT_Y + G_IDLE_GROW };
-        super::draw_label(c, x, y, source_label(&kind));
+        draw_source(c, x, y, &kind);
         match track {
             Some(track) => {
                 self.draw_art_or_note(c, Mode::G, 44.0);
@@ -2003,6 +2023,30 @@ mod cover_tests {
         }
     }
 
+    /// O título ("Spotify", "YouTube") sai na cor do logo do player, no médio e no grande; sem
+    /// player conhecido, "Mídia" fica branco.
+    #[test]
+    fn source_title_has_the_brand_color() {
+        com();
+        let env_cfg = serde_json::json!({"midia": {}, "app": {}});
+        let env = Env { cfg: &env_cfg, key: "midia" };
+        for (kind, color) in [("spotify", SPOTIFY_GREEN), ("youtube", YOUTUBE_RED)] {
+            let mut m = Media::sample();
+            m.media.as_mut().unwrap().kind = kind;
+            for (mode, (x, y)) in [(Mode::M, (M_TEXT_X, super::super::LABEL_Y)), (Mode::G, (TEXT_X, G_TEXT_Y))] {
+                let l = Layout::of(mode);
+                let mut c = Canvas::new(l.w as u32, l.h as u32, 1.0);
+                Kind::draw(&m, &mut c, mode, &env);
+                let img = c.finish();
+                // algum pixel do título, opaco, quase da cor do logo (a imagem é BGRA)
+                let near = |px: &[u8]| px[3] > 230 && (px[2] as i32 - color.0 as i32).abs() < 40 && (px[1] as i32 - color.1 as i32).abs() < 40 && (px[0] as i32 - color.2 as i32).abs() < 40;
+                let found = (y as u32..y as u32 + 14).any(|py| (x as u32..x as u32 + 70).any(|px| near(&img.px[((py * img.w + px) * 4) as usize..][..4])));
+                assert!(found, "{kind} {mode:?}: o título não está na cor do logo");
+            }
+        }
+        assert_eq!(source_color("auto"), FG);
+    }
+
     /// Degradê com um ponto claro no meio (uma "miniatura" qualquer).
     fn picture(w: u32, h: u32, seed: u32) -> Image {
         let mut img = Image::new(w, h);
@@ -2120,7 +2164,7 @@ mod cover_tests {
     fn large_has_room_for_a_big_cover() {
         com();
         // a capa quadrada do grande ocupa bem mais que antes (200), sem sobrar tanto dos lados
-        assert!(G_ART.3 >= 240.0);
+        assert!(G_ART.3 >= 220.0);
         let mut m = Media::sample_art("spotify", 300, 300);
         if let Some(snap) = &mut m.media {
             (snap.can_shuffle, snap.shuffle, snap.can_repeat, snap.repeat) = (true, Some(false), true, Some(0));

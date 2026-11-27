@@ -3,7 +3,7 @@
 //! diário; o médio, os dois; o grande, os dois e os dias da semana em que mais se usa. Os números
 //! vêm do Claude Code (ver `claude_usage`).
 //!
-//! No vidro, como os outros widgets, na fonte Outfit e com os medidores em laranja. O arco cresce
+//! No vidro, como os outros widgets, na fonte Geist e com os medidores em laranja. O arco cresce
 //! aos poucos quando o uso sobe; ao passar de 90%, fica vermelho e a bolinha da ponta dá um pulo.
 
 use std::cell::RefCell;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::clawd::{self, Anim, Crab, Mood};
 use super::odometer;
-use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Request, Status, SMALL, WIDE};
+use super::{Ctx, Env, Hot, HoverStyle, Kind, MenuItem, Mode, Request, Status, LARGE_H, SMALL, WIDE};
 use crate::data::claude_history::{self as history, Tool, Turn, HISTORY_DAYS};
 use crate::data::claude_usage::{self as usage, Link, Notice, Usage, Window, FIVE_HOURS};
 use crate::gfx::{Anchor, Canvas, Face};
@@ -95,14 +95,14 @@ const RED: Rgba = crate::ui::theme::RED;
 /// (uns 27°) e o dos avisos (uns 34°); o laranja do Claude (uns 59°) muda.
 const ALERT_HUES: (f32, f32) = (15.0, 45.0);
 
-// ---------- fontes: a Outfit, embutida no app ----------
+// ---------- fontes: a Geist, a mesma dos outros widgets ----------
 /// a porcentagem
 /// os números grandes (os mesmos dos outros widgets)
 const NUM: Face = super::PERCENT;
 /// os textos
-const TEXT: Face = Face::Custom("Outfit", 400);
+const TEXT: Face = Face::Regular;
 /// os títulos e o botão
-const BOLD: Face = Face::Custom("Outfit", 600);
+const BOLD: Face = Face::Semibold;
 
 /// No médio, quantos quadradinhos o Clawd fica à esquerda do meio com o notebook de lado (ou a
 /// plaquinha) à direita, e quanto tempo leva andando até lá (ou de volta).
@@ -358,12 +358,17 @@ fn note_spot(mode: Mode) -> Option<(f32, f32)> {
     }
 }
 
+/// No grande, o pé do gráfico dos dias (e do botão de conectar) e a linha da previsão embaixo
+/// dele: medidos do pé do cartão, com a mesma margem dos outros widgets embaixo da previsão.
+const LARGE_FORECAST_Y: f32 = LARGE_H - super::CARD_PAD - 14.0;
+const LARGE_DAYS_BOTTOM: f32 = LARGE_FORECAST_Y - 22.0;
+
 /// Botão "Conectar ao Claude Code" em cada tamanho: (x0, y0, x1, y1).
 fn connect_rect(mode: Mode) -> (f32, f32, f32, f32) {
     match mode {
-        Mode::P => (14.0, SMALL - 38.0, SMALL - 14.0, SMALL - 12.0),
+        Mode::P => (super::CARD_PAD, SMALL - super::CARD_PAD - 26.0, SMALL - super::CARD_PAD, SMALL - super::CARD_PAD),
         Mode::M => (172.0, 96.0, WIDE - 18.0, 124.0),
-        Mode::G => (60.0, 360.0, WIDE - 60.0, 394.0),
+        Mode::G => (60.0, LARGE_DAYS_BOTTOM - 34.0, WIDE - 60.0, LARGE_DAYS_BOTTOM),
     }
 }
 
@@ -1140,10 +1145,10 @@ impl Claude {
             let half = (WIDE / 2.0 - pad) * r.line.min(1.0);
             c.fill_round_rect(WIDE / 2.0 - half, 232.0, WIDE / 2.0 + half, 233.0, 0.5, WHITE.alpha(0.1 * r.line.min(1.0)));
         }
-        faded(c, r.days, |c| self.draw_weekdays(c, pad, 248.0, WIDE - pad, 394.0, &r.bars));
+        faded(c, r.days, |c| self.draw_weekdays(c, pad, 248.0, WIDE - pad, LARGE_DAYS_BOTTOM, &r.bars));
         if let Some((text, warn)) = self.forecast(now) {
             faded(c, r.forecast, |c| {
-                c.text(WIDE / 2.0, 416.0, &text, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE - 2.0 * pad));
+                c.text(WIDE / 2.0, LARGE_FORECAST_Y, &text, TEXT, 10.5, if warn { ALERT } else { MUTED }, Anchor::MA, Some(WIDE - 2.0 * pad));
             });
         }
     }
@@ -1262,7 +1267,7 @@ impl Claude {
                     c.fill_round_rect(bx0, base - h, bx1, base, 6.0_f32.min(h / 2.0), color);
                     if Some(i) == top {
                         let share = format!("{}%", (days[i] / total * 100.0).round());
-                        c.text(cx, base - h - 6.0, &share, TEXT, 10.5, FG, Anchor::MS, None);
+                        c.text(cx, base - h - 6.0, &share, super::VALUE, 10.5, FG, Anchor::MS, None);
                     }
                 }
                 // hoje escrito por extenso: o branco sozinho parecia mais um destaque, ao lado do laranja

@@ -58,10 +58,12 @@ const CHARGE_TEXT: Rgba = Rgba::rgb(125, 219, 160);
 const LOW_TEXT: Rgba = Rgba::rgb(255, 154, 144);
 /// os números grandes (os mesmos dos outros widgets)
 const NUM: Face = super::PERCENT;
-const TEXT: Face = Face::Custom("Outfit", 400);
-const MEDIUM: Face = Face::Custom("Outfit", 500);
-const BOLD: Face = Face::Custom("Outfit", 600);
-/// a altura dos dígitos da Outfit (em relação ao tamanho da fonte): para centrar o número no anel
+/// os valores menores (a saúde, os ciclos, a carga de cada aparelho)
+const VALUE: Face = super::VALUE;
+const TEXT: Face = Face::Regular;
+const MEDIUM: Face = Face::Medium;
+const BOLD: Face = Face::Semibold;
+/// a altura dos dígitos da fonte dos números (em relação ao tamanho da fonte): para centrar o número no anel
 const DIGIT_H: f32 = 0.70;
 /// o "%" em relação ao número
 const PCT: f32 = 0.37;
@@ -120,17 +122,28 @@ impl Ring {
 }
 
 const RING_M: Ring = Ring { cx: 66.0, cy: 58.0, r: 40.0, w: 8.0 };
+/// grande: onde começa a lista dos aparelhos, embaixo do painel do gráfico
+const G_ROWS_Y: f32 = 314.0;
 const RING_G: Ring = Ring { cx: 80.0, cy: 126.0, r: 52.0, w: 10.0 };
 /// a margem de dentro do cartão médio e do grande (a de todos os widgets)
 const INSET: f32 = super::CARD_PAD;
 /// no grande, a linha embaixo do rótulo (quanto falta ou de onde vem a energia)
 const TOP_LINE_Y: f32 = 30.0;
-/// o pequeno: a grade 2 × 2 começa em `CELL_X` (nos dois eixos), com lugares de `CELL`; cada anel
-/// tem raio `MINI_R` e traço `MINI_W`
+/// o pequeno: a grade 2 × 2 começa em `CELL_X` (nos dois eixos), com lugares de `CELL` (para
+/// saber em qual o mouse está); cada anel tem raio `MINI_R` e traço `MINI_W`, e os quatro vão até
+/// as margens do cartão, com a carga embaixo de cada um (como no Baterias do macOS)
 const CELL_X: f32 = super::CARD_PAD;
 const CELL: f32 = (SMALL - 2.0 * CELL_X) / 2.0;
-const MINI_R: f32 = 16.0;
-const MINI_W: f32 = 4.0;
+const MINI_R: f32 = 19.0;
+const MINI_W: f32 = 4.5;
+/// o raio de fora do anel do pequeno (até a borda do traço)
+const MINI_OUT: f32 = MINI_R + MINI_W / 2.0;
+/// a carga embaixo de cada anel do pequeno: o tamanho e o espaço entre o anel e o alto dos
+/// algarismos
+const MINI_LABEL_SIZE: f32 = 12.5;
+const MINI_LABEL_GAP: f32 = 4.0;
+/// o ícone no meio do anel do pequeno
+const MINI_ICON_SIZE: f32 = 19.0;
 
 /// O meio da abertura de baixo do anel (entre as duas pontas do arco): onde fica o ícone.
 fn g_opening(ring: Ring) -> (f32, f32) {
@@ -866,7 +879,7 @@ impl Battery {
             }
         };
         let vw = if d.connected {
-            c.text(x + w, name_y, &value, BOLD, size, if low { LOW } else { FG }, Anchor::RA, None)
+            c.text(x + w, name_y, &value, VALUE, size, if low { LOW } else { FG }, Anchor::RA, None)
         } else if c.text_width(&d.name, TEXT, size) + 8.0 + c.text_width(&value, TEXT, size - 1.0) <= x + w - nx {
             c.text(x + w, name_y + 1.0, &value, TEXT, size - 1.0, SUB, Anchor::RA, None)
         } else {
@@ -925,15 +938,23 @@ impl Battery {
         cells
     }
 
-    /// O centro do anel do lugar `i` (0 a 3) do pequeno.
+    /// O centro do anel do lugar `i` (0 a 3) do pequeno: os da esquerda e os de cima encostam
+    /// nas margens; os de baixo ficam tão no pé que a carga deles termina na margem de baixo.
     fn cell_center(i: usize) -> (f32, f32) {
-        (CELL_X + (i % 2) as f32 * CELL + CELL / 2.0, CELL_X + (i / 2) as f32 * CELL + 23.0)
+        let x = if i % 2 == 0 { CELL_X + MINI_OUT } else { SMALL - CELL_X - MINI_OUT };
+        let y = if i < 2 { CELL_X + MINI_OUT } else { SMALL - CELL_X - DIGIT_H * MINI_LABEL_SIZE - MINI_LABEL_GAP - MINI_OUT };
+        (x, y)
+    }
+
+    /// A linha de base da carga embaixo do anel com centro em `cy`, no pequeno.
+    fn cell_label_base(cy: f32) -> f32 {
+        cy + MINI_OUT + MINI_LABEL_GAP + DIGIT_H * MINI_LABEL_SIZE
     }
 
     fn draw_small(&self, c: &mut Canvas) {
         for (i, cell) in self.small_cells().into_iter().enumerate() {
             let (cx, cy) = Battery::cell_center(i);
-            let label_y = cy + 23.0;
+            let label_y = Battery::cell_label_base(cy);
             match cell {
                 Spot::Empty => c.arc(cx, cy, MINI_R, START, START + SWEEP, EMPTY_TRACK, MINI_W),
                 Spot::Laptop => {
@@ -945,13 +966,13 @@ impl Battery {
                         c.arc(cx, cy, MINI_R, START, START + SWEEP * level / 100.0, level_color(percent), MINI_W);
                     }
                     match self.badge() {
-                        Some((shape, scale, alpha)) => vector::icon(c, shape, cx, cy, 16.0 * scale, OK.alpha(alpha), if shape == vector::CHECK { 2.6 } else { 0.0 }),
-                        None => vector::icon(c, vector::LAPTOP, cx, cy, 16.0, if low { LOW } else { MINI_ICON }, 2.4),
+                        Some((shape, scale, alpha)) => vector::icon(c, shape, cx, cy, MINI_ICON_SIZE * scale, OK.alpha(alpha), if shape == vector::CHECK { 2.6 } else { 0.0 }),
+                        None => vector::icon(c, vector::LAPTOP, cx, cy, MINI_ICON_SIZE, if low { LOW } else { MINI_ICON }, 2.4),
                     }
                     // a do notebook rola como a porcentagem grande
                     let (before, roll) = self.rolled(|r| &r.percent);
                     let before = before.map(|b| format!("{b}%"));
-                    draw_rolling(c, cx, label_y, &format!("{}%", percent.round() as i32), before.as_deref(), roll, BOLD, 11.5, if low { LOW } else { FG }, Anchor::MA, None);
+                    draw_rolling(c, cx, label_y, &format!("{}%", percent.round() as i32), before.as_deref(), roll, VALUE, MINI_LABEL_SIZE, if low { LOW } else { FG }, Anchor::MS, None);
                 }
                 Spot::Dev(d) => self.draw_cell(c, d, cx, cy, label_y),
             }
@@ -977,7 +998,8 @@ impl Battery {
                 // uma onda sai do anel
                 if ms < RIPPLE_CELL_MS {
                     let wave = ease_out(ms / RIPPLE_CELL_MS);
-                    c.stroke_circle(cx, cy, MINI_R * (1.0 + 0.5 * wave), color.alpha(0.45 * (1.0 - wave)), 2.0 * (1.0 + 0.5 * wave));
+                    // (cresce até um terço a mais: com os anéis nas margens, não passa da borda)
+                    c.stroke_circle(cx, cy, MINI_R * (1.0 + 0.3 * wave), color.alpha(0.45 * (1.0 - wave)), 2.0 * (1.0 + 0.5 * wave));
                 }
             }
             Some((false, ms)) => {
@@ -995,11 +1017,11 @@ impl Battery {
             c.arc(cx, cy, MINI_R, START, START + SWEEP * level * arc / 100.0, color, MINI_W);
         }
         if icon_a > 0.01 {
-            vector::icon(c, icon_of(d.kind), cx, cy, 16.0 * icon_k, fade(if low { LOW } else { MINI_ICON }, icon_a), 2.4);
+            vector::icon(c, icon_of(d.kind), cx, cy, MINI_ICON_SIZE * icon_k, fade(if low { LOW } else { MINI_ICON }, icon_a), 2.4);
         }
         if num_a > 0.01 {
             let label = d.level.map_or("—".into(), |l| format!("{l}%"));
-            c.text(cx, label_y + num_dy, &label, BOLD, 11.5, fade(if low { LOW } else { FG }, num_a), Anchor::MA, None);
+            c.text(cx, label_y + num_dy, &label, VALUE, MINI_LABEL_SIZE, fade(if low { LOW } else { FG }, num_a), Anchor::MS, None);
         }
     }
 
@@ -1150,24 +1172,24 @@ impl Battery {
         for (i, (k, v)) in stats.iter().enumerate() {
             let top = 68.0 + i as f32 * 30.0;
             c.text(sx0, top + 15.0, k, TEXT, 11.5, SUB, Anchor::LM, None);
-            c.text(sx1, top + 15.0, v, BOLD, 13.0, FG, Anchor::RM, None);
+            c.text(sx1, top + 15.0, v, VALUE, 13.0, FG, Anchor::RM, None);
             if i < 3 {
                 c.fill_round_rect(sx0, top + 29.0, sx1, top + 30.0, 0.0, RULE);
             }
         }
         // o gráfico num painel de vidro mais claro
-        c.fill_round_rect(10.0, 204.0, WIDE - 10.0, 316.0, 18.0, PANEL);
-        c.stroke_round_rect(10.0, 204.0, WIDE - 10.0, 316.0, 18.0, PANEL_LINE, 1.0);
-        c.text(20.0, 222.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LM, None);
-        let lw = c.text(WIDE - 20.0, 222.0, "na tomada", TEXT, 10.5, LEGEND, Anchor::RM, None);
+        c.fill_round_rect(10.0, 196.0, WIDE - 10.0, 300.0, 18.0, PANEL);
+        c.stroke_round_rect(10.0, 196.0, WIDE - 10.0, 300.0, 18.0, PANEL_LINE, 1.0);
+        c.text(20.0, 214.0, "Últimas 24 horas", BOLD, 12.0, FG, Anchor::LM, None);
+        let lw = c.text(WIDE - 20.0, 214.0, "na tomada", TEXT, 10.5, LEGEND, Anchor::RM, None);
         let lx = WIDE - 20.0 - lw - 6.0 - 9.0;
-        c.fill_round_rect(lx, 217.5, lx + 9.0, 226.5, 3.0, OK.alpha(0.30));
-        c.stroke_round_rect(lx, 217.5, lx + 9.0, 226.5, 3.0, OK.alpha(0.55), 1.0);
-        self.draw_chart(c, 20.0, 238.0, WIDE - 20.0, 286.0);
+        c.fill_round_rect(lx, 209.5, lx + 9.0, 218.5, 3.0, OK.alpha(0.30));
+        c.stroke_round_rect(lx, 209.5, lx + 9.0, 218.5, 3.0, OK.alpha(0.55), 1.0);
+        self.draw_chart(c, 20.0, 230.0, WIDE - 20.0, 270.0);
         if self.devices.is_empty() {
-            self.draw_no_devices(c, WIDE / 2.0, 352.0, WIDE - 2.0 * INSET);
+            self.draw_no_devices(c, WIDE / 2.0, G_ROWS_Y + 22.0, WIDE - 2.0 * INSET);
         } else {
-            self.draw_rows(c, INSET, 330.0, WIDE - 2.0 * INSET, 26.0, 4, Row::Tile(22.0));
+            self.draw_rows(c, INSET, G_ROWS_Y, WIDE - 2.0 * INSET, 26.0, 4, Row::Tile(22.0));
         }
     }
 
@@ -1648,7 +1670,7 @@ impl Kind for Battery {
         let in_list = match (mode, self.power.is_some()) {
             (Mode::M, true) => x >= 130.0,
             (Mode::M, false) => y >= 40.0,
-            (Mode::G, true) => y >= 322.0,
+            (Mode::G, true) => y >= G_ROWS_Y - 8.0,
             _ => y >= 64.0,
         };
         in_list.then_some(OPEN_BLUETOOTH)
@@ -2399,7 +2421,7 @@ mod tests {
                 let number = bands[0];
                 let (dx, dy) = ((number[0] + number[2]) / 2.0 - ring.cx - optical, (number[1] + number[3]) / 2.0 - ring.cy);
                 // (um pixel a 125% é 0,8 pt, e os algarismos têm um respiro diferente de cada lado:
-                // o "1" da Nunito, mais à esquerda, empurra o "100%" uns 1,6 pt para a direita)
+                // o "1", mais à esquerda, empurra o "100%" uns 1,6 pt para a direita)
                 assert!(dx.abs() <= 2.0 && dy.abs() <= 1.0, "{name} {mode:?}: o número está {dx:+.1}, {dy:+.1} pt fora do meio");
             }
         }
@@ -2473,7 +2495,7 @@ mod tests {
             }
         }
         // as linhas do grande cabem embaixo do gráfico
-        assert!(334.0 + 3.0 * 25.0 + 21.0 <= super::super::LARGE_H - 16.0);
+        assert!(G_ROWS_Y + 4.0 + 3.0 * 25.0 + 21.0 <= super::super::LARGE_H - 16.0);
     }
 }
 

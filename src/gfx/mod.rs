@@ -91,23 +91,27 @@ impl Image {
 /// A fonte de um texto.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Face {
-    /// O texto (a Inter, embutida), no peso normal, médio e em seminegrito.
+    /// O texto dos widgets (e da ilha): a Geist, embutida, no peso normal, médio (botões e
+    /// destaques) e em seminegrito (títulos).
     Regular,
     Medium,
     Semibold,
-    /// Os números grandes (a temperatura, o relógio do Pomodoro): a Nunito, embutida, de pontas
-    /// arredondadas como a SF Pro Rounded dos widgets da Apple, no peso normal.
+    /// O texto das janelas do app (configurações, perguntas, menus): a Inter, embutida, no peso
+    /// normal e em seminegrito.
+    UiRegular,
+    UiSemibold,
+    /// Os números dos widgets: a Geist, com os algarismos todos da mesma largura (como todo
+    /// texto), no peso normal...
     Numbers,
-    /// A mesma, mais leve: a temperatura de agora no Tempo, o maior número de todos.
+    /// ... leve (os números grandes e os indicadores: o relógio do Pomodoro, as porcentagens no
+    /// meio dos anéis)...
     NumbersLight,
-    /// A mesma, um pouco mais firme (médio, e não seminegrito: as porcentagens dos anéis ficam
-    /// marcadas sem pesar).
+    /// ... mais leve ainda (a temperatura de agora no Tempo, o maior número de todos)...
+    NumbersExtraLight,
+    /// ... e médio (os valores menores: as temperaturas de cada hora, as porcentagens das listas).
     NumbersMedium,
     Symbol,
     Icons,
-    /// Qualquer família, no peso dado (100 a 900): primeiro entre as fontes embutidas no app
-    /// (a Outfit), senão entre as do Windows.
-    Custom(&'static str, u16),
 }
 
 /// Qual ponto do texto fica no (x, y) dado.
@@ -191,20 +195,21 @@ const LAYOUTS: usize = 1500;
 #[cfg(test)]
 pub static LAYOUT_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// As fontes embutidas, todas variáveis no peso e com a licença SIL Open Font License: a Outfit
-/// (res/fonts/OFL.txt), a Inter do texto (OFL-Inter.txt) e a Nunito dos números (OFL-Nunito.txt).
-static EMBEDDED: [&[u8]; 3] = [
-    include_bytes!("../../res/fonts/Outfit.ttf"),
+/// As fontes embutidas, as duas variáveis no peso e com a licença SIL Open Font License: a Inter
+/// das janelas (res/fonts/OFL-Inter.txt) e a Geist dos widgets (OFL-Geist.txt).
+static EMBEDDED: [&[u8]; 2] = [
     include_bytes!("../../res/fonts/Inter.ttf"),
-    include_bytes!("../../res/fonts/Nunito.ttf"),
+    include_bytes!("../../res/fonts/Geist.ttf"),
 ];
-/// As famílias do texto e dos números (embutidas).
-const TEXT_FAMILY: &str = "Inter";
-const NUMBERS_FAMILY: &str = "Nunito";
+/// As famílias embutidas: a dos widgets (texto e números) e a das janelas do app.
+const WIDGET_FAMILY: &str = "Geist";
+const UI_FAMILY: &str = "Inter";
 /// A Inter sai a esta fração do tamanho pedido: as minúsculas dela são mais altas que as da
 /// Segoe UI, para a qual os tamanhos e as larguras dos layouts foram feitos; assim o texto tem a
 /// mesma altura aparente e ocupa o mesmo espaço.
-const TEXT_SIZE_FIT: f32 = 0.95;
+const UI_SIZE_FIT: f32 = 0.95;
+/// O mesmo para a Geist no texto dos widgets.
+const WIDGET_SIZE_FIT: f32 = 0.95;
 
 /// Coleção com as fontes destes arquivos, lidos da memória (sem instalar nada no Windows; o
 /// DirectWrite guarda uma cópia dos bytes).
@@ -275,21 +280,24 @@ impl Gfx {
             (family, weight, found)
         }
         let (family, weight, collection): (&str, DWRITE_FONT_WEIGHT, Option<&IDWriteFontCollection>) = match face {
-            Face::Regular => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
-            Face::Medium => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
-            Face::Semibold => with_weight(custom(TEXT_FAMILY), DWRITE_FONT_WEIGHT_SEMI_BOLD),
-            Face::Numbers => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
-            Face::NumbersLight => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_LIGHT),
-            Face::NumbersMedium => with_weight(custom(NUMBERS_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
+            Face::Regular => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
+            Face::Medium => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
+            Face::Semibold => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            Face::UiRegular => with_weight(custom(UI_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
+            Face::UiSemibold => with_weight(custom(UI_FAMILY), DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            Face::Numbers => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_NORMAL),
+            Face::NumbersLight => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_LIGHT),
+            Face::NumbersExtraLight => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_EXTRA_LIGHT),
+            Face::NumbersMedium => with_weight(custom(WIDGET_FAMILY), DWRITE_FONT_WEIGHT_MEDIUM),
             Face::Symbol => ("Segoe UI Symbol", DWRITE_FONT_WEIGHT_NORMAL, None),
             Face::Icons => (self.icon_family, DWRITE_FONT_WEIGHT_NORMAL, None),
-            Face::Custom(family, weight) => {
-                let (family, collection) = custom(family);
-                (family, DWRITE_FONT_WEIGHT(weight as i32), collection)
-            }
         };
         let family = wide(family);
-        let px = if matches!(face, Face::Regular | Face::Medium | Face::Semibold) { px * TEXT_SIZE_FIT } else { px };
+        let px = match face {
+            Face::Regular | Face::Medium | Face::Semibold => px * WIDGET_SIZE_FIT,
+            Face::UiRegular | Face::UiSemibold => px * UI_SIZE_FIT,
+            _ => px,
+        };
         let format = unsafe {
             self.dw
                 .CreateTextFormat(PCWSTR(family.as_ptr()), collection, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, w!("pt-br"))
@@ -1567,8 +1575,8 @@ pub fn as_unknown<T: Interface>(object: &T) -> windows::core::IUnknown {
     object.cast().unwrap()
 }
 
-/// Salva a imagem como PNG (para testes e para as imagens do README).
-#[cfg(test)]
+/// Salva a imagem como PNG (as capas das músicas guardadas, e nos testes e nas imagens do
+/// README).
 pub fn save_png(img: &Image, path: &std::path::Path) -> windows::core::Result<()> {
     let wpath = wide(&path.to_string_lossy());
     with(|gfx| unsafe {
@@ -1816,25 +1824,26 @@ mod embedded_font_tests {
     use super::*;
 
     #[test]
-    fn outfit_is_embedded() {
+    fn fonts_are_embedded() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
         with(|gfx| {
-            let collection = gfx.embedded.as_ref().expect("a Outfit carregou");
-            for family in ["Outfit"] {
+            let collection = gfx.embedded.as_ref().expect("as fontes carregaram");
+            for family in [WIDGET_FAMILY, UI_FAMILY] {
                 let name = wide(family);
                 let (mut index, mut exists) = (0u32, windows::core::BOOL(0));
                 unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists).unwrap() };
                 assert!(exists.as_bool(), "{family}");
             }
         });
-        // e o texto sai mesmo nela, e nos pesos pedidos: a largura muda em relação à Segoe UI e
-        // de um peso para outro
+        // e o texto sai mesmo nelas, e nos pesos pedidos: os widgets (Geist) e as janelas (Inter)
+        // têm larguras diferentes, e a largura muda de um peso para outro
         let c = Canvas::new(10, 10, 1.0);
         let w = |face| c.text_width("Uso diário 46%", face, 20.0);
-        assert_ne!(w(Face::Custom("Outfit", 400)), w(Face::Regular));
-        assert_ne!(w(Face::Custom("Outfit", 300)), w(Face::Custom("Outfit", 600)));
+        assert_ne!(w(Face::Regular), w(Face::UiRegular));
+        assert_ne!(w(Face::Regular), w(Face::Semibold));
+        assert_ne!(w(Face::NumbersExtraLight), w(Face::NumbersMedium));
     }
 }
 
@@ -1877,14 +1886,14 @@ mod glow_tests {
         assert_eq!(c.finish().px[((1 * 40 + 20) * 4 + 3) as usize], 255);
     }
 
-    /// Todos os dígitos têm a mesma largura (números "tabulares"), na Outfit e na fonte do
+    /// Todos os dígitos têm a mesma largura (números "tabulares"), na Geist, na Inter e na fonte do
     /// Windows: um número mudando (o relógio, a porcentagem, o tempo restante) não faz o resto
     /// do texto tremer.
     #[test]
     fn digits_have_the_same_width() {
         com();
         let c = Canvas::new(10, 10, 1.0);
-        for face in [Face::Custom("Outfit", 300), Face::Custom("Outfit", 600), Face::Regular, Face::Numbers] {
+        for face in [Face::NumbersExtraLight, Face::NumbersLight, Face::NumbersMedium, Face::Regular, Face::Semibold, Face::UiRegular, Face::Numbers] {
             let widths: Vec<f32> = (0..10).map(|d| c.text_width(&d.to_string(), face, 30.0)).collect();
             assert!(widths.iter().all(|w| (w - widths[0]).abs() < 0.01), "{face:?}: {widths:?}");
             assert!((c.text_width("11:11", face, 30.0) - c.text_width("00:00", face, 30.0)).abs() < 0.01, "{face:?}");
@@ -1967,7 +1976,7 @@ mod cache_tests {
     fn cached_text_measures_match_measuring_again() {
         com();
         with(|gfx| {
-            for face in [Face::Regular, Face::Semibold, Face::Numbers, Face::NumbersMedium, Face::Symbol, Face::Icons, Face::Custom("Outfit", 600)] {
+            for face in [Face::Regular, Face::Semibold, Face::Numbers, Face::NumbersMedium, Face::Symbol, Face::Icons, Face::UiSemibold] {
                 for px in [9.0, 13.75, 22.5, 61.0] {
                     for text in ["Florianópolis", "23°", "12:07", "\u{e995}", "Uso diário 46%…", " "] {
                         let fresh = gfx.measure_now(text, face, px);

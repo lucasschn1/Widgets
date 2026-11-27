@@ -500,7 +500,7 @@ impl Ui<'_> {
     }
     /// O texto em linhas (ver `Canvas::wrap`).
     pub fn wrap(&self, text: &str, size: f32, max_w: f32, max_lines: usize) -> Vec<String> {
-        self.c.wrap(text, Face::Regular, size, max_w, max_lines)
+        self.c.wrap(text, Face::UiRegular, size, max_w, max_lines)
     }
     /// Cartão das configurações: uma sombra curta embaixo, o fundo um pouco mais claro em cima e
     /// a borda que brilha mais em cima (como vidro pegando luz).
@@ -594,7 +594,7 @@ impl Ui<'_> {
     /// Botões segmentados; `options` = [(valor, rótulo)]. `right`: x é a borda direita. Devolve a largura.
     pub fn segmented(&mut self, id: &'static str, x: f32, y: f32, options: &[(String, String)], current: &str, right: bool) -> f32 {
         let (pad, h, size) = (14.0, 32.0, 12.0);
-        let widths: Vec<f32> = options.iter().map(|(_, label)| self.text_width(label, size, Face::Regular) + 2.0 * pad).collect();
+        let widths: Vec<f32> = options.iter().map(|(_, label)| self.text_width(label, size, Face::UiRegular) + 2.0 * pad).collect();
         let total: f32 = widths.iter().sum::<f32>() + 4.0;
         let x = if right { x - total } else { x };
         self.rect(x, y, x + total, y + h, 8.0, Some(WHITE.with_a(14)), Some(LINE), 1.0);
@@ -610,7 +610,7 @@ impl Ui<'_> {
             if self.hot(&sid) && !active {
                 self.fill(cx, y + 2.0, cx + sw, y + h - 2.0, 6.0, WHITE.with_a(14));
             }
-            let face = if active { Face::Semibold } else { Face::Regular };
+            let face = if active { Face::UiSemibold } else { Face::UiRegular };
             self.text(cx + sw / 2.0, y + h / 2.0, label, size, if active { FG } else { MUTED }, face, Anchor::MM, None);
             self.region(&sid, cx, y, cx + sw, y + h, Action::Seg(id, value.clone()), Cursor::Hand);
             cx += sw;
@@ -622,7 +622,7 @@ impl Ui<'_> {
     pub fn button(&mut self, id: &str, x: f32, y: f32, label: &str, action: Action, kind: &str, align: char, w: Option<f32>, icon_name: Option<&str>) -> f32 {
         let (h, size) = (32.0, 12.5);
         let iw = if icon_name.is_some() { 22.0 } else { 0.0 };
-        let w = w.unwrap_or_else(|| self.text_width(label, size, Face::Semibold) + 32.0 + iw);
+        let w = w.unwrap_or_else(|| self.text_width(label, size, Face::UiSemibold) + 32.0 + iw);
         let x = match align {
             'r' => x - w,
             'm' => x - w / 2.0,
@@ -639,10 +639,10 @@ impl Ui<'_> {
         let tx = x + w / 2.0 + iw / 2.0;
         let dy = if down { 1.0 } else { 0.0 };
         if let Some(name) = icon_name {
-            let lw = self.text_width(label, size, Face::Semibold);
+            let lw = self.text_width(label, size, Face::UiSemibold);
             self.icon(tx - lw / 2.0 - 12.0, y + h / 2.0 + dy, name, 13.0, color);
         }
-        self.text(tx, y + h / 2.0 + dy, label, size, color, Face::Semibold, Anchor::MM, None);
+        self.text(tx, y + h / 2.0 + dy, label, size, color, Face::UiSemibold, Anchor::MM, None);
         self.region(id, x, y, x + w, y + h, action, Cursor::Hand);
         w
     }
@@ -755,7 +755,7 @@ impl Suggest {
     pub fn draw(&self, ui: &mut Ui, x: f32, y: f32, w: f32) -> f32 {
         if self.results.is_empty() {
             if self.busy {
-                ui.text(x + w - 12.0, y - 22.0, "buscando…", 11.0, MUTED, Face::Regular, Anchor::RM, None);
+                ui.text(x + w - 12.0, y - 22.0, "buscando…", 11.0, MUTED, Face::UiRegular, Anchor::RM, None);
             }
             return 0.0;
         }
@@ -768,8 +768,8 @@ impl Suggest {
                 ui.fill(x + 4.0, top, x + w - 4.0, top + SUGGEST_ROW, 6.0, Rgba::rgb(62, 62, 72));
             }
             ui.icon(x + 22.0, top + SUGGEST_ROW / 2.0, "location", 13.0, ACCENT);
-            ui.text(x + 40.0, top + 7.0, place["name"].as_str().unwrap_or(""), 12.5, FG, Face::Semibold, Anchor::LA, Some(w - 56.0));
-            ui.text(x + 40.0, top + 23.0, place["detail"].as_str().unwrap_or(""), 10.5, MUTED, Face::Regular, Anchor::LA, Some(w - 56.0));
+            ui.text(x + 40.0, top + 7.0, place["name"].as_str().unwrap_or(""), 12.5, FG, Face::UiSemibold, Anchor::LA, Some(w - 56.0));
+            ui.text(x + 40.0, top + 23.0, place["detail"].as_str().unwrap_or(""), 10.5, MUTED, Face::UiRegular, Anchor::LA, Some(w - 56.0));
             ui.region(&id, x + 4.0, top, x + w - 4.0, top + SUGGEST_ROW, Action::Pick(i), Cursor::Hand);
         }
         h

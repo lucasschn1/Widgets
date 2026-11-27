@@ -13,8 +13,8 @@
 //! Tudo em pixels da tela; os retângulos são os dos cartões (sem a margem transparente).
 
 use crate::app::screens::{free_spot, hits};
-use crate::ui::theme::{EDGE_GAP, WIDGET_GAP};
-use crate::widgets::{SMALL, WIDE};
+use crate::ui::theme::EDGE_GAP;
+use crate::widgets::{grid_px, Layout, Mode};
 use crate::platform::win::Rect;
 
 /// Um widget a arrumar: quem é, o tamanho do cartão e onde ele está agora (para manter a ordem).
@@ -46,8 +46,9 @@ struct Bounds {
 /// Para onde vai cada widget (`id`, retângulo do cartão) na área `work` de um monitor de escala
 /// `s`, sem encostar em outro nem em `fixed`.
 pub fn plan(items: &[Item], work: Rect, s: f32, fixed: &[Rect]) -> Vec<(usize, Rect)> {
-    let px = |v: f32| (v * s).round() as i32;
-    let (edge, gap, small, wide) = (px(EDGE_GAP), px(WIDGET_GAP), px(SMALL), px(WIDE));
+    // as medidas da grade, as mesmas dos cartões (`Layout::px`)
+    let (small, gap) = grid_px(s);
+    let (wide, edge) = (Layout::px(Mode::M, s).0, (EDGE_GAP * s).round() as i32);
     let bounds = Bounds { top: work.1 + edge, bottom: work.3 - edge, left: work.0 + edge };
     let mut placed: Vec<(usize, Rect)> = Vec::new();
     let mut taken: Vec<Rect> = fixed.to_vec();
@@ -72,7 +73,7 @@ pub fn plan(items: &[Item], work: Rect, s: f32, fixed: &[Rect]) -> Vec<(usize, R
         if let Some((row_y, row_h)) = open.take() {
             column.y = column.y.max(row_y + row_h + gap);
         }
-        let spot = if full { None } else { column_spot(w, h, &mut column, &bounds, &taken, gap) };
+        let spot = if full { None } else { column_spot(w, h, &mut column, &bounds, &taken, gap, small + gap) };
         let rect = match spot {
             Some(rect) => rect,
             None => {
@@ -107,8 +108,9 @@ fn reading_order(items: &[Item], right: i32, col: i32) -> Vec<Item> {
 }
 
 /// O lugar do próximo widget `w` × `h` na coluna de agora, ou no alto das seguintes, à esquerda;
-/// desce para passar do que está em `taken`. None: não há mais colunas na tela.
-fn column_spot(w: i32, h: i32, column: &mut Column, bounds: &Bounds, taken: &[Rect], gap: i32) -> Option<Rect> {
+/// desce para passar do que está em `taken`, parando numa linha da grade (a cada `row` pixels a
+/// partir do alto). None: não há mais colunas na tela.
+fn column_spot(w: i32, h: i32, column: &mut Column, bounds: &Bounds, taken: &[Rect], gap: i32, row: i32) -> Option<Rect> {
     loop {
         if column.right - w < bounds.left {
             return None;
@@ -122,10 +124,20 @@ fn column_spot(w: i32, h: i32, column: &mut Column, bounds: &Bounds, taken: &[Re
             continue;
         }
         match taken.iter().filter(|other| hits(grown(spot, gap), **other)).map(|other| other.3).max() {
-            Some(below) => column.y = below + gap,
+            // desce até passar dele, e até a próxima linha da grade: as linhas desta coluna
+            // continuam na altura das linhas das outras
+            Some(below) => column.y = next_row(below + gap, bounds.top, row),
             None => return Some(spot),
         }
     }
+}
+
+/// A primeira linha da grade (a cada `row` pixels a partir de `top`) em `y` ou abaixo dele.
+fn next_row(y: i32, top: i32, row: i32) -> i32 {
+    if y <= top || row <= 0 {
+        return y.max(top);
+    }
+    top + (y - top + row - 1) / row * row
 }
 
 /// `r` encosta (ou fica a menos de `gap`) em alguém de `taken`?
@@ -142,6 +154,8 @@ fn grown(r: Rect, by: i32) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::WIDGET_GAP;
+    use crate::widgets::{LARGE_H, SMALL, WIDE};
 
     const WORK: Rect = (0, 0, 1536, 816);
     const S: f32 = 1.0;
@@ -181,7 +195,7 @@ mod tests {
         let items = [
             item(0, (WIDE, SMALL), 300, 500),
             item(1, (SMALL, SMALL), 900, 40),
-            item(2, (WIDE, 448.0), 100, 100),
+            item(2, (WIDE, LARGE_H), 100, 100),
             item(3, (SMALL, SMALL), 1200, 600),
             item(4, (WIDE, SMALL), 1180, 300),
             item(5, (SMALL, SMALL), 20, 20),
@@ -239,7 +253,7 @@ mod tests {
     /// Sem espaço para todos, ninguém sai da tela (e quem couber não encosta em ninguém).
     #[test]
     fn too_many_stay_on_screen() {
-        let items: Vec<Item> = (0..30).map(|i| item(i, (WIDE, 448.0), 1200, i as i32)).collect();
+        let items: Vec<Item> = (0..30).map(|i| item(i, (WIDE, LARGE_H), 1200, i as i32)).collect();
         let p = plan(&items, WORK, S, &[]);
         assert_eq!(p.len(), items.len());
         for (_, r) in &p {
@@ -250,7 +264,7 @@ mod tests {
     /// Vários tamanhos e ordens que cabem na tela: nunca encostam, em monitores de várias escalas.
     #[test]
     fn many_mixes_never_touch() {
-        let sizes = [(SMALL, SMALL), (WIDE, SMALL), (WIDE, 448.0), (WIDE, 230.0)];
+        let sizes = [(SMALL, SMALL), (WIDE, SMALL), (WIDE, LARGE_H), (WIDE, 230.0)];
         let mut seed = 7u64;
         let mut next = || {
             seed ^= seed << 13;
@@ -281,5 +295,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Os cartões de verdade (`Layout::px`) de vários tamanhos, em várias escalas: todos ficam nas
+    /// colunas da grade e, sem um grande (que tem altura própria), também nas linhas, com o mesmo
+    /// espaço entre vizinhos. Era o que faltava: os pequenos arredondados um pixel a mais deixavam
+    /// as linhas de uma coluna fora da altura das da outra.
+    #[test]
+    fn everything_lands_on_the_grid() {
+        let modes = [Mode::P, Mode::M, Mode::G];
+        let mut seed = 11u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for s in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
+            let work = (0, 0, (1536.0 * s).round() as i32, (816.0 * s).round() as i32);
+            let (cell, gap) = grid_px(s);
+            let edge = (EDGE_GAP * s).round() as i32;
+            let (top, right, row) = (work.1 + edge, work.2 - edge, cell + gap);
+            for _ in 0..300 {
+                let n = 2 + (next() % 6) as usize;
+                let with_large = next() % 2 == 0;
+                let kinds = if with_large { 3 } else { 2 };
+                let items: Vec<Item> = (0..n)
+                    .map(|i| {
+                        let (w, h) = Layout::px(modes[(next() % kinds) as usize], s);
+                        let (x, y) = ((next() % 1500) as i32, (next() % 700) as i32);
+                        Item { id: i, size: (w, h), at: (x, y, x + w, y + h) }
+                    })
+                    .collect();
+                // (só os que couberam nas colunas: sem lugar, o último vai para onde der)
+                let used: i32 = items.iter().map(|it| (it.size.0 + gap) * (it.size.1 + gap)).sum();
+                if used > (work.2 - 2 * edge) * (work.3 - 2 * edge) / 3 {
+                    continue;
+                }
+                let p = plan(&items, work, s, &[]);
+                for (id, r) in &p {
+                    if !with_large {
+                        assert_eq!((r.1 - top) % row, 0, "{s}: {id} fora da linha da grade: {r:?}");
+                    }
+                    assert_eq!((right - r.2) % row, 0, "{s}: {id} fora da coluna da grade: {r:?}");
+                }
+            }
+        }
+    }
+
+    /// Com a ilha no alto, a coluna embaixo dela desce até a próxima linha da grade (e não até
+    /// logo embaixo da ilha): as linhas dela continuam na altura das linhas das outras colunas.
+    #[test]
+    fn under_the_island_rows_stay_on_the_grid() {
+        let s = 1.25;
+        let work = (0, 0, 1920, 1020);
+        let (cell, gap) = grid_px(s);
+        let edge = (EDGE_GAP * s).round() as i32;
+        let (w, h) = Layout::px(Mode::M, s);
+        let island = (work.2 - 300, 0, work.2 - 100, 70);
+        let items = [
+            Item { id: 0, size: (w, h), at: (1500, 10, 1500 + w, 10 + h) },
+            Item { id: 1, size: (w, h), at: (1000, 10, 1000 + w, 10 + h) },
+        ];
+        let p = plan(&items, work, s, &[island]);
+        let (under, beside) = (rect_of(&p, 0), rect_of(&p, 1));
+        assert!(under.1 >= island.3 + gap, "por cima da ilha: {under:?}");
+        assert_eq!((under.1 - (work.1 + edge)) % (cell + gap), 0, "fora da linha da grade: {under:?}");
+        assert_eq!(beside.1, under.3 + gap, "o de baixo não veio logo embaixo");
     }
 }
