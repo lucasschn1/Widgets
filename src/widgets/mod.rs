@@ -29,16 +29,20 @@ use crate::gfx::Canvas;
 //
 // Cada widget desenha o conteúdo dentro destas medidas; elas nunca mudam com o que ele mostra.
 //
-// O pequeno é um quadrado; o médio tem a mesma altura e a largura de dois pequenos lado a lado
-// (com o espaço do encaixe entre eles), como nos widgets do Mac; o grande tem a mesma largura do
-// médio e altura para as listas (dias, processos, atividades) e a capa grande.
+// Pequenos e médios cabem numa grade de quadrados do tamanho do pequeno, com o espaço do encaixe
+// entre eles (como na tela de início do iPhone): o pequeno é um quadrado; o médio ocupa dois
+// quadrados lado a lado (a mesma altura do pequeno). Assim, lado a lado na área de trabalho, as
+// linhas de todas as colunas ficam na mesma altura, e o espaço entre os widgets é sempre o mesmo.
+// O grande tem a largura do médio e altura própria, para as listas (dias, processos, atividades)
+// e a capa grande: dois quadrados ficavam baixos para elas, e três, compridos demais.
 
 /// Lado do tamanho pequeno (um quadrado).
 pub const SMALL: f32 = 154.0;
 /// Largura do médio e do grande: dois pequenos e o espaço do encaixe.
 pub const WIDE: f32 = 2.0 * SMALL + crate::ui::theme::WIDGET_GAP;
 pub const MEDIUM_H: f32 = SMALL;
-pub const LARGE_H: f32 = 448.0;
+/// Altura do grande: entre dois pequenos (320, baixo para as listas) e três (486, comprido).
+pub const LARGE_H: f32 = 432.0;
 /// A margem de dentro do cartão, a mesma em todos os widgets e tamanhos (como os 16 pt dos
 /// widgets do macOS): o texto e os gráficos começam e terminam a esta distância da borda.
 pub const CARD_PAD: f32 = 16.0;
@@ -49,16 +53,24 @@ pub const LABEL_Y: f32 = 12.0;
 pub const LABEL_SIZE: f32 = 12.0;
 /// Escreve o título do widget (o "GitHub", o "Sistema") em (x, y).
 pub fn draw_label(c: &mut Canvas, x: f32, y: f32, text: &str) {
-    c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, crate::ui::theme::FG, crate::gfx::Anchor::LA, None);
+    draw_label_in(c, x, y, text, crate::ui::theme::FG);
 }
 
-/// Os números grandes de todos os widgets (a temperatura, o tempo do Pomodoro): a mesma letra em
-/// todos, para que, lado a lado na área de trabalho, pareçam da mesma família. É a Nunito,
-/// arredondada como a SF Pro Rounded dos widgets da Apple, no peso normal.
-pub const HERO: crate::gfx::Face = crate::gfx::Face::Numbers;
-/// As porcentagens no meio dos anéis (Uso do Claude e bateria): a mesma fonte, um pouco mais
-/// firme (médio), para marcar sem pesar.
-pub const PERCENT: crate::gfx::Face = crate::gfx::Face::NumbersMedium;
+/// O título do widget numa cor (o "Spotify" no verde do Spotify).
+pub fn draw_label_in(c: &mut Canvas, x: f32, y: f32, text: &str, color: crate::ui::theme::Rgba) {
+    c.text(x, y, text, crate::gfx::Face::Semibold, LABEL_SIZE, color, crate::gfx::Anchor::LA, None);
+}
+
+/// Os números grandes de todos os widgets (o tempo do Pomodoro, os valores dos painéis do Tempo):
+/// a mesma letra em todos, para que, lado a lado na área de trabalho, pareçam da mesma família.
+/// É a Geist, leve.
+pub const HERO: crate::gfx::Face = crate::gfx::Face::NumbersLight;
+/// As porcentagens no meio dos anéis (Uso do Claude e bateria), indicadores: a mesma, leve.
+pub const PERCENT: crate::gfx::Face = crate::gfx::Face::NumbersLight;
+/// Os valores menores, ao lado de um nome ou numa lista (as porcentagens do Sistema, a
+/// temperatura de cada hora, a saúde da bateria): a mesma fonte, no peso médio, para marcar sem
+/// pesar.
+pub const VALUE: crate::gfx::Face = crate::gfx::Face::NumbersMedium;
 
 /// Quanto o "%" conta ao centralizar uma porcentagem no meio de um anel (Uso do Claude e
 /// bateria). Com 0, só os algarismos ficam no centro, e o "%" pendurado parece empurrar tudo para
@@ -235,6 +247,26 @@ impl Layout {
             Mode::G => Layout { w: WIDE, h: LARGE_H, radius: LARGE_RADIUS },
         }
     }
+
+    /// O tamanho do cartão em pixels num monitor de escala `s`, montado pela grade: o quadrado e o
+    /// espaço do encaixe arredondados uma vez só, e somados. Arredondar cada medida por conta
+    /// própria (154 × 1,25 = 192,5 → 193, mas 320 × 1,25 = 400) deixava dois pequenos lado a
+    /// lado um pixel mais largos que um médio, e as colunas e linhas desalinhadas. (A altura do
+    /// grande não é da grade: arredonda sozinha.)
+    pub fn px(mode: Mode, s: f32) -> (i32, i32) {
+        let (cell, gap) = grid_px(s);
+        let wide = 2 * cell + gap;
+        match mode {
+            Mode::P => (cell, cell),
+            Mode::M => (wide, cell),
+            Mode::G => (wide, (LARGE_H * s).round() as i32),
+        }
+    }
+}
+
+/// O lado de um quadrado da grade e o espaço do encaixe, em pixels num monitor de escala `s`.
+pub fn grid_px(s: f32) -> (i32, i32) {
+    ((SMALL * s).round() as i32, (crate::ui::theme::WIDGET_GAP * s).round() as i32)
 }
 
 /// Área a destacar sob o mouse: (x0, y0, x1, y1, raio), em unidades lógicas do cartão.
@@ -633,7 +665,9 @@ mod tests {
         let (p, m, g) = (Layout::of(Mode::P), Layout::of(Mode::M), Layout::of(Mode::G));
         assert_eq!((p.w, p.h), (154.0, 154.0), "o pequeno é um quadrado");
         assert_eq!((m.w, m.h), (320.0, 154.0));
-        assert_eq!((g.w, g.h), (320.0, 448.0));
+        assert_eq!((g.w, g.h), (320.0, 432.0));
+        // o grande fica entre duas e três linhas de pequenos
+        assert!(g.h > 2.0 * p.h + WIDGET_GAP && g.h < 3.0 * p.h + 2.0 * WIDGET_GAP);
         // pequenos e médios se encaixam em linhas: dois pequenos e o encaixe = um médio
         assert_eq!(2.0 * p.w + WIDGET_GAP, m.w);
         assert_eq!(m.h, p.h);
@@ -641,12 +675,31 @@ mod tests {
         assert!(p.radius < m.radius && m.radius < g.radius);
     }
 
+    /// Em pixels, em qualquer escala do Windows, a grade fecha: dois pequenos e o espaço dão a
+    /// largura do médio e do grande; cada
+    /// tamanho fica a menos de um pixel da medida em pontos. (Arredondando cada medida sozinha,
+    /// em 125% e 175% dois pequenos passavam um pixel do médio.)
+    #[test]
+    fn sizes_close_the_grid_in_pixels() {
+        for s in [1.0f32, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0, 3.5] {
+            let (cell, gap) = grid_px(s);
+            let (p, m, g) = (Layout::px(Mode::P, s), Layout::px(Mode::M, s), Layout::px(Mode::G, s));
+            assert_eq!(p, (cell, cell), "{s}");
+            assert_eq!(m, (2 * p.0 + gap, p.1), "{s}: dois pequenos não dão um médio");
+            assert_eq!(g.0, m.0, "{s}: o grande não tem a largura do médio");
+            for mode in Mode::ALL {
+                let (l, px) = (Layout::of(mode), Layout::px(mode, s));
+                assert!((px.0 as f32 - l.w * s).abs() <= 1.5 && (px.1 as f32 - l.h * s).abs() <= 1.5, "{s} {mode:?}: {px:?}");
+            }
+        }
+    }
+
     #[test]
     fn store_size_records_the_height() {
         let mut w = serde_json::Map::new();
         store_size(&mut w, Mode::G);
         assert_eq!(w["tamanho"], "g");
-        assert_eq!(w["altura"], 448.0);
+        assert_eq!(w["altura"], 432.0);
         assert_eq!(w["altura_tamanho"], "g");
         store_size(&mut w, Mode::M);
         assert_eq!((w["tamanho"].as_str(), w["altura"].as_f64()), (Some("m"), Some(154.0)));

@@ -236,14 +236,25 @@ const M_GRID_Y: f32 = MEDIUM_H - PAD - grid_h(M_STEP);
 
 const BANDS: i64 = 3;
 const BAND_WEEKS: i64 = 18;
-const G_STEP: f32 = (W - 2.0 * PAD + GAP) / BAND_WEEKS as f32;
 /// onde começa a primeira faixa (embaixo do rótulo)
 const G_BANDS_Y: f32 = 34.0;
 /// a linha de cada faixa (período e total) até os quadrados dela
 const BAND_HEAD: f32 = 17.0;
+/// o menor espaço entre as faixas
+const BAND_MIN_GAP: f32 = 8.0;
+/// os quadrados do grande: na largura toda, ou menores (e o bloco centrado) se as três faixas
+/// assim não couberem na altura
+const G_STEP: f32 = {
+    let by_width = (W - 2.0 * PAD + GAP) / BAND_WEEKS as f32;
+    let band_h = (LARGE_H - PAD - G_BANDS_Y - (BANDS - 1) as f32 * BAND_MIN_GAP) / BANDS as f32;
+    let by_height = (band_h - BAND_HEAD + GAP) / 7.0;
+    if by_width < by_height { by_width } else { by_height }
+};
+/// onde começam as faixas do grande (e a linha de cada uma), centradas
+const G_GRID_X: f32 = (W - (BAND_WEEKS as f32 * G_STEP - GAP)) / 2.0;
 /// espaço entre as faixas: o que sobra, dividido igual
 const BAND_GAP: f32 = (LARGE_H - PAD - G_BANDS_Y - BANDS as f32 * (BAND_HEAD + grid_h(G_STEP))) / (BANDS - 1) as f32;
-const _: () = assert!(BAND_GAP >= 8.0, "as três faixas não cabem no grande");
+const _: () = assert!(BAND_GAP >= BAND_MIN_GAP - 0.01, "as três faixas não cabem no grande");
 
 const fn grid_h(step: f32) -> f32 {
     7.0 * step - GAP
@@ -325,7 +336,7 @@ fn grids(mode: Mode, today: i64) -> Vec<Grid> {
         Mode::M => vec![Grid { start: grid_start(today, M_WEEKS), weeks: M_WEEKS, x: M_GRID_X, y: M_GRID_Y, step: M_STEP }],
         Mode::G => {
             let first = grid_start(today, BANDS * BAND_WEEKS);
-            (0..BANDS).map(|band| Grid { start: first + band * BAND_WEEKS * 7, weeks: BAND_WEEKS, x: PAD, y: band_top(band) + BAND_HEAD, step: G_STEP }).collect()
+            (0..BANDS).map(|band| Grid { start: first + band * BAND_WEEKS * 7, weeks: BAND_WEEKS, x: G_GRID_X, y: band_top(band) + BAND_HEAD, step: G_STEP }).collect()
         }
     }
 }
@@ -557,11 +568,11 @@ impl GitHub {
     fn draw_total(c: &mut Canvas, total: i64, mode: Mode) {
         let number = grouped(total);
         if mode == Mode::P {
-            let nw = c.text(PAD, TOP_BASE, &number, Face::Semibold, 12.5, FG, Anchor::LS, None);
+            let nw = c.text(PAD, TOP_BASE, &number, super::VALUE, 12.5, FG, Anchor::LS, None);
             c.text(PAD + nw + 4.0, TOP_BASE, "contribuições", Face::Regular, 11.0, MUTED, Anchor::LS, Some(SMALL - 2.0 * PAD - nw - 4.0));
         } else {
             let rw = c.text(W - PAD, TOP_BASE, "no último ano", Face::Regular, 11.0, MUTED, Anchor::RS, None);
-            c.text(W - PAD - rw - 4.0, TOP_BASE, &number, Face::Semibold, 11.5, FG, Anchor::RS, None);
+            c.text(W - PAD - rw - 4.0, TOP_BASE, &number, super::VALUE, 11.5, FG, Anchor::RS, None);
         }
     }
 }
@@ -641,8 +652,8 @@ impl Kind for GitHub {
                 let last = (grid.start + grid.weeks * 7 - 1).min(today);
                 let sum: i64 = (grid.start..=last).filter_map(|day| days.get(&day)).map(|&(_, count)| count).sum();
                 let y = band_top(band as i64) + 11.0;
-                c.text(PAD, y, &band_range(grid.start, last), Face::Semibold, 11.0, FG.alpha(0.85), Anchor::LS, None);
-                c.text(W - PAD, y, &amount(sum).to_lowercase(), Face::Regular, 11.0, MUTED, Anchor::RS, None);
+                c.text(G_GRID_X, y, &band_range(grid.start, last), Face::Semibold, 11.0, FG.alpha(0.85), Anchor::LS, None);
+                c.text(W - G_GRID_X, y, &amount(sum).to_lowercase(), Face::Regular, 11.0, MUTED, Anchor::RS, None);
             }
         }
     }
@@ -755,7 +766,7 @@ impl Kind for GitHub {
         for (band, grid) in grids(mode, today()).iter().enumerate() {
             if mode == Mode::G {
                 let y = band_top(band as i64) + 2.0;
-                blocks.push((PAD, y, PAD + 96.0, y + 9.0, 4.0));
+                blocks.push((G_GRID_X, y, G_GRID_X + 96.0, y + 9.0, 4.0));
             }
             blocks.push((grid.x, grid.y, grid.x + grid.weeks as f32 * grid.step - GAP, grid.y + grid_h(grid.step), 8.0));
         }
@@ -788,7 +799,8 @@ mod tests {
     fn grids_fill_each_size() {
         let today = util::days_from_civil(2026, 11, 17); // uma terça
         let (p, m, g) = (grids(Mode::P, today), grids(Mode::M, today), grids(Mode::G, today));
-        assert!(p[0].cell() >= 12.5 && m[0].cell() >= 13.0 && m[0].cell() > p[0].cell() && g[0].cell() > m[0].cell(), "{} {} {}", p[0].cell(), m[0].cell(), g[0].cell());
+        // (no grande, as três faixas cabem na altura com quadrados um pouco menores que os do médio)
+        assert!(p[0].cell() >= 12.5 && m[0].cell() >= 13.0 && m[0].cell() > p[0].cell() && g[0].cell() >= 12.0, "{} {} {}", p[0].cell(), m[0].cell(), g[0].cell());
         for (mode, list) in [(Mode::P, &p), (Mode::M, &m), (Mode::G, &g)] {
             let l = Layout::of(mode);
             for b in list.iter() {

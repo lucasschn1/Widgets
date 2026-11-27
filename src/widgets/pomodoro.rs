@@ -97,7 +97,10 @@ struct RingGeom {
     thickness: f32,
 }
 
-const C_RING: RingGeom = RingGeom { cx: SMALL / 2.0, cy: 62.0, diameter: 104.0, thickness: 9.0 };
+/// pequeno: o anel começa na margem de cima (`PAD`) e deixa embaixo a linha de `C_FOOT_Y`
+const C_RING: RingGeom = RingGeom { cx: SMALL / 2.0, cy: PAD + 48.0, diameter: 96.0, thickness: 9.0 };
+/// pequeno: o meio da linha de baixo ("Até 13:22", "Foco · 3/4"), na margem de baixo
+const C_FOOT_Y: f32 = SMALL - PAD - 6.0;
 const M_RING: RingGeom = RingGeom { cx: 77.0, cy: MEDIUM_H / 2.0, diameter: 110.0, thickness: 8.0 };
 const M_COL_X: f32 = 150.0; // coluna da direita (o que está acontecendo e os botões)
 const M_CTRL_Y: f32 = 120.0;
@@ -545,7 +548,7 @@ impl Kind for Pomodoro {
                 Some(end) => format!("Até {}", win::clock_at(end)),
                 None => format!("hoje: {}", today(env.cfg, false).pomodoros),
             };
-            c.text(14.0, 136.0, &foot, Face::Semibold, 12.0, FG, Anchor::LM, Some(62.0));
+            c.text(PAD, C_FOOT_Y, &foot, Face::Semibold, 12.0, FG, Anchor::LM, Some(62.0));
             let mut status = self.phase.label().to_string();
             if self.phase == Phase::Foco {
                 status += &format!(" · {}/{}", (self.cycle + 1).min(every), every);
@@ -553,7 +556,7 @@ impl Kind for Pomodoro {
             if paused {
                 status = "Pausado".into();
             }
-            c.text(SMALL - 14.0, 136.0, &status, Face::Regular, 11.0, MUTED, Anchor::RM, Some(80.0));
+            c.text(SMALL - PAD, C_FOOT_Y, &status, Face::Regular, 11.0, MUTED, Anchor::RM, Some(80.0));
             return;
         }
 

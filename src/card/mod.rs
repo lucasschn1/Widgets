@@ -385,9 +385,9 @@ impl Card {
         Layout::of(mode)
     }
 
+    /// O tamanho do cartão em pixels, pela grade (`Layout::px`).
     pub fn card_size_of(&self, mode: Mode) -> (i32, i32) {
-        let layout = self.layout(mode);
-        ((layout.w * self.s).round() as i32, (layout.h * self.s).round() as i32)
+        Layout::px(mode, self.s)
     }
 
     pub fn card_size(&self) -> (i32, i32) {

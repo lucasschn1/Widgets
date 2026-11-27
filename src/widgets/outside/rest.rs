@@ -8,7 +8,10 @@
 //! gota", fica sempre assim, e o resto aparece com o mouse em cima. Em tela cheia, some (como a
 //! ilha sempre fez). Parada, só é redesenhada quando muda algo (o minuto, a troca, os dados).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -18,7 +21,7 @@ use super::{location, workday, Clock};
 use crate::data::astro;
 use crate::data::config::Get;
 use crate::gfx::drawing::{self, weather_art};
-use crate::gfx::{Anchor, Canvas, Face};
+use crate::gfx::{Anchor, Canvas, Face, Image};
 use crate::ui::theme::{ease_in_out, Rgba, FAINT, FG, MUTED, WHITE};
 use crate::widgets::island_ui as iu;
 use crate::widgets::{alert_hash, island_act, on_island, pomodoro, Ctx, Env, IslandForm, IslandItem, Kind, Mode, Rect4, Request};
@@ -31,8 +34,6 @@ const TURN_SECS: f64 = 0.4;
 /// a régua da "Linha do dia" vai das 4 h às 23 h (a madrugada fica de fora)
 const DAY_TRACK_FROM_HOUR: f64 = 4.0;
 const DAY_TRACK_TO_HOUR: f64 = 23.0;
-/// na barra do expediente (o relógio aberto), quantas horas antes do fim ela começa
-const WORKDAY_HOURS: f64 = 9.0;
 /// "PC parado": sem mouse nem teclado há este tanto
 pub const IDLE_AFTER: f64 = 5.0 * 60.0;
 /// as cotações do cache valem por este tanto
@@ -45,6 +46,37 @@ pub const START: u32 = 1;
 pub const PLAY: u32 = 2;
 /// sair do modo foco
 pub const END_FOCUS: u32 = 3;
+/// o calendário do relógio aberto: o mês anterior, o seguinte e de volta ao de hoje (no nome do
+/// mês)
+pub const PREV_MONTH: u32 = 4;
+pub const NEXT_MONTH: u32 = 5;
+pub const THIS_MONTH: u32 = 6;
+/// abrir o player da última música (com ele fechado)
+pub const OPEN_APP: u32 = 7;
+/// procurar no player a música `n` das tocadas antes (RECENT + n)
+pub const RECENT: u32 = 100;
+
+/// quantas músicas tocadas antes da última ficam guardadas (e aparecem na ilha aberta)
+pub const RECENT_MAX: usize = 3;
+/// a pasta (dentro da pasta de dados) com as capas das músicas guardadas, e o lado delas
+const COVERS_DIR: &str = "capas";
+const COVER_PX: u32 = 96;
+
+// ---------- a última música aberta (medidas a partir do canto da ilha de 364 × 220) ----------
+
+/// a capa grande e onde começa o texto ao lado dela
+const MEDIA_COVER: f32 = 56.0;
+const MEDIA_TEXT_X: f32 = 88.0;
+/// a barra de onde a música parou e a linha dos tempos embaixo dela
+const MEDIA_BAR_Y: f32 = 94.0;
+const MEDIA_TIMES_Y: f32 = 104.0;
+/// o título das tocadas antes e a primeira delas; cada uma numa linha de `RECENT_ROW`
+const RECENT_HEAD_Y: f32 = 130.0;
+const RECENT_FIRST_Y: f32 = 140.0;
+const RECENT_ROW: f32 = 24.0;
+const RECENT_COVER: f32 = 18.0;
+/// o botão redondo de tocar ou de abrir o player, no alto à direita
+const MEDIA_BUTTON: f32 = 36.0;
 /// o campo de `input` que liga e desliga o modo foco: "off", "on" ou o horário do fim ("15:30")
 pub const FOCUS_FIELD: &str = "modo_foco";
 /// a cor do modo foco (a mesma do aviso dele)
@@ -63,6 +95,61 @@ const DAWN: Rgba = Rgba::rgb(255, 179, 107);
 const DAY: Rgba = Rgba::rgb(255, 215, 107);
 const DUSK: Rgba = Rgba::rgb(255, 143, 163);
 const NIGHT: Rgba = Rgba::rgb(143, 177, 255);
+/// o vermelho do Calendário da Apple: o dia da semana, o nome do mês, o dia de hoje e o ano
+const CAL_RED: Rgba = Rgba::rgb(255, 69, 58);
+
+// ---------- o relógio aberto: a hora e o ano à esquerda, o calendário do mês à direita ----------
+// (medidas a partir do canto da ilha aberta, de 364 × 220)
+
+/// onde começa a coluna do calendário (a da hora vai da margem até 20 pt antes dela)
+const CAL_X0: f32 = 170.0;
+/// a margem da direita do calendário
+const CAL_RIGHT: f32 = 18.0;
+/// o meio da linha do nome do mês (e das setas), a das iniciais dos dias e a primeira semana
+const CAL_HEAD_Y: f32 = 26.0;
+const CAL_INITIALS_Y: f32 = 50.0;
+const CAL_FIRST_ROW_Y: f32 = 70.0;
+/// a altura de cada semana (são até 6) e o raio do círculo do dia de hoje
+const CAL_ROW: f32 = 24.0;
+const CAL_TODAY_R: f32 = 10.5;
+/// o lado do botão de cada seta
+const CAL_ARROW: f32 = 22.0;
+/// as iniciais dos dias, de domingo a sábado (como no Calendário em português)
+const CAL_INITIALS: [&str; 7] = ["D", "S", "T", "Q", "Q", "S", "S"];
+
+/// Um mês do calendário: o ano, o mês (1 a 12), o dia do dia 1 (em dias desde 1970), quantos
+/// dias tem e quantos lugares ficam vazios antes do dia 1 na primeira semana (que começa no
+/// domingo).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MonthView {
+    year: i64,
+    month: u32,
+    first: i64,
+    days: i64,
+    lead: i64,
+}
+
+impl MonthView {
+    /// O mês `shift` meses depois (ou antes, negativo) do de `day`.
+    fn around(day: i64, shift: i32) -> MonthView {
+        use crate::data::util::{civil_from_days, days_from_civil};
+        let today = civil_from_days(day);
+        let index = today.year * 12 + today.month as i64 - 1 + shift as i64;
+        let (year, month) = (index.div_euclid(12), index.rem_euclid(12) as u32 + 1);
+        let first = days_from_civil(year, month, 1);
+        let next = if month == 12 { days_from_civil(year + 1, 1, 1) } else { days_from_civil(year, month + 1, 1) };
+        // 1970-01-01 foi uma quinta: com a semana começando no domingo, o lugar 4
+        MonthView { year, month, first, days: next - first, lead: (first + 4).rem_euclid(7) }
+    }
+}
+
+/// Quanto do ano já passou: o ano, a fração (0 a 1) e quantos dias faltam depois de hoje.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct YearSoFar {
+    year: i64,
+    done: f64,
+    days_left: i64,
+}
 
 /// O que a ilha em repouso pode mostrar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,7 +205,7 @@ impl Look {
 
     pub fn description(self) -> &'static str {
         match self {
-            Look::Clock => "A hora e a data; aberta, quanto falta para o fim do expediente",
+            Look::Clock => "A hora e a data; aberta, o calendário do mês e quanto do ano já passou",
             Look::Day => "O dia numa régua: o sol andando até o pôr, com o fim do expediente marcado (na cidade do Tempo)",
             Look::Next => "Quanto falta para o próximo: fim do expediente, pôr do sol, lua cheia, a ISS passando",
             Look::Weather => "A temperatura e a próxima chuva, do widget Tempo",
@@ -207,6 +294,14 @@ struct Track {
     /// o player ainda está aberto (dá para tocar daqui)
     live: bool,
     colors: [Rgba; 2],
+    /// a última vez que ela estava tocando (segundos desde 1970; None: guardada por uma versão
+    /// antiga, sem a hora)
+    when: Option<f64>,
+    /// onde ela parou e quanto ela tem (segundos; 0: o player não diz)
+    position: f64,
+    duration: f64,
+    /// o nome da capa guardada (na pasta das capas), se tem
+    cover: Option<String>,
 }
 
 /// O sol de um dia numa cidade (os horários em segundos desde 1970; None: o sol não nasce ou
@@ -298,6 +393,15 @@ pub struct Rest {
     shift: f64,
     /// a última troca pela roda (para animar a saída de quem estava, e no sentido certo)
     wheeled: Option<Wheeled>,
+    /// o mês no calendário do relógio aberto, em meses a partir do de hoje (volta a 0 quando a
+    /// ilha fecha)
+    month_shift: Cell<i32>,
+    /// as músicas tocadas antes da última (a mais nova primeiro)
+    recent: Vec<Track>,
+    /// a pasta das capas guardadas (None nos testes: sem ler a pasta de dados de verdade) e as
+    /// capas já lidas dela, pelo nome
+    covers_dir: Option<PathBuf>,
+    covers: RefCell<HashMap<String, Arc<Image>>>,
 }
 
 impl Default for Rest {
@@ -386,6 +490,10 @@ impl Rest {
             focus_mode: None,
             shift: 0.0,
             wheeled: None,
+            month_shift: Cell::new(0),
+            recent: Vec::new(),
+            covers_dir: if cfg!(test) { None } else { Some(covers_dir()) },
+            covers: RefCell::new(HashMap::new()),
         }
     }
 
@@ -649,7 +757,7 @@ impl Rest {
     fn draw_look(&self, c: &mut Canvas, look: Look, form: IslandForm, r: Rect4, hot: Option<u32>, now: f64) {
         let form = if form == IslandForm::Banner { IslandForm::Compact } else { form };
         match look {
-            Look::Clock => self.draw_clock(c, form, r, now),
+            Look::Clock => self.draw_clock(c, form, r, hot, now),
             Look::Day => self.draw_day(c, form, r, now),
             Look::Next => self.draw_next(c, form, r, now),
             Look::Weather => self.draw_weather(c, form, r, now),
@@ -657,8 +765,9 @@ impl Rest {
             Look::Focus => self.draw_focus(c, form, r, hot),
             Look::Media => self.draw_media(c, form, r, hot),
         }
-        // o botão do que está aberto
-        if let (IslandForm::Medium | IslandForm::Large, Some((act, label))) = (form, self.button(look)) {
+        // o botão do que está aberto (a música aberta tem os dela)
+        let own_buttons = look == Look::Media && form == IslandForm::Large;
+        if let (IslandForm::Medium | IslandForm::Large, Some((act, label)), false) = (form, self.button(look), own_buttons) {
             let (x, y, w, h) = r;
             let b = button_rect(form, w, h);
             let rect = (x + b.0, y + b.1, x + b.2, y + b.3);
@@ -672,7 +781,7 @@ impl Rest {
         }
     }
 
-    fn draw_clock(&self, c: &mut Canvas, form: IslandForm, r: Rect4, now: f64) {
+    fn draw_clock(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>, now: f64) {
         let (x, y, w, h) = r;
         let cy = y + h / 2.0;
         let time = self.clock.hhmm(now);
@@ -688,27 +797,88 @@ impl Rest {
                 iu::two_lines(c, tx, cy, x + w - 20.0 - tx, &self.date_long(now), &self.work_line(now), col);
             }
             _ => {
-                iu::header(c, r, "AGORA", col, &self.date_short(now), MUTED);
-                c.text(x + 22.0, y + 76.0, &time, Face::Semibold, 46.0, FG, Anchor::LM, None);
-                c.text(x + 24.0, y + 112.0, &self.date_long(now), Face::Regular, 13.0, MUTED, Anchor::LM, None);
-                match self.workday_end {
-                    Some(end) => {
-                        // o expediente numa barra, do começo (9 h antes do fim) até o fim
-                        let start = end - WORKDAY_HOURS * 3600.0;
-                        let frac = ((now - start) / (end - start)).clamp(0.0, 1.0) as f32;
-                        let (bx0, bx1, by) = (x + 22.0, x + w - 22.0, y + h - 38.0);
-                        c.text(bx0, by - 16.0, &format!("Fim do expediente às {}", self.clock.hhmm(end)), Face::Regular, 12.0, MUTED, Anchor::LM, None);
-                        let right = if end > now { format!("faltam {}", countdown(end - now)) } else { "encerrado".into() };
-                        c.text(bx1, by - 16.0, &right, Face::Semibold, 12.0, WORK, Anchor::RM, None);
-                        iu::bar(c, bx0, bx1, by, frac, WORK);
-                    }
-                    None => {
-                        let line = self.work_line(now);
-                        c.text(x + 24.0, y + h - 36.0, &upper_first(&line), Face::Regular, 12.5, MUTED, Anchor::LM, Some(w - 48.0));
-                    }
-                }
+                self.draw_today_column(c, r, now);
+                self.draw_calendar(c, r, hot, now);
             }
         }
+    }
+
+    /// A coluna da esquerda do relógio aberto: o dia da semana, a hora, a data e, embaixo, quanto
+    /// do ano já passou (a porcentagem, a barra e quantos dias faltam).
+    fn draw_today_column(&self, c: &mut Canvas, r: Rect4, now: f64) {
+        let (x, y, _, h) = r;
+        let (x0, x1) = (x + 22.0, x + CAL_X0 - 20.0);
+        let weekday = crate::data::util::WEEKDAYS_LONG[self.clock.weekday(now) as usize].to_uppercase();
+        c.text(x0, y + CAL_HEAD_Y, &weekday, Face::Semibold, 10.5, CAL_RED, Anchor::LM, Some(x1 - x0));
+        c.text(x0 - 1.0, y + 64.0, &self.clock.hhmm(now), Face::Semibold, 40.0, FG, Anchor::LM, None);
+        c.text(x0, y + 98.0, &self.clock.date_text(now), Face::Regular, 13.0, MUTED, Anchor::LM, Some(x1 - x0));
+        let year = self.year_so_far(now);
+        let base = y + h - 22.0;
+        c.text(x0, base - 34.0, &year.year.to_string(), Face::Semibold, 12.0, FG, Anchor::LM, None);
+        c.text(x1, base - 34.0, &format!("{}%", (year.done * 100.0).floor() as i64), crate::widgets::VALUE, 12.0, CAL_RED, Anchor::RM, None);
+        iu::bar(c, x0, x1, base - 17.0, year.done as f32, CAL_RED);
+        let left = match year.days_left {
+            0 => "último dia do ano".to_string(),
+            1 => "falta 1 dia".to_string(),
+            n => format!("faltam {n} dias"),
+        };
+        c.text(x0, base, &left, Face::Regular, 11.0, MUTED, Anchor::LM, Some(x1 - x0));
+    }
+
+    /// O calendário do mês, como no Calendário da Apple: o nome do mês em vermelho com as setas
+    /// para os outros meses, as iniciais dos dias e as semanas de domingo a sábado, com o dia de
+    /// hoje num círculo vermelho e o fim de semana mais apagado.
+    fn draw_calendar(&self, c: &mut Canvas, r: Rect4, hot: Option<u32>, now: f64) {
+        let (x, y, w, _) = r;
+        let today = self.clock.day(now);
+        let view = MonthView::around(today, self.month_shift.get());
+        let rects = calendar_rects(w);
+        // o nome do mês (com o ano, se não for o de hoje)
+        let this_year = crate::data::util::civil_from_days(today).year;
+        let mut title = crate::data::util::MONTHS_LONG[view.month as usize - 1].to_uppercase();
+        if view.year != this_year {
+            title += &format!(" {}", view.year);
+        }
+        let (tx0, _, tx1, _) = rects.title;
+        c.text(x + tx0, y + CAL_HEAD_Y, &title, Face::Semibold, 11.0, CAL_RED, Anchor::LM, Some(tx1 - tx0));
+        // as setas, num círculo claro com o mouse em cima
+        for (act, (ax0, ay0, ax1, ay1), back) in [(PREV_MONTH, rects.prev, true), (NEXT_MONTH, rects.next, false)] {
+            let (cx, cy) = (x + (ax0 + ax1) / 2.0, y + (ay0 + ay1) / 2.0);
+            if hot == Some(act) {
+                c.fill_circle(cx, cy, CAL_ARROW / 2.0, WHITE.alpha(0.14));
+            }
+            let dx = if back { 2.5 } else { -2.5 };
+            c.line(&[(cx + dx, cy - 5.0), (cx - dx, cy), (cx + dx, cy + 5.0)], FG.alpha(0.85), 1.8);
+        }
+        // as iniciais e os dias
+        let col_w = (w - CAL_RIGHT - CAL_X0) / 7.0;
+        let col_x = |col: i64| x + CAL_X0 + col_w * (col as f32 + 0.5);
+        for (col, initial) in CAL_INITIALS.iter().enumerate() {
+            c.text(col_x(col as i64), y + CAL_INITIALS_Y, initial, Face::Semibold, 9.5, MUTED, Anchor::MM, None);
+        }
+        for date in 0..view.days {
+            let place = view.lead + date;
+            let (col, row) = (place % 7, place / 7);
+            let (cx, cy) = (col_x(col), y + CAL_FIRST_ROW_Y + CAL_ROW * row as f32);
+            let number = (date + 1).to_string();
+            if view.first + date == today {
+                c.fill_circle(cx, cy, CAL_TODAY_R, CAL_RED);
+                c.text(cx, cy, &number, Face::NumbersMedium, 11.5, WHITE, Anchor::MM, None);
+            } else {
+                let weekend = col == 0 || col == 6;
+                c.text(cx, cy, &number, Face::Numbers, 11.5, if weekend { MUTED } else { FG }, Anchor::MM, None);
+            }
+        }
+    }
+
+    /// Quanto do ano já passou em `now` (de meia-noite de 1º de janeiro até a do ano seguinte).
+    fn year_so_far(&self, now: f64) -> YearSoFar {
+        use crate::data::util::{civil_from_days, days_from_civil};
+        let today = self.clock.day(now);
+        let year = civil_from_days(today).year;
+        let (first, next) = (days_from_civil(year, 1, 1), days_from_civil(year + 1, 1, 1));
+        let (start, end) = (self.clock.midnight(first), self.clock.midnight(next));
+        YearSoFar { year, done: ((now - start) / (end - start)).clamp(0.0, 1.0), days_left: next - today - 1 }
     }
 
     /// A régua do dia (das 4 h às 23 h) entre x0 e x1, na altura cy.
@@ -1003,37 +1173,220 @@ impl Rest {
         }
     }
 
-    fn draw_media(&self, c: &mut Canvas, form: IslandForm, r: Rect4, _hot: Option<u32>) {
+    fn draw_media(&self, c: &mut Canvas, form: IslandForm, r: Rect4, hot: Option<u32>) {
         let Some(t) = &self.track else { return };
         let (x, y, w, h) = r;
         let cy = y + h / 2.0;
-        let cover = |c: &mut Canvas, x0: f32, y0: f32, size: f32, rr: f32| {
-            c.gradient_round_rect(x0, y0, x0 + size, y0 + size, rr, &[(0.0, t.colors[0]), (1.0, t.colors[1])], y0, y0 + size);
-            drawing::play(c, x0 + size / 2.0 + size * 0.03, y0 + size / 2.0, size * 0.36, Rgba(255, 255, 255, 150));
-        };
-        let state = if t.playing { "tocando" } else if t.live { "pausada" } else { "a última" };
+        let now = self.clock.now();
         match form {
             IslandForm::Compact => {
-                cover(c, x + 8.0, cy - 13.0, 26.0, 7.0);
+                self.draw_cover(c, t, x + 8.0, cy - 13.0, 26.0, 7.0);
                 iu::compact_text(c, x + 44.0, r, &t.title, "", MUTED);
             }
             IslandForm::Medium => {
-                cover(c, x + 14.0, cy - 25.0, 50.0, 12.0);
+                self.draw_cover(c, t, x + 14.0, cy - 25.0, 50.0, 12.0);
                 let right = if self.button(Look::Media).is_some() { 70.0 } else { 22.0 };
-                iu::two_lines(c, x + 76.0, cy, w - 76.0 - right, &t.title, &format!("{} · {}", t.artist, state), MUTED);
+                // o artista e como ela está; sem espaço, só como ela está (nunca cortado)
+                let (state, room) = (self.track_state(t, now), w - 76.0 - right);
+                let full = format!("{} · {state}", t.artist);
+                let sub = iu::fitting(c, &[&full, &state], Face::Regular, 11.5, room);
+                iu::two_lines(c, x + 76.0, cy, room, &t.title, sub, MUTED);
             }
-            _ => {
-                cover(c, x + 20.0, y + 18.0, 60.0, 14.0);
-                let tw = w - 92.0 - 22.0;
-                c.text(x + 92.0, y + 22.0, &t.title, Face::Semibold, 15.0, FG, Anchor::LA, Some(tw));
-                c.text(x + 92.0, y + 42.0, &t.artist, Face::Regular, 12.5, MUTED, Anchor::LA, Some(tw));
-                c.fill_circle(x + 95.5, y + 66.5, 3.5, t.colors[0]);
-                c.text(x + 104.0, y + 66.5, &format!("{} · {state}", t.app), Face::Regular, 11.5, FAINT, Anchor::LM, Some(tw - 12.0));
-                if !t.live {
-                    c.text(x + 22.0, y + h - 30.0, "Abra o player para tocar daqui", Face::Regular, 12.0, MUTED, Anchor::LM, None);
-                }
+            _ => self.draw_media_open(c, t, r, hot, now),
+        }
+    }
+
+    /// A última música na ilha aberta: a capa, o título, o artista e o player (com o ponto na cor
+    /// dele) e quando tocou; o botão de tocar (ou de abrir o player, fechado); a barra de onde ela
+    /// parou; e embaixo as tocadas antes, cada uma numa linha que procura a música no player.
+    fn draw_media_open(&self, c: &mut Canvas, t: &Track, r: Rect4, hot: Option<u32>, now: f64) {
+        let (x, y, w, _) = r;
+        self.draw_cover(c, t, x + 20.0, y + 18.0, MEDIA_COVER, 13.0);
+        let spots = self.media_spots(w);
+        let button = spots.iter().find(|(act, _)| *act == PLAY || *act == OPEN_APP).copied();
+        let text_right = button.map_or(w - 22.0, |(_, b)| b.0 - 12.0);
+        let tw = text_right - MEDIA_TEXT_X;
+        c.text(x + MEDIA_TEXT_X, y + 20.0, &t.title, Face::Semibold, 15.0, FG, Anchor::LA, Some(tw));
+        c.text(x + MEDIA_TEXT_X, y + 40.0, &t.artist, Face::Regular, 12.5, MUTED, Anchor::LA, Some(tw));
+        c.fill_circle(x + MEDIA_TEXT_X + 3.5, y + 64.5, 3.5, app_color(t));
+        // o player e como ela está; sem espaço, só como ela está (nunca cortado)
+        let state = self.track_state(t, now);
+        let full = if t.app.is_empty() { state.clone() } else { format!("{} · {state}", t.app) };
+        let line = iu::fitting(c, &[&full, &state], Face::Regular, 11.5, tw - 12.0);
+        c.text(x + MEDIA_TEXT_X + 12.0, y + 64.5, line, Face::Regular, 11.5, FAINT, Anchor::LM, Some(tw - 12.0));
+        // tocar (o player aberto e a música parada) ou abrir o player (fechado), num círculo
+        if let Some((act, b)) = button {
+            let (cx, cy) = (x + (b.0 + b.2) / 2.0, y + (b.1 + b.3) / 2.0);
+            c.fill_circle(cx, cy, MEDIA_BUTTON / 2.0, if hot == Some(act) { WHITE } else { FG });
+            if act == PLAY {
+                drawing::play(c, cx + 1.0, cy, 14.0, Rgba(18, 18, 20, 255));
+            } else {
+                c.text(cx, cy, crate::ui::theme::icon("abrir"), Face::Icons, 14.0, Rgba(18, 18, 20, 255), Anchor::MM, None);
             }
         }
+        // onde ela parou
+        if t.duration > 0.0 {
+            let (x0, x1) = (x + 20.0, x + w - 20.0);
+            iu::bar(c, x0, x1, y + MEDIA_BAR_Y, (t.position / t.duration) as f32, app_color(t));
+            let at = clock_text(t.position);
+            let left = if t.playing { at } else { format!("parou em {at}") };
+            c.text(x0, y + MEDIA_TIMES_Y, &left, Face::Numbers, 10.5, MUTED, Anchor::LA, None);
+            c.text(x1, y + MEDIA_TIMES_Y, &clock_text(t.duration), Face::Numbers, 10.5, MUTED, Anchor::RA, None);
+        }
+        // as tocadas antes
+        if self.recent.is_empty() {
+            return;
+        }
+        c.text(x + 20.0, y + RECENT_HEAD_Y, "TOCADAS ANTES", Face::Semibold, 9.5, FAINT, Anchor::LM, None);
+        for (i, old) in self.recent.iter().enumerate() {
+            let top = y + RECENT_FIRST_Y + RECENT_ROW * i as f32;
+            let mid = top + RECENT_ROW / 2.0;
+            if hot == Some(RECENT + i as u32) {
+                c.fill_round_rect(x + 12.0, top, x + w - 12.0, top + RECENT_ROW, 8.0, WHITE.alpha(0.08));
+            }
+            self.draw_cover(c, old, x + 20.0, mid - RECENT_COVER / 2.0, RECENT_COVER, 5.0);
+            let when = old.when.map(|t| self.ago_short(t, now)).unwrap_or_default();
+            let ww = c.text(x + w - 20.0, mid, &when, Face::Regular, 11.0, FAINT, Anchor::RM, None);
+            let (tx, room) = (x + 20.0 + RECENT_COVER + 10.0, w - 20.0 - ww - 12.0 - (20.0 + RECENT_COVER + 10.0));
+            let tw = c.text(tx, mid, &old.title, Face::Regular, 12.0, FG, Anchor::LM, Some(room));
+            if !old.artist.is_empty() && room - tw > 30.0 {
+                c.text(tx + tw, mid, &format!(" · {}", old.artist), Face::Regular, 12.0, MUTED, Anchor::LM, Some(room - tw));
+            }
+        }
+    }
+
+    /// A capa da música: a guardada, se tem; senão, o degradê com as cores dela e o "play".
+    fn draw_cover(&self, c: &mut Canvas, t: &Track, x0: f32, y0: f32, size: f32, rr: f32) {
+        match self.cover_of(t) {
+            Some(img) => {
+                c.push_round_clip(x0, y0, x0 + size, y0 + size, rr);
+                c.image_sharp(&img, x0, y0, size, size, 1.0);
+                c.pop_clip();
+            }
+            None => {
+                c.gradient_round_rect(x0, y0, x0 + size, y0 + size, rr, &[(0.0, t.colors[0]), (1.0, t.colors[1])], y0, y0 + size);
+                drawing::play(c, x0 + size / 2.0 + size * 0.03, y0 + size / 2.0, size * 0.36, Rgba(255, 255, 255, 150));
+            }
+        }
+    }
+
+    /// A capa guardada da música (lida da pasta uma vez só).
+    fn cover_of(&self, t: &Track) -> Option<Arc<Image>> {
+        let key = t.cover.as_ref()?;
+        if let Some(img) = self.covers.borrow().get(key) {
+            return Some(img.clone());
+        }
+        let bytes = std::fs::read(self.covers_dir.as_ref()?.join(format!("{key}.png"))).ok()?;
+        let img = Arc::new(crate::gfx::decode_image(&bytes)?);
+        self.covers.borrow_mut().insert(key.clone(), img.clone());
+        Some(img)
+    }
+
+    /// Como está a música: "tocando agora", "pausada há 3 min" ou "tocou ontem às 22:10" (sem a
+    /// hora, de uma versão antiga: "a última").
+    fn track_state(&self, t: &Track, now: f64) -> String {
+        match (t.playing, t.live, t.when) {
+            (true, _, _) => "tocando agora".into(),
+            (false, true, Some(when)) => format!("pausada {}", self.ago(when, now)),
+            (false, true, None) => "pausada".into(),
+            (false, false, Some(when)) => format!("tocou {}", self.ago(when, now)),
+            (false, false, None) => "a última".into(),
+        }
+    }
+
+    /// Há quanto tempo foi `t`: "há pouco", "há 25 min", "hoje às 10:12", "ontem às 22:10" ou "em
+    /// 12 nov".
+    fn ago(&self, t: f64, now: f64) -> String {
+        let minutes = ((now - t) / 60.0).floor().max(0.0) as i64;
+        let days = self.clock.day(now) - self.clock.day(t);
+        match (minutes, days) {
+            (0, _) => "há pouco".into(),
+            (1..=59, _) => format!("há {minutes} min"),
+            (_, 0) => format!("hoje às {}", self.clock.hhmm(t)),
+            (_, 1) => format!("ontem às {}", self.clock.hhmm(t)),
+            _ => format!("em {}", self.day_month(t)),
+        }
+    }
+
+    /// O mesmo, curto (na lista das tocadas antes): "agora", "25 min", "10:12", "ontem" ou "12 nov".
+    fn ago_short(&self, t: f64, now: f64) -> String {
+        let minutes = ((now - t) / 60.0).floor().max(0.0) as i64;
+        let days = self.clock.day(now) - self.clock.day(t);
+        match (minutes, days) {
+            (0, _) => "agora".into(),
+            (1..=59, _) => format!("{minutes} min"),
+            (_, 0) => self.clock.hhmm(t),
+            (_, 1) => "ontem".into(),
+            _ => self.day_month(t),
+        }
+    }
+
+    /// "12 nov"
+    fn day_month(&self, t: f64) -> String {
+        let date = crate::data::util::civil_from_days(self.clock.day(t));
+        format!("{} {}", date.day, MONTHS_SHORT[(date.month as usize).clamp(1, 12) - 1])
+    }
+
+    /// Os botões da música aberta (na ilha de largura `w`): tocar (o player aberto e a música
+    /// parada) ou abrir o player (fechado), e cada uma das tocadas antes que dá para procurar no
+    /// player.
+    fn media_spots(&self, w: f32) -> Vec<(u32, Rect4)> {
+        let mut out = Vec::new();
+        let Some(t) = &self.track else { return out };
+        let (cy, half) = (18.0 + MEDIA_COVER / 2.0, MEDIA_BUTTON / 2.0);
+        let round = (w - 22.0 - MEDIA_BUTTON, cy - half, w - 22.0, cy + half);
+        if t.live && !t.playing {
+            out.push((PLAY, round));
+        } else if !t.live && player_url(&t.app).is_some() {
+            out.push((OPEN_APP, round));
+        }
+        for (i, old) in self.recent.iter().enumerate() {
+            if search_url(old).is_some() {
+                let top = RECENT_FIRST_Y + RECENT_ROW * i as f32;
+                out.push((RECENT + i as u32, (12.0, top, w - 12.0, top + RECENT_ROW)));
+            }
+        }
+        out
+    }
+}
+
+/// A cor do ponto do player: o verde do Spotify, o vermelho do YouTube (como no título do
+/// widget); de outro player, a cor da capa.
+fn app_color(t: &Track) -> Rgba {
+    match t.app.to_lowercase().as_str() {
+        "spotify" => crate::widgets::media::source_color("spotify"),
+        "youtube" => crate::widgets::media::source_color("youtube"),
+        _ => t.colors[0],
+    }
+}
+
+/// O endereço que abre o player (None: um player que o app não sabe abrir).
+fn player_url(app: &str) -> Option<&'static str> {
+    match app.to_lowercase().as_str() {
+        "spotify" => Some("spotify:"),
+        "youtube" => Some("https://music.youtube.com"),
+        _ => None,
+    }
+}
+
+/// O endereço que procura a música no player dela (o Windows só deixa controlar a que está
+/// tocando: as antigas, dá para procurar).
+fn search_url(t: &Track) -> Option<String> {
+    let query = crate::data::util::urlencode(format!("{} {}", t.title, t.artist).trim());
+    match t.app.to_lowercase().as_str() {
+        "spotify" => Some(format!("spotify:search:{query}")),
+        "youtube" => Some(format!("https://music.youtube.com/search?q={query}")),
+        _ => None,
+    }
+}
+
+/// "3:33" (ou "1:02:07", passando de uma hora)
+fn clock_text(secs: f64) -> String {
+    let s = secs.max(0.0) as i64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
     }
 }
 
@@ -1046,6 +1399,21 @@ fn button_rect(form: IslandForm, w: f32, h: f32) -> Rect4 {
     }
 }
 
+/// Onde ficam, na ilha aberta de largura `w`, o nome do mês (que volta ao mês de hoje) e as
+/// setas do calendário.
+struct CalendarRects {
+    title: Rect4,
+    prev: Rect4,
+    next: Rect4,
+}
+
+fn calendar_rects(w: f32) -> CalendarRects {
+    let (top, bottom) = (CAL_HEAD_Y - CAL_ARROW / 2.0, CAL_HEAD_Y + CAL_ARROW / 2.0);
+    let next = (w - CAL_RIGHT - CAL_ARROW, top, w - CAL_RIGHT, bottom);
+    let prev = (next.0 - 4.0 - CAL_ARROW, top, next.0 - 4.0, bottom);
+    CalendarRects { title: (CAL_X0, top, prev.0 - 4.0, bottom), prev, next }
+}
+
 /// O ícone de cada acontecimento (das fontes de ícones do Windows, ver theme::icon).
 fn next_glyph(name: &str) -> &'static str {
     match name {
@@ -1054,12 +1422,6 @@ fn next_glyph(name: &str) -> &'static str {
         "Lua cheia" => "clima",
         _ => "clima",
     }
-}
-
-/// "faltam 2h" → "Faltam 2h"
-fn upper_first(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
 /// O tempo guardado pelo Tempo, se é de agora (das últimas 3 h).
@@ -1122,9 +1484,9 @@ fn quotes_of(cache: &Value, now: f64) -> Option<Quotes> {
     Some(Quotes { at, list: [one("USD")?, one("BTC")?] })
 }
 
-/// A última música guardada pelo App (do Tocando agora).
-fn track_of(cache: &Value) -> Option<Track> {
-    let m = &cache["midia_ultima"];
+/// Uma música guardada pelo App (a última, em "midia_ultima", ou uma das tocadas antes, em
+/// "midia_recentes").
+fn track_of(m: &Value) -> Option<Track> {
     let title = m.str_of("titulo").filter(|t| !t.is_empty())?.to_string();
     let color = |i: usize| {
         let c = &m["cores"][i];
@@ -1140,30 +1502,102 @@ fn track_of(cache: &Value) -> Option<Track> {
         playing: m.bool_of("tocando").unwrap_or(false),
         live: m.bool_of("ativo").unwrap_or(false),
         colors: [color(0), color(1)],
+        when: m.f64_of("quando"),
+        position: m.f64_of("posicao").unwrap_or(0.0),
+        duration: m.f64_of("duracao").unwrap_or(0.0),
+        cover: m.str_of("capa").map(str::to_string),
     })
 }
 
-/// Guarda a última música no cache (o App chama quando o Tocando agora muda). Devolve true se a
-/// música é outra (vale gravar o cache no disco).
-pub fn note_track(cache: &mut Value, info: Option<&crate::widgets::IslandInfo>) -> bool {
-    let m = &cache["midia_ultima"];
-    match info {
-        Some(i) => {
-            let same = m.str_of("titulo") == Some(i.title.as_str()) && m.str_of("artista") == Some(i.artist.as_str());
-            let unchanged = same && m.bool_of("tocando") == Some(i.playing) && m.bool_of("ativo") == Some(true);
-            if !unchanged {
-                let [a, b] = i.colors;
-                cache["midia_ultima"] = json!({"titulo": i.title, "artista": i.artist, "app": i.app, "tocando": i.playing, "ativo": true,
-                    "cores": [[a.0, a.1, a.2], [b.0, b.1, b.2]]});
-            }
-            !same
+/// O que `note_track` mudou: se vale gravar o cache no disco agora, e a capa nova a guardar na
+/// pasta das capas (o nome e a imagem).
+pub struct Noted {
+    pub save: bool,
+    pub cover: Option<(String, Arc<Image>)>,
+}
+
+/// O nome da capa de uma música (o mesmo para o mesmo título e artista).
+fn cover_key(title: &str, artist: &str) -> String {
+    format!("{:016x}", alert_hash(&format!("{title}\u{1}{artist}")))
+}
+
+/// Guarda a música do Tocando agora no cache, em `now` (o App chama a cada mudança dele): a
+/// posição e a hora vão sendo atualizadas; uma música nova empurra a anterior para as tocadas
+/// antes (até `RECENT_MAX`, sem repetir); o player fechando deixa a última parada onde estava.
+pub fn note_track(cache: &mut Value, info: Option<&crate::widgets::IslandInfo>, now: f64) -> Noted {
+    let last = cache["midia_ultima"].clone();
+    let Some(i) = info else {
+        // o player fechou: a última fica, parada
+        let was_live = last.bool_of("ativo") == Some(true);
+        if was_live {
+            cache["midia_ultima"]["ativo"] = json!(false);
+            cache["midia_ultima"]["tocando"] = json!(false);
         }
-        None => {
-            if m.bool_of("ativo") == Some(true) {
-                cache["midia_ultima"]["ativo"] = json!(false);
-                cache["midia_ultima"]["tocando"] = json!(false);
-            }
-            false
+        return Noted { save: was_live, cover: None };
+    };
+    let same = last.str_of("titulo") == Some(i.title.as_str()) && last.str_of("artista") == Some(i.artist.as_str());
+    let key = cover_key(&i.title, &i.artist);
+    // a capa costuma chegar depois do título: guarda quando ela aparece
+    let cover = i.art.as_ref().filter(|_| !same || last.str_of("capa").is_none()).map(|art| (key.clone(), art.clone()));
+    if !same {
+        // a anterior vai para as tocadas antes; a nova sai de lá, se estava
+        let mut list: Vec<Value> = cache["midia_recentes"].as_array().cloned().unwrap_or_default();
+        list.retain(|m| !(m.str_of("titulo") == Some(i.title.as_str()) && m.str_of("artista") == Some(i.artist.as_str())));
+        if last.str_of("titulo").is_some_and(|t| !t.is_empty()) {
+            let mut old = last.clone();
+            old["ativo"] = json!(false);
+            old["tocando"] = json!(false);
+            list.retain(|m| !(m.str_of("titulo") == old.str_of("titulo") && m.str_of("artista") == old.str_of("artista")));
+            list.insert(0, old);
+        }
+        list.truncate(RECENT_MAX);
+        cache["midia_recentes"] = json!(list);
+        let [a, b] = i.colors;
+        cache["midia_ultima"] = json!({"titulo": i.title, "artista": i.artist, "app": i.app, "tocando": i.playing, "ativo": true,
+            "cores": [[a.0, a.1, a.2], [b.0, b.1, b.2]], "quando": now, "posicao": i.position, "duracao": i.duration});
+        if cover.is_some() {
+            cache["midia_ultima"]["capa"] = json!(key);
+        }
+        return Noted { save: true, cover };
+    }
+    // a mesma: a posição, a hora (tocando) e o estado
+    let changed = last.bool_of("tocando") != Some(i.playing) || last.bool_of("ativo") != Some(true);
+    let m = &mut cache["midia_ultima"];
+    m["tocando"] = json!(i.playing);
+    m["ativo"] = json!(true);
+    m["posicao"] = json!(i.position);
+    m["duracao"] = json!(i.duration);
+    // (tocando, ou acabou de pausar: a hora em que parou de tocar)
+    if i.playing || last.bool_of("tocando") == Some(true) || m.get("quando").is_none() {
+        m["quando"] = json!(now);
+    }
+    if cover.is_some() {
+        m["capa"] = json!(key);
+    }
+    Noted { save: changed || cover.is_some(), cover }
+}
+
+/// A pasta das capas guardadas (na pasta de dados do app).
+pub fn covers_dir() -> PathBuf {
+    crate::data::config::data_dir().join(COVERS_DIR)
+}
+
+/// Guarda a capa `art` (pequena, quadrada) como `key`.png em `dir`.
+pub fn save_cover(dir: &Path, key: &str, art: &Image) {
+    let _ = std::fs::create_dir_all(dir);
+    let _ = crate::gfx::save_png(&crate::gfx::fit_square(art, COVER_PX), &dir.join(format!("{key}.png")));
+}
+
+/// Apaga de `dir` as capas que nenhuma música guardada no cache usa mais.
+pub fn prune_covers(dir: &Path, cache: &Value) {
+    let mut used: Vec<String> = cache["midia_recentes"].as_array().map(|l| l.iter().filter_map(|m| m.str_of("capa").map(str::to_string)).collect()).unwrap_or_default();
+    used.extend(cache["midia_ultima"].str_of("capa").map(str::to_string));
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if path.extension().is_some_and(|e| e == "png") && !used.contains(&stem) {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -1177,7 +1611,12 @@ fn sample_cache(now: f64) -> Value {
         "weather": {"temp": 24, "icon": "partly_day", "desc": "Parcialmente nublado", "max": 27, "min": 18, "rain_line": "Chuva a partir das 17h",
             "hours": hours, "now": {"time": "2026-11-20T14:15"}},
         "cotacao": {"em": now - 120.0, "USD": {"preco": 5.61, "variacao": 0.3, "dia": samples(5.59, 0.3)}, "BTC": {"preco": 369262.0, "variacao": -1.2, "dia": samples(373000.0, -1.2)}},
-        "midia_ultima": {"titulo": "Clube da Esquina nº 2", "artista": "Milton Nascimento", "app": "Spotify", "tocando": false, "ativo": true, "cores": [[244, 184, 96], [91, 58, 140]]},
+        "midia_ultima": {"titulo": "Clube da Esquina nº 2", "artista": "Milton Nascimento", "app": "Spotify", "tocando": false, "ativo": true, "cores": [[244, 184, 96], [91, 58, 140]],
+            "quando": now - 25.0 * 60.0, "posicao": 74.0, "duracao": 213.0},
+        "midia_recentes": [
+            {"titulo": "Cais", "artista": "Milton Nascimento", "app": "Spotify", "cores": [[96, 160, 220], [30, 50, 90]], "quando": now - 40.0 * 60.0},
+            {"titulo": "Trem Azul", "artista": "Lô Borges", "app": "Spotify", "cores": [[90, 200, 160], [20, 60, 70]], "quando": now - 26.0 * 3600.0},
+        ],
         "iss_visiveis": [[now + 2.0 * 86400.0, 300.0, 40.0]],
     })
 }
@@ -1233,7 +1672,8 @@ impl Kind for Rest {
         }
         self.weather = weather_of(cache, &self.clock, now);
         self.quotes = quotes_of(cache, now);
-        self.track = track_of(cache);
+        self.track = track_of(&cache["midia_ultima"]);
+        self.recent = cache["midia_recentes"].as_array().map(|list| list.iter().filter_map(track_of).take(RECENT_MAX).collect()).unwrap_or_default();
         // os focos de hoje (o Pomodoro zera quando muda o dia)
         let date = crate::data::util::civil_from_days(day);
         let today = format!("{:04}-{:02}-{:02}", date.year, date.month, date.day);
@@ -1252,7 +1692,7 @@ impl Kind for Rest {
         }
         self.looks = looks;
         self.dot_only = dot_on(cfg);
-        let version = alert_hash(&format!("{:?}", (&self.weather, &self.quotes, &self.track, self.focus_today, self.workday_end, self.iss, &self.looks, self.idle, self.dot_only, self.full_moon, &self.focus_mode)));
+        let version = alert_hash(&format!("{:?}", (&self.weather, &self.quotes, &self.track, &self.recent, self.focus_today, self.workday_end, self.iss, &self.looks, self.idle, self.dot_only, self.full_moon, &self.focus_mode)));
         let changed = version != self.data_version;
         self.data_version = version;
         changed
@@ -1286,6 +1726,8 @@ impl Kind for Rest {
             }
             _ => {
                 self.held_while_open.set(None);
+                // fechada, o calendário volta ao mês de hoje
+                self.month_shift.set(0);
                 let (x, y, w, h) = r;
                 let showing = self.showing(now);
                 match showing.leaving {
@@ -1314,7 +1756,17 @@ impl Kind for Rest {
         if !matches!(form, IslandForm::Medium | IslandForm::Large) {
             return None;
         }
-        let (act, _) = self.button(self.look_for(form, self.clock.now()))?;
+        let look = self.look_for(form, self.clock.now());
+        if form == IslandForm::Large && look == Look::Clock {
+            let rects = calendar_rects(w);
+            // o nome do mês só volta ao de hoje quando está em outro
+            let spots = [(PREV_MONTH, rects.prev), (NEXT_MONTH, rects.next), (THIS_MONTH, rects.title)];
+            return spots.into_iter().find(|(act, rect)| iu::inside(*rect, x, y) && (*act != THIS_MONTH || self.month_shift.get() != 0)).map(|(act, _)| act);
+        }
+        if form == IslandForm::Large && look == Look::Media {
+            return self.media_spots(w).into_iter().find(|(_, rect)| iu::inside(*rect, x, y)).map(|(act, _)| act);
+        }
+        let (act, _) = self.button(look)?;
         iu::inside(button_rect(form, w, h), x, y).then_some(act)
     }
 
@@ -1323,6 +1775,19 @@ impl Kind for Rest {
             START => ctx.out.push(Request::Act("pomodoro", pomodoro::START_IF_IDLE)),
             PLAY => ctx.out.push(Request::Act("midia", island_act::TOGGLE)),
             END_FOCUS => ctx.out.push(Request::Focus(false)),
+            PREV_MONTH => self.month_shift.set(self.month_shift.get() - 1),
+            NEXT_MONTH => self.month_shift.set(self.month_shift.get() + 1),
+            THIS_MONTH => self.month_shift.set(0),
+            OPEN_APP => {
+                if let Some(url) = self.track.as_ref().and_then(|t| player_url(&t.app)) {
+                    ctx.open(url);
+                }
+            }
+            n if n >= RECENT => {
+                if let Some(url) = self.recent.get((n - RECENT) as usize).and_then(search_url) {
+                    ctx.open(url);
+                }
+            }
             _ => {}
         }
     }
@@ -1376,7 +1841,7 @@ impl Kind for Rest {
         let minute = (now / 60.0).floor() as i64;
         let rotating = self.looks.len() > 1 && !self.idle && self.focus_mode.is_none();
         let turn = if rotating { self.turn(now) } else { 0 };
-        Some(alert_hash(&format!("{}|{minute}|{turn}|{}", self.data_version, self.shift.to_bits())))
+        Some(alert_hash(&format!("{}|{minute}|{turn}|{}|{}", self.data_version, self.shift.to_bits(), self.month_shift.get())))
     }
 }
 
@@ -1386,6 +1851,81 @@ mod tests {
 
     fn env(cfg: &Value) -> Env<'_> {
         Env { cfg, key: KEY }
+    }
+
+    /// Os meses do calendário: onde cai o dia 1 (com a semana começando no domingo) e quantos
+    /// dias tem, inclusive passando de um ano para o outro com as setas.
+    #[test]
+    fn calendar_months_start_on_the_right_weekday() {
+        let day = crate::data::util::days_from_civil(2026, 11, 20);
+        let nov = MonthView::around(day, 0);
+        assert_eq!((nov.year, nov.month, nov.days, nov.lead), (2026, 11, 30, 0), "1º/11/2026 é um domingo");
+        let jan = MonthView::around(day, 2);
+        assert_eq!((jan.year, jan.month, jan.days, jan.lead), (2027, 1, 31, 5), "1º/1/2027 é uma sexta");
+        let dec = MonthView::around(day, -11);
+        assert_eq!((dec.year, dec.month, dec.days, dec.lead), (2025, 12, 31, 1), "1º/12/2025 é uma segunda");
+        let feb = MonthView::around(day, 15);
+        assert_eq!((feb.year, feb.month, feb.days), (2028, 2, 29), "2028 é bissexto");
+        // nenhum mês passa de 6 semanas (o que cabe na ilha aberta)
+        for shift in -40..40 {
+            let m = MonthView::around(day, shift);
+            assert!(m.lead + m.days <= 42, "{m:?}");
+        }
+        assert!(CAL_FIRST_ROW_Y + 5.0 * CAL_ROW + CAL_TODAY_R <= iu::size(IslandForm::Large).h - 12.0, "a sexta semana passa do pé da ilha");
+    }
+
+    /// Quanto do ano já passou: zero na virada, quase tudo no último dia, e os dias que faltam.
+    #[test]
+    fn year_so_far_counts_the_local_year() {
+        let mut r = Rest::sample(Some(Look::Clock), false);
+        let offset = r.clock.offset();
+        let year = r.year_so_far(r.clock.now());
+        // sexta, 20/11/2026, 14:32: o dia 324 de 365
+        assert_eq!((year.year, year.days_left), (2026, 41));
+        assert_eq!((year.done * 100.0).floor(), 88.0, "{}", year.done);
+        let new_year = crate::data::util::days_from_civil(2026, 1, 1) as f64 * 86400.0 - offset;
+        r.at(new_year);
+        let start = r.year_so_far(r.clock.now());
+        assert_eq!((start.year, start.done, start.days_left), (2026, 0.0, 364));
+        r.at(new_year - 60.0);
+        let last = r.year_so_far(r.clock.now());
+        assert_eq!((last.year, last.days_left), (2025, 0), "31/12 às 23:59");
+        assert!(last.done > 0.999);
+    }
+
+    /// As setas do calendário mudam o mês, o nome do mês volta ao de hoje, e fechar a ilha também.
+    #[test]
+    fn calendar_arrows_move_the_month() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let mut r = Rest::sample(Some(Look::Clock), false);
+        let mut cfg = json!({"app": {}});
+        let (w, h) = (iu::size(IslandForm::Large).w, iu::size(IslandForm::Large).h);
+        let rects = calendar_rects(w);
+        let mid = |rect: Rect4| ((rect.0 + rect.2) / 2.0, (rect.1 + rect.3) / 2.0);
+        let hit = |r: &Rest, at: (f32, f32), cfg: &Value| r.island_hit(IslandForm::Large, at.0, at.1, w, h, &env(cfg));
+        assert_eq!(hit(&r, mid(rects.prev), &cfg), Some(PREV_MONTH));
+        assert_eq!(hit(&r, mid(rects.next), &cfg), Some(NEXT_MONTH));
+        assert_eq!(hit(&r, mid(rects.title), &cfg), None, "no mês de hoje, o nome não é botão");
+        let stamp = r.island_stamp(&env(&cfg));
+        let (mut cache, mut out) = (json!({}), Vec::new());
+        for action in [NEXT_MONTH, NEXT_MONTH, PREV_MONTH] {
+            r.act(action, &mut Ctx { cfg: &mut cfg, cache: &mut cache, key: KEY, out: &mut out });
+        }
+        assert_eq!(r.month_shift.get(), 1);
+        assert_ne!(r.island_stamp(&env(&cfg)), stamp, "a ilha redesenha com o mês novo");
+        assert_eq!(hit(&r, mid(rects.title), &cfg), Some(THIS_MONTH));
+        r.act(THIS_MONTH, &mut Ctx { cfg: &mut cfg, cache: &mut cache, key: KEY, out: &mut out });
+        assert_eq!(r.month_shift.get(), 0);
+        // aberta num mês qualquer, fechar volta ao de hoje
+        r.month_shift.set(-3);
+        let mut c = Canvas::new(400, 240, 1.0);
+        r.island_draw(&mut c, IslandForm::Large, (0.0, 0.0, w, h), None, &env(&cfg));
+        assert_eq!(r.month_shift.get(), -3);
+        r.island_draw(&mut c, IslandForm::Compact, (0.0, 0.0, 236.0, 42.0), None, &env(&cfg));
+        assert_eq!(r.month_shift.get(), 0);
+        assert!(out.is_empty(), "as setas não pedem nada ao app");
     }
 
     #[test]
@@ -1617,16 +2157,157 @@ mod tests {
     fn media_note_keeps_the_last_track() {
         let mut cache = json!({});
         let info = crate::widgets::media::Media::sample().island().unwrap();
-        assert!(note_track(&mut cache, Some(&info)), "música nova");
-        assert!(!note_track(&mut cache, Some(&info)), "a mesma");
+        assert!(note_track(&mut cache, Some(&info), 1000.0).save, "música nova");
+        assert!(!note_track(&mut cache, Some(&info), 1001.0).save, "a mesma");
         assert_eq!(cache["midia_ultima"]["ativo"], true);
-        note_track(&mut cache, None);
+        assert!(note_track(&mut cache, None, 1002.0).save, "o player fechou: vale guardar onde parou");
         assert_eq!(cache["midia_ultima"]["ativo"], false, "o player fechou");
         assert_eq!(cache["midia_ultima"]["titulo"], info.title.as_str(), "a música fica");
-        let t = track_of(&cache).unwrap();
+        assert!(!note_track(&mut cache, None, 1003.0).save, "já estava fechado");
+        let t = track_of(&cache["midia_ultima"]).unwrap();
         assert!(!t.live);
         let r = Rest { track: Some(t), ..Rest::new() };
         assert_eq!(r.button(Look::Media), None, "sem o player, sem o botão de tocar");
+    }
+
+    /// Uma música do Tocando agora: `title`, tocando ou não, em `position` de 200 s.
+    fn song(title: &str, playing: bool, position: f64) -> crate::widgets::IslandInfo {
+        let mut info = crate::widgets::media::Media::sample().island().unwrap();
+        (info.title, info.artist, info.app, info.art) = (title.into(), "Artista".into(), "Spotify".into(), None);
+        (info.playing, info.position, info.duration) = (playing, position, 200.0);
+        info
+    }
+
+    /// As tocadas antes: cada música nova empurra a anterior para a lista (a mais nova primeiro,
+    /// até `RECENT_MAX`, sem repetir), e uma que volta a tocar sai de lá.
+    #[test]
+    fn recent_tracks_keep_the_order_without_repeats() {
+        let mut cache = json!({});
+        for (n, title) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+            note_track(&mut cache, Some(&song(title, true, 10.0)), 1000.0 + n as f64 * 300.0);
+        }
+        let titles = |cache: &Value| cache["midia_recentes"].as_array().unwrap().iter().map(|m| m["titulo"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(cache["midia_ultima"]["titulo"], "E");
+        assert_eq!(titles(&cache), ["D", "C", "B"], "até {RECENT_MAX}, a mais nova primeiro");
+        // C volta a tocar: sai das tocadas antes, e E entra
+        note_track(&mut cache, Some(&song("C", true, 0.0)), 3000.0);
+        assert_eq!(titles(&cache), ["E", "D", "B"]);
+        let old = &cache["midia_recentes"][0];
+        assert_eq!((old["tocando"].as_bool(), old["ativo"].as_bool()), (Some(false), Some(false)), "as antigas ficam paradas");
+        assert_eq!(old["quando"].as_f64(), Some(1000.0 + 4.0 * 300.0), "com a hora em que tocaram");
+    }
+
+    /// A posição e a hora acompanham a música; pausada, a hora para (é quando ela parou de tocar),
+    /// e a capa é guardada quando chega (depois do título, às vezes).
+    #[test]
+    fn note_follows_the_position_and_the_cover() {
+        let mut cache = json!({});
+        note_track(&mut cache, Some(&song("A", true, 10.0)), 1000.0);
+        note_track(&mut cache, Some(&song("A", true, 70.0)), 1060.0);
+        let paused = note_track(&mut cache, Some(&song("A", false, 74.0)), 1064.0);
+        assert!(paused.save, "pausou: vale guardar onde parou");
+        note_track(&mut cache, Some(&song("A", false, 74.0)), 1500.0);
+        let t = track_of(&cache["midia_ultima"]).unwrap();
+        assert_eq!((t.position, t.duration, t.when), (74.0, 200.0, Some(1064.0)));
+        assert_eq!(t.cover, None, "ainda sem capa");
+        // a capa chega: guarda uma vez só
+        let mut with_art = song("A", false, 74.0);
+        with_art.art = Some(Arc::new(Image::new(4, 4)));
+        let noted = note_track(&mut cache, Some(&with_art), 1501.0);
+        let key = noted.cover.as_ref().map(|c| c.0.clone()).expect("a capa nova");
+        assert!(noted.save);
+        assert_eq!(cache["midia_ultima"]["capa"], key.as_str());
+        assert!(note_track(&mut cache, Some(&with_art), 1502.0).cover.is_none(), "já guardada");
+        assert_eq!(key, cover_key("A", "Artista"), "o nome é o mesmo para a mesma música");
+    }
+
+    /// As capas vão para a pasta como PNG e são lidas de volta; as que nenhuma música usa mais
+    /// saem da pasta.
+    #[test]
+    fn covers_are_saved_read_and_pruned() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let dir = std::env::temp_dir().join(format!("widgets-capas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut art = Image::new(300, 300);
+        for p in art.px.chunks_mut(4) {
+            p.copy_from_slice(&[40, 200, 90, 255]);
+        }
+        save_cover(&dir, "usada", &art);
+        save_cover(&dir, "velha", &art);
+        let cache = json!({"midia_ultima": {"titulo": "A", "capa": "usada"}, "midia_recentes": []});
+        prune_covers(&dir, &cache);
+        assert!(dir.join("usada.png").exists() && !dir.join("velha.png").exists());
+        let r = Rest { covers_dir: Some(dir.clone()), ..Rest::new() };
+        let t = track_of(&cache["midia_ultima"]).unwrap();
+        let img = r.cover_of(&t).expect("a capa lida da pasta");
+        assert_eq!((img.w, img.h), (COVER_PX, COVER_PX), "guardada pequena");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Como a música está cabe inteiro ao lado da capa, mesmo com o botão redondo e no texto mais
+    /// comprido ("pausada ontem às 22:10"): o texto do player só cede o nome do app, nunca
+    /// aparece cortado.
+    #[test]
+    fn open_media_state_is_never_cut() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let c = Canvas::new(1, 1, 1.0);
+        let w = iu::size(IslandForm::Large).w;
+        let room = w - 22.0 - MEDIA_BUTTON - 12.0 - MEDIA_TEXT_X - 12.0;
+        for state in ["pausada ontem às 22:10", "tocou ontem às 22:10", "tocou em 28 dez", "tocando agora"] {
+            assert!(c.text_width(state, Face::Regular, 11.5) <= room, "{state:?} não cabe em {room}");
+        }
+        let medium = iu::size(IslandForm::Medium).w - 76.0 - 70.0;
+        assert!(c.text_width("pausada ontem às 22:10", Face::Regular, 11.5) <= medium, "no médio, com o botão");
+    }
+
+    /// Quando tocou, em palavras: há pouco, em minutos, hoje, ontem e em outro dia.
+    #[test]
+    fn track_times_read_naturally() {
+        let r = Rest::sample(Some(Look::Media), false);
+        let now = r.clock.now();
+        assert_eq!(r.ago(now - 20.0, now), "há pouco");
+        assert_eq!(r.ago(now - 25.0 * 60.0, now), "há 25 min");
+        assert_eq!(r.ago(now - 3.0 * 3600.0, now), "hoje às 11:32");
+        assert_eq!(r.ago(now - 17.0 * 3600.0, now), "ontem às 21:32");
+        assert_eq!(r.ago(now - 9.0 * 86400.0, now), "em 11 nov");
+        assert_eq!((r.ago_short(now - 25.0 * 60.0, now), r.ago_short(now - 26.0 * 3600.0, now)), ("25 min".into(), "ontem".into()));
+        let t = r.track.clone().unwrap();
+        assert_eq!(r.track_state(&t, now), "pausada há 25 min");
+        assert_eq!(r.track_state(&Track { live: false, ..t.clone() }, now), "tocou há 25 min");
+        assert_eq!(r.track_state(&Track { playing: true, ..t }, now), "tocando agora");
+        assert_eq!(clock_text(213.0), "3:33");
+        assert_eq!(clock_text(3727.0), "1:02:07");
+    }
+
+    /// A música aberta: tocar (pausada), abrir o player (fechado) e procurar as tocadas antes no
+    /// player delas; o ponto do player na cor do logo.
+    #[test]
+    fn open_media_buttons_play_open_and_search() {
+        let cfg = json!({"app": {}});
+        let iu::FormSize { w, h, .. } = iu::size(IslandForm::Large);
+        let mut r = Rest::sample(Some(Look::Media), false);
+        assert_eq!(r.recent.len(), 2, "as duas tocadas antes do exemplo");
+        let spots = r.media_spots(w);
+        let mid = |act: u32| spots.iter().find(|(a, _)| *a == act).map(|(_, b)| ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0)).unwrap();
+        assert_eq!(r.island_hit(IslandForm::Large, mid(PLAY).0, mid(PLAY).1, w, h, &env(&cfg)), Some(PLAY), "pausada, com o player aberto: tocar");
+        assert_eq!(r.island_hit(IslandForm::Large, mid(RECENT + 1).0, mid(RECENT + 1).1, w, h, &env(&cfg)), Some(RECENT + 1));
+        let (mut c, mut cache, mut out) = (cfg.clone(), json!({}), Vec::new());
+        r.act(RECENT + 1, &mut Ctx { cfg: &mut c, cache: &mut cache, key: KEY, out: &mut out });
+        assert!(matches!(out.as_slice(), [Request::Open(url)] if url == "spotify:search:Trem+Azul+L%C3%B4+Borges"));
+        // com o player fechado: o botão de abrir
+        r.track.as_mut().unwrap().live = false;
+        let spots = r.media_spots(w);
+        assert!(spots.iter().any(|(a, _)| *a == OPEN_APP) && !spots.iter().any(|(a, _)| *a == PLAY));
+        out.clear();
+        r.act(OPEN_APP, &mut Ctx { cfg: &mut c, cache: &mut cache, key: KEY, out: &mut out });
+        assert!(matches!(out.as_slice(), [Request::Open(url)] if url == "spotify:"));
+        // a última linha das tocadas antes cabe na ilha
+        assert!(RECENT_FIRST_Y + RECENT_ROW * RECENT_MAX as f32 <= h - 8.0);
+        assert_eq!(app_color(r.track.as_ref().unwrap()), crate::widgets::media::source_color("spotify"));
     }
 
     #[test]

@@ -100,10 +100,10 @@ fn height(item: &MenuItem) -> f32 {
 fn text_width(probe: &Canvas, item: &MenuItem) -> f32 {
     let Some(text) = label(item) else { return 0.0 };
     match base(item) {
-        MenuItem::Title(..) => probe.text_width(text, Face::Semibold, 13.0) + 10.0,
-        MenuItem::Primary(..) => probe.text_width(text, Face::Semibold, 12.5),
-        MenuItem::Hint(_, _, hint) => probe.text_width(text, Face::Regular, 12.0) + probe.text_width(hint, Face::Regular, 11.0) + 24.0,
-        _ => probe.text_width(text, Face::Regular, 12.0),
+        MenuItem::Title(..) => probe.text_width(text, Face::UiSemibold, 13.0) + 10.0,
+        MenuItem::Primary(..) => probe.text_width(text, Face::UiSemibold, 12.5),
+        MenuItem::Hint(_, _, hint) => probe.text_width(text, Face::UiRegular, 12.0) + probe.text_width(hint, Face::UiRegular, 11.0) + 24.0,
+        _ => probe.text_width(text, Face::UiRegular, 12.0),
     }
 }
 
@@ -154,14 +154,14 @@ fn paint(c: &mut Canvas, items: &[MenuItem], rects: &[(f32, f32, f32, f32)], w: 
                 let tile = 26.0;
                 c.fill_round_rect(x0 + 4.0, ym - tile / 2.0, x0 + 4.0 + tile, ym + tile / 2.0, 8.0, WHITE.with_a(28));
                 c.text(x0 + 4.0 + tile / 2.0, ym, icon(icon_of(item).unwrap_or("")), Face::Icons, 13.0, FG, Anchor::MM, None);
-                c.text(x0 + tile + 14.0, ym, text, Face::Semibold, 13.0, FG, Anchor::LM, Some(x1 - x0 - tile - 18.0));
+                c.text(x0 + tile + 14.0, ym, text, Face::UiSemibold, 13.0, FG, Anchor::LM, Some(x1 - x0 - tile - 18.0));
                 continue;
             }
             MenuItem::Primary(..) => {
                 let fill = if is_hot { ACCENT_HOVER } else { ACCENT };
                 c.fill_round_rect(x0 + 1.0, y0 + 3.0, x1 - 1.0, y1 - 3.0, 10.0, fill);
                 c.text(cx + 1.0, ym, icon(icon_of(item).unwrap_or("")), Face::Icons, 14.0, WHITE, Anchor::MM, None);
-                c.text(x0 + ICON_COL, ym, text, Face::Semibold, 12.5, WHITE, Anchor::LM, None);
+                c.text(x0 + ICON_COL, ym, text, Face::UiSemibold, 12.5, WHITE, Anchor::LM, None);
                 continue;
             }
             _ => {}
@@ -173,7 +173,7 @@ fn paint(c: &mut Canvas, items: &[MenuItem], rects: &[(f32, f32, f32, f32)], w: 
         if let Some(name) = item_icon {
             c.text(cx, ym, icon(name), Face::Icons, 13.0, if is_hot { FG } else { ICON_COLOR }, Anchor::MM, None);
         }
-        c.text(x0 + ICON_COL, ym, text, Face::Regular, 12.0, FG, Anchor::LM, None);
+        c.text(x0 + ICON_COL, ym, text, Face::UiRegular, 12.0, FG, Anchor::LM, None);
         let right = x1 - 15.0;
         // a marca vai à esquerda; se ali já há um ícone, à direita
         let mark_x = if item_icon.is_some() { right } else { cx };
@@ -184,7 +184,7 @@ fn paint(c: &mut Canvas, items: &[MenuItem], rects: &[(f32, f32, f32, f32)], w: 
                 c.line(&[(right - 2.0, ym - 4.5), (right + 2.5, ym), (right - 2.0, ym + 4.5)], Rgba(255, 255, 255, 150), 1.5);
             }
             MenuItem::Hint(_, _, hint) => {
-                c.text(x1 - 10.0, ym, hint, Face::Regular, 11.0, MUTED, Anchor::RM, None);
+                c.text(x1 - 10.0, ym, hint, Face::UiRegular, 11.0, MUTED, Anchor::RM, None);
             }
             _ => {}
         }
@@ -576,9 +576,9 @@ impl GlassBar {
         for part in &self.parts {
             let w = match part {
                 Part::Icon(..) => 18.0,
-                Part::Text(text, bold) => probe.text_width(text, if *bold { Face::Semibold } else { Face::Regular }, 12.5),
-                Part::Muted(text) => probe.text_width(text, Face::Regular, 12.5),
-                Part::Button(text, ..) => probe.text_width(text, Face::Semibold, 12.5) + 28.0,
+                Part::Text(text, bold) => probe.text_width(text, if *bold { Face::UiSemibold } else { Face::UiRegular }, 12.5),
+                Part::Muted(text) => probe.text_width(text, Face::UiRegular, 12.5),
+                Part::Button(text, ..) => probe.text_width(text, Face::UiSemibold, 12.5) + 28.0,
             };
             layout.push((x, w));
             x += w + BAR_GAP;
@@ -606,10 +606,10 @@ impl GlassBar {
                     c.text(px + part_w / 2.0, cy, icon(name), Face::Icons, 15.0, *color, Anchor::MM, None);
                 }
                 Part::Text(text, bold) => {
-                    c.text(px, cy, text, if *bold { Face::Semibold } else { Face::Regular }, 12.5, FG, Anchor::LM, None);
+                    c.text(px, cy, text, if *bold { Face::UiSemibold } else { Face::UiRegular }, 12.5, FG, Anchor::LM, None);
                 }
                 Part::Muted(text) => {
-                    c.text(px, cy, text, Face::Regular, 12.5, MUTED, Anchor::LM, None);
+                    c.text(px, cy, text, Face::UiRegular, 12.5, MUTED, Anchor::LM, None);
                 }
                 Part::Button(text, id, primary) => {
                     let hot = self.hot == Some(button_index);
@@ -620,7 +620,7 @@ impl GlassBar {
                     };
                     let y0 = cy - bh / 2.0;
                     c.fill_round_rect(px, y0, px + part_w, y0 + bh, bh / 2.0, fill);
-                    c.text(px + part_w / 2.0, cy, text, Face::Semibold, 12.5, FG, Anchor::MM, None);
+                    c.text(px + part_w / 2.0, cy, text, Face::UiSemibold, 12.5, FG, Anchor::MM, None);
                     let rect = ((px * s) as i32, (y0 * s) as i32, ((px + part_w) * s) as i32, ((y0 + bh) * s) as i32);
                     self.buttons.push((rect, *id));
                     button_index += 1;

@@ -1852,11 +1852,19 @@ impl App {
         }
     }
 
-    /// Anota a música do Tocando agora (a "última música" da ilha em repouso), se ela mudou.
+    /// Anota a música do Tocando agora (a "última música" da ilha em repouso, e as tocadas
+    /// antes dela): guarda a capa nova na pasta das capas e, quando muda algo que vale guardar
+    /// (outra música, pausou, o player fechou), grava o cache e apaga as capas sem uso.
     fn note_media(&mut self) {
+        use crate::widgets::outside::rest;
         let Some(j) = self.media_index() else { return };
         let info = self.cards[j].kind.island();
-        if crate::widgets::outside::rest::note_track(&mut self.sh.cache, info.as_ref()) {
+        let noted = rest::note_track(&mut self.sh.cache, info.as_ref(), win::now());
+        if let Some((key, art)) = &noted.cover {
+            rest::save_cover(&rest::covers_dir(), key, art);
+        }
+        if noted.save {
+            rest::prune_covers(&rest::covers_dir(), &self.sh.cache);
             self.sh.save_cache();
         }
     }

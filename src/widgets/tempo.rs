@@ -36,11 +36,11 @@ const HOURS: usize = 6;
 const NEXT_HOURS: usize = 24;
 const STRIP_H: f32 = 66.0;
 /// A temperatura de agora, o maior número do widget: a fonte dos números, mais leve que nos
-/// outros widgets (no peso normal, de tão grande, pesava demais).
-const TEMP_FACE: Face = Face::NumbersLight;
-/// A temperatura de cada hora e a máxima de cada dia: no peso médio (em seminegrito, as linhas
-/// de números pesavam mais que o resto).
-const HOUR_TEMP_FACE: Face = Face::Medium;
+/// outros widgets (de tão grande, mesmo no peso leve pesava demais).
+const TEMP_FACE: Face = Face::NumbersExtraLight;
+/// A temperatura de cada hora e a máxima de cada dia: a fonte dos números, no peso médio (em
+/// seminegrito, as linhas de números pesavam mais que o resto).
+const HOUR_TEMP_FACE: Face = super::VALUE;
 /// Uma coluna de hora com a chance de chuva (a faixa que rola e a ilha): onde fica o ícone (e o
 /// tamanho dele), a chance de chuva e a temperatura, a partir do alto da coluna. A chance de
 /// chuva tem a linha dela, com respiro do ícone e da temperatura.
@@ -56,7 +56,7 @@ const BIG_HOUR_TEMP_Y: f32 = 57.0;
 // horas e, no grande, 5 dias em linhas altas
 const M_PAD: f32 = CARD_PAD;
 const G_PAD: f32 = CARD_PAD;
-const M_HOURS_Y: f32 = 88.0;
+const M_HOURS_Y: f32 = 84.0;
 const G_HOURS_Y: f32 = 110.0;
 /// grande: a linha que separa as horas dos dias, o aviso de chuva e os dias
 const G_RULE_Y: f32 = 194.0;
@@ -1462,7 +1462,8 @@ impl Tempo {
         let pad = if big { G_PAD } else { M_PAD };
         let temp_size = if big { 54.0 } else { 40.0 };
         let temp_end = pad - if big { 4.0 } else { 3.0 } + c.text_width(&self.temp_text(), TEMP_FACE, temp_size);
-        W - pad - temp_end - 14.0
+        // (12 pt entre a temperatura e a condição)
+        W - pad - temp_end - 12.0
     }
 
     /// Faixa de horas com colunas largas: hora, ícone e temperatura (no grande, a chance de chuva
@@ -1531,7 +1532,7 @@ impl Tempo {
                 c.text(88.0, icon_cy + icon / 2.0 + 0.5, &format!("{pop}%"), Face::Semibold, 9.0, POP_TEXT, Anchor::MA, None);
             }
             let (mn, mx) = (d[2].as_i64().unwrap_or(0) as f32, d[3].as_i64().unwrap_or(0) as f32);
-            c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Regular, 13.0, MUTED, Anchor::RM, None);
+            c.text(bx0 - 10.0, cy, &format!("{mn}°"), Face::Numbers, 13.0, MUTED, Anchor::RM, None);
             c.text(W - pad, cy, &format!("{mx}°"), HOUR_TEMP_FACE, 13.0, FG, Anchor::RM, None);
             c.fill_round_rect(bx0, cy - 2.5, bx1, cy + 2.5, 2.5, Rgba(0, 0, 0, 55));
             // a faixa da mínima à máxima do dia, na escala da semana (de `lo` a `lo + span`)
@@ -1749,7 +1750,7 @@ impl Tempo {
         let radius = ((area.h - 46.0) / 2.0).min(area.w / 2.0 - 14.0);
         let (cx, cy) = (area.x + area.w / 2.0, area.y + 24.0 + radius);
         Self::draw_compass(c, cx, cy, radius, deg, true, fade);
-        c.text(cx, cy - 4.0, &speed.to_string(), Face::Semibold, 16.0, fade(FG), Anchor::MM, None);
+        c.text(cx, cy - 4.0, &speed.to_string(), super::VALUE, 16.0, fade(FG), Anchor::MM, None);
         c.text(cx, cy + 9.0, "km/h", Face::Regular, 9.0, fade(FG.alpha(0.7)), Anchor::MM, None);
         c.text(area.inner_x, area.y + area.h - 10.0, &tile.sub, Face::Regular, 10.5, fade(FG.alpha(0.8)), Anchor::LS, Some(area.inner_w));
     }
@@ -1765,7 +1766,7 @@ impl Tempo {
         };
         // no painel baixo do vento, a bússola pequena fica à direita do valor
         let room = if matches!(tile.visual, Visual::Wind(..)) { 56.0 } else { 0.0 };
-        let number_w = c.text(ix - 1.0, y, number, Face::Regular, size, fade(FG), Anchor::LA, Some(iw - room));
+        let number_w = c.text(ix - 1.0, y, number, super::HERO, size, fade(FG), Anchor::LA, Some(iw - room));
         if let Some(unit) = unit {
             let baseline = y + size * 0.98;
             let unit_size = if area.tall { 15.0 } else { 12.0 };

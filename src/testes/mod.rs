@@ -170,6 +170,28 @@ fn draw(kind: &dyn Kind, mode: Mode, cfg: &Value) -> Image {
     c.finish()
 }
 
+/// A que distância (em pontos) de cada borda começa o conteúdo do desenho: (esquerda, direita,
+/// cima, baixo). Conta como conteúdo a borda de uma forma ou de uma letra (um pixel bem diferente
+/// do vizinho do lado de fora), e não um fundo liso ou em degradê até a borda (o céu do Tempo, a
+/// capa da Mídia). Os 4 pt de fora e os cantos arredondados ficam de fora da conta: são do
+/// recorte do cartão.
+fn content_insets(img: &Image, mode: Mode) -> [f32; 4] {
+    const INK: i32 = 70;
+    let differs = |a: (u32, u32), b: (u32, u32)| {
+        let (i, j) = (((a.1 * img.w + a.0) * 4) as usize, ((b.1 * img.w + b.0) * 4) as usize);
+        (0..4).any(|k| (img.px[i + k] as i32 - img.px[j + k] as i32).abs() > INK)
+    };
+    let (w, h) = (img.w, img.h);
+    let (skip, corner) = ((4.0 * S) as u32, (Layout::of(mode).radius * S) as u32);
+    let first = |len: u32, ink: &dyn Fn(u32) -> bool| (skip..len / 2).find(|&d| ink(d)).map_or(f32::MAX, |d| d as f32 / S);
+    [
+        first(w, &|d| (corner..h - corner).any(|y| differs((d, y), (d - 1, y)))),
+        first(w, &|d| (corner..h - corner).any(|y| differs((w - 1 - d, y), (w - d, y)))),
+        first(h, &|d| (corner..w - corner).any(|x| differs((x, d), (x, d - 1)))),
+        first(h, &|d| (corner..w - corner).any(|x| differs((x, h - 1 - d), (x, h - d)))),
+    ]
+}
+
 /// As faixas de tinta de um desenho dentro do círculo de raio `inner` em volta de (cx, cy), só
 /// acima de `max_y` (tudo em pontos, numa imagem na escala `s`): cada faixa é um trecho de
 /// linhas seguidas com algum pixel forte, como (x0, y0, x1, y1), de cima para baixo. No meio de
@@ -209,6 +231,35 @@ fn ink(img: &Image) -> f32 {
 
 /// O esqueleto pulsando só aparece na primeira busca (sem nada para mostrar), e os blocos
 /// ficam dentro do cartão, respeitando a margem de todos os widgets.
+/// Todos os widgets, em todos os tamanhos e estados, deixam a mesma margem entre o conteúdo e a
+/// borda do cartão (`CARD_PAD`, 16 pt; até 12 pt na tinta, pela ponta das letras e o
+/// arredondamento). Antes, cada um tinha a sua: o pé do Sistema pequeno a 10 pt, o anel do
+/// Pomodoro pequeno a 10 pt do alto, a previsão do Claude grande a 4 pt do pé.
+/// Ficam de fora o que é efeito e não conteúdo: a chuva, a neve e as estrelas do céu do Tempo,
+/// a plaquinha do Clawd, o brilho da carga (e o reflexo da carga completa) da Bateria e os pontinhos das páginas do detalhe
+/// do Tempo (como os da tela de início, colados no pé).
+#[test]
+fn content_keeps_the_card_margin() {
+    com();
+    const MIN: f32 = 12.0;
+    let effects = ["chuva", "chovendo", "garoa", "trovoada", "granizo", "neve", "ventania", "madrugada", "rolado", "no limite atingido", "tomada", "carregando", "cheia", "detalhes"];
+    let mut tight = Vec::new();
+    for (name, kind, cfg) in cases() {
+        if name.starts_with("clawd") || effects.iter().any(|e| name.contains(e)) {
+            continue;
+        }
+        for mode in Mode::ALL {
+            let [left, right, top, bottom] = content_insets(&draw(kind.as_ref(), mode, &cfg), mode);
+            if left.min(right).min(top).min(bottom) < MIN {
+                tight.push(format!("{name} {mode:?}: {left} {right} {top} {bottom}"));
+            }
+        }
+    }
+    assert!(tight.is_empty(), "conteúdo perto da borda (esquerda, direita, cima, baixo):
+{}", tight.join("
+"));
+}
+
 #[test]
 fn skeletons_only_while_loading_for_the_first_time_and_inside_the_card() {
     use crate::widgets::CARD_PAD;
@@ -292,7 +343,8 @@ fn label_owner(text: &str) -> &'static str {
 }
 
 /// Os títulos dos cabeçalhos ("GitHub", "Sistema", "Pomodoro", "Spotify"...) têm todos a mesma
-/// letra, na cor do texto (como no macOS); os do alto do cartão ficam todos na mesma altura (lado
+/// letra, na cor do texto (como no macOS), menos o do player da música, na cor do logo dele (o
+/// "Spotify" verde, o "YouTube" vermelho); os do alto do cartão ficam todos na mesma altura (lado
 /// a lado, alinhados).
 #[test]
 fn header_labels_look_the_same_everywhere() {
@@ -312,7 +364,13 @@ fn header_labels_look_the_same_everywhere() {
                 }
                 seen.insert(text.clone());
                 assert!(face == Face::Semibold && size == widgets::LABEL_SIZE, "{name} {mode:?}: {text} em {face:?} {size}");
-                assert_eq!(color, crate::ui::theme::FG, "{name} {mode:?}: {text} fora da cor do texto");
+                let player = match text.as_str() {
+                    "Spotify" => "spotify",
+                    "YouTube" => "youtube",
+                    _ => "",
+                };
+                let expected = if player.is_empty() { crate::ui::theme::FG } else { crate::widgets::media::source_color(player) };
+                assert_eq!(color, expected, "{name} {mode:?}: {text} fora da cor dele");
                 // os que ficam no alto do cartão (o da música fica junto do texto dela)
                 if base < 30.0 && !["Spotify", "YouTube", "Mídia"].contains(&text.as_str()) {
                     let first = *top_base.get_or_insert(base);

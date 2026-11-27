@@ -48,10 +48,10 @@ impl PromptState {
 /// Desenha a pergunta: o título, a mensagem, o campo, as sugestões e os botões.
 pub fn draw_prompt(state: &PromptState, ui: &mut Ui, h: f32) {
     let w = PROMPT_W;
-    ui.text(20.0, 18.0, &state.title, 15.0, FG, Face::Semibold, Anchor::LA, Some(w - 40.0));
+    ui.text(20.0, 18.0, &state.title, 15.0, FG, Face::UiSemibold, Anchor::LA, Some(w - 40.0));
     let mut y = 44.0;
     for line in ui.wrap(&state.message, 12.0, w - 40.0, 2) {
-        ui.text(20.0, y, &line, 12.0, MUTED, Face::Regular, Anchor::LA, None);
+        ui.text(20.0, y, &line, 12.0, MUTED, Face::UiRegular, Anchor::LA, None);
         y += 17.0;
     }
     y += 10.0;
@@ -142,9 +142,9 @@ pub fn draw_welcome(state: &mut WelcomeState, ui: &mut Ui, view: &View) {
         }
     }
     let (title, subtitle) = STEPS[state.step];
-    ui.text(w / 2.0, 56.0, title, 24.0, FG, Face::Semibold, Anchor::MA, None);
+    ui.text(w / 2.0, 56.0, title, 24.0, FG, Face::UiSemibold, Anchor::MA, None);
     for (i, line) in ui.wrap(subtitle, 12.5, w - 2.0 * SIDE - 40.0, 2).iter().enumerate() {
-        ui.text(w / 2.0, 96.0 + 18.0 * i as f32, line, 12.5, MUTED, Face::Regular, Anchor::MA, None);
+        ui.text(w / 2.0, 96.0 + 18.0 * i as f32, line, 12.5, MUTED, Face::UiRegular, Anchor::MA, None);
     }
     let (x, cw) = (SIDE, w - 2.0 * SIDE);
     match state.step {
@@ -171,7 +171,7 @@ pub fn draw_welcome(state: &mut WelcomeState, ui: &mut Ui, view: &View) {
             count => format!("{count} widgets escolhidos"),
         };
         let color = if count == 0 { Rgba::rgb(255, 184, 0) } else { MUTED };
-        ui.text(w / 2.0, BUTTONS_Y + 16.0, &text, 11.5, color, Face::Regular, Anchor::MM, None);
+        ui.text(w / 2.0, BUTTONS_Y + 16.0, &text, 11.5, color, Face::UiRegular, Anchor::MM, None);
     }
 }
 
@@ -219,9 +219,9 @@ fn step_widgets(state: &mut WelcomeState, ui: &mut Ui, x: f32, w: f32, view: &Vi
             ui.image(&thumb, tx + (tile_w - thumb.w as f32 / s) / 2.0, ty + 10.0 + (stage_h - thumb.h as f32 / s) / 2.0);
         }
         let title_y = ty + stage_h + 24.0;
-        ui.text(tx + 14.0, title_y, widgets::title(key), 13.5, FG, Face::Semibold, Anchor::LM, Some(tile_w - 52.0));
+        ui.text(tx + 14.0, title_y, widgets::title(key), 13.5, FG, Face::UiSemibold, Anchor::LM, Some(tile_w - 52.0));
         for (j, line) in ui.wrap(widgets::description(key), 11.0, tile_w - 28.0, lines).iter().enumerate() {
-            ui.text(tx + 14.0, title_y + 20.0 + 15.0 * j as f32, line, 11.0, MUTED, Face::Regular, Anchor::LM, Some(tile_w - 28.0));
+            ui.text(tx + 14.0, title_y + 20.0 + 15.0 * j as f32, line, 11.0, MUTED, Face::UiRegular, Anchor::LM, Some(tile_w - 28.0));
         }
         let (cx, cy) = (tx + tile_w - 22.0, title_y);
         if on {
@@ -245,8 +245,8 @@ fn setting_row(ui: &mut Ui, x: f32, y: f32, w: f32, icon: &str, title: &str, sub
     ui.card(x, y, x + w, y + ROW_H);
     ui.circle(x + 30.0, cy, 16.0, ACCENT.with_a(46));
     ui.icon(x + 30.0, cy, icon, 14.0, ACCENT_HOVER);
-    ui.text(x + 58.0, cy - 9.0, title, 13.0, FG, Face::Semibold, Anchor::LM, None);
-    ui.text(x + 58.0, cy + 10.0, sub, 11.0, MUTED, Face::Regular, Anchor::LM, Some(FIELD_X - 72.0));
+    ui.text(x + 58.0, cy - 9.0, title, 13.0, FG, Face::UiSemibold, Anchor::LM, None);
+    ui.text(x + 58.0, cy + 10.0, sub, 11.0, MUTED, Face::UiRegular, Anchor::LM, Some(FIELD_X - 72.0));
 }
 
 /// Passo 2: cidade do clima, usuário do GitHub e iniciar com o Windows.
@@ -265,7 +265,7 @@ fn step_personal(state: &WelcomeState, ui: &mut Ui, x: f32, w: f32) {
     ui.switch("iniciar", x + w - 16.0 - 40.0, y + (ROW_H - 22.0) / 2.0, state.startup, Action::Toggle("welcome_startup"), Some((x, y, x + w, y + ROW_H)));
     y += ROW_H + ROW_GAP;
     if !state.chosen.get("tempo").copied().unwrap_or(false) {
-        ui.text(x + 4.0, y + 4.0, "O Tempo não foi escolhido; a cidade fica guardada para quando você abrir.", 11.0, FAINT, Face::Regular, Anchor::LA, Some(w));
+        ui.text(x + 4.0, y + 4.0, "O Tempo não foi escolhido; a cidade fica guardada para quando você abrir.", 11.0, FAINT, Face::UiRegular, Anchor::LA, Some(w));
     }
     // por último, para a lista de sugestões ficar por cima das linhas de baixo
     state.city.draw(ui, fx, city_y + 40.0, fw);
@@ -282,9 +282,9 @@ fn step_tips(state: &WelcomeState, ui: &mut Ui, x: f32, w: f32) {
         ui.card(tx, ty, tx + tw, ty + th);
         ui.circle(tx + 32.0, ty + 32.0, 16.0, ACCENT.with_a(46));
         ui.icon(tx + 32.0, ty + 32.0, icon, 15.0, ACCENT_HOVER);
-        ui.text(tx + 60.0, ty + 32.0, title, 13.5, FG, Face::Semibold, Anchor::LM, Some(tw - 76.0));
+        ui.text(tx + 60.0, ty + 32.0, title, 13.5, FG, Face::UiSemibold, Anchor::LM, Some(tw - 76.0));
         for (j, line) in ui.wrap(desc, 11.5, tw - 36.0, 3).iter().enumerate() {
-            ui.text(tx + 18.0, ty + 58.0 + 16.0 * j as f32, line, 11.5, MUTED, Face::Regular, Anchor::LA, None);
+            ui.text(tx + 18.0, ty + 58.0 + 16.0 * j as f32, line, 11.5, MUTED, Face::UiRegular, Anchor::LA, None);
         }
     }
     let chosen: Vec<&str> = widgets::KEYS.iter().copied().filter(|key| state.chosen.get(key).copied().unwrap_or(false)).map(widgets::title).collect();
@@ -292,7 +292,7 @@ fn step_tips(state: &WelcomeState, ui: &mut Ui, x: f32, w: f32) {
         let y = CONTENT_Y + 2.0 * th + gap + 26.0;
         let text = format!("Vão aparecer na área de trabalho: {}.", join_names(&chosen));
         for (j, line) in ui.wrap(&text, 12.0, w, 2).iter().enumerate() {
-            ui.text(x + w / 2.0, y + 17.0 * j as f32, line, 12.0, FG.alpha(0.85), Face::Regular, Anchor::MA, None);
+            ui.text(x + w / 2.0, y + 17.0 * j as f32, line, 12.0, FG.alpha(0.85), Face::UiRegular, Anchor::MA, None);
         }
     }
 }
@@ -321,9 +321,9 @@ mod tests {
         let max_w = tile_w - 28.0;
         let c = crate::gfx::Canvas::new(10, 10, 1.0);
         for key in widgets::KEYS {
-            let lines = c.wrap(widgets::description(key), Face::Regular, 11.0, max_w, n);
+            let lines = c.wrap(widgets::description(key), Face::UiRegular, 11.0, max_w, n);
             let last = lines.last().unwrap();
-            assert!(c.text_width(last, Face::Regular, 11.0) <= max_w && !last.ends_with('…'), "{key}: a descrição passa de {n} linhas e vira \"…\": {last:?}");
+            assert!(c.text_width(last, Face::UiRegular, 11.0) <= max_w && !last.ends_with('…'), "{key}: a descrição passa de {n} linhas e vira \"…\": {last:?}");
         }
     }
 

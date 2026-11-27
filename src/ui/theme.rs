@@ -194,6 +194,8 @@ pub fn icon(name: &str) -> &'static str {
         "dicas" => "\u{e82f}",
         "sair" => "\u{e7e8}",
         "pilha" => "\u{e8a7}",
+        // abrir o player (a música da ilha, com ele fechado)
+        "abrir" => "\u{e8a7}",
         "play" => "\u{e768}",
         "pause" => "\u{e769}",
         "next" => "\u{e893}",

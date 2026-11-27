@@ -179,7 +179,7 @@ impl Tooltip {
         let probe = Canvas::new(1, 1, s);
         let width = lines
             .iter()
-            .map(|(line, bold)| probe.text_width(line, if *bold { Face::Semibold } else { Face::Regular }, if *bold { 11.5 } else { 11.0 }))
+            .map(|(line, bold)| probe.text_width(line, if *bold { Face::UiSemibold } else { Face::UiRegular }, if *bold { 11.5 } else { 11.0 }))
             .fold(0.0f32, f32::max);
         drop(probe);
         let (pad_x, pad_y, line_h) = (10.0, 6.0, 17.0);
@@ -190,7 +190,7 @@ impl Tooltip {
         c.fill_round_rect(0.0, 0.0, w, h, 8.0, Rgba(34, 34, 40, 240));
         c.stroke_round_rect(0.0, 0.0, w, h, 8.0, WHITE.with_a(40), 1.0 / s);
         for (i, (line, bold)) in lines.iter().enumerate() {
-            let (face, size, color) = if *bold { (Face::Semibold, 11.5, FG) } else { (Face::Regular, 11.0, MUTED) };
+            let (face, size, color) = if *bold { (Face::UiSemibold, 11.5, FG) } else { (Face::UiRegular, 11.0, MUTED) };
             c.text(pad_x, pad_y + i as f32 * line_h, line, face, size, color, Anchor::LA, None);
         }
         let img = c.finish();

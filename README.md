@@ -824,5 +824,5 @@ memória.
 
 [MIT](LICENSE): use, modifique e distribua à vontade, inclusive em forks e projetos comerciais,
 mantendo o aviso de copyright. As fontes embutidas no app têm a licença delas, a SIL Open Font
-License: a Inter do texto ([OFL-Inter.txt](res/fonts/OFL-Inter.txt)), a Nunito dos números
-([OFL-Nunito.txt](res/fonts/OFL-Nunito.txt)) e a Outfit ([OFL.txt](res/fonts/OFL.txt)).
+License: a Geist dos widgets ([OFL-Geist.txt](res/fonts/OFL-Geist.txt)) e a Inter das janelas
+do app ([OFL-Inter.txt](res/fonts/OFL-Inter.txt)).
